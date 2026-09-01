@@ -1,0 +1,71 @@
+spring:
+  application:
+    name: skill-management-system
+
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/skill_management?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: ${DB_USERNAME:sms_app}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: SkillManagementHikariPool
+      minimum-idle: 2
+      maximum-pool-size: 10
+      connection-timeout: 30000
+      validation-timeout: 5000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  servlet:
+    multipart:
+      max-file-size: ${UPLOAD_MAX_ARCHIVE_SIZE:50MB}
+      max-request-size: ${UPLOAD_MAX_REQUEST_SIZE:55MB}
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+
+skill-platform:
+  auth:
+    jwt:
+      issuer: ${JWT_ISSUER:skill-management-system}
+      signing-key: ${JWT_SIGNING_KEY}
+      access-ttl: ${JWT_ACCESS_TTL:30m}
+      refresh-ttl: ${JWT_REFRESH_TTL:7d}
+    mock:
+      enabled: ${MOCK_AUTH_ENABLED:true}
+      admin-username: ${MOCK_ADMIN_USERNAME:admin}
+      admin-password: ${MOCK_ADMIN_PASSWORD}
+      admin-display-name: ${MOCK_ADMIN_DISPLAY_NAME:System Administrator}
+  storage:
+    minio:
+      endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
+      access-key: ${MINIO_ACCESS_KEY:minioadmin}
+      secret-key: ${MINIO_SECRET_KEY}
+      bucket: ${MINIO_BUCKET:skill-management}
+  upload:
+    max-expanded-size: ${UPLOAD_MAX_EXPANDED_SIZE:200MB}
+    max-file-count: ${UPLOAD_MAX_FILE_COUNT:2000}
