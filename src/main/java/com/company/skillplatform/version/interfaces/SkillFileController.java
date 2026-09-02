@@ -15,10 +15,10 @@ public class SkillFileController {
     public SkillFileController(SkillFileService files) { this.files = files; }
     @GetMapping("/{versionId}/files") public List<SkillFileService.FileView> files(@PathVariable Long versionId) { return files.files(versionId); }
     @GetMapping("/{versionId}/files/content") public String content(@PathVariable Long versionId,@RequestParam String path){return files.content(versionId,path);}
-    @PutMapping("/{versionId}/files/content") public List<SkillFileService.FileView> save(@PathVariable Long versionId,@Valid @RequestBody ContentRequest request,Authentication auth){return files.saveContent(versionId,request.path(),request.content(),(Long)auth.getPrincipal());}
-    @DeleteMapping("/{versionId}/files") public List<SkillFileService.FileView> delete(@PathVariable Long versionId,@RequestParam String path,Authentication auth){return files.deleteContent(versionId,path,(Long)auth.getPrincipal());}
-    @PostMapping(value="/{versionId}/files:upload",consumes="multipart/form-data") public List<SkillFileService.FileView> upload(@PathVariable Long versionId,@RequestParam String path,@RequestPart MultipartFile file,Authentication auth){return files.uploadResource(versionId,path,file,(Long)auth.getPrincipal());}
-    @PostMapping("/{versionId}/standard-config:reset") public List<SkillFileService.FileView> reset(@PathVariable Long versionId,Authentication auth){return files.resetStandardConfig(versionId,(Long)auth.getPrincipal());}
+    @PutMapping("/{versionId}/files/content") public List<SkillFileService.FileView> save(@PathVariable Long versionId,@Valid @RequestBody ContentRequest request,Authentication auth){return files.saveContent(versionId,request.path(),request.content(),request.versionNo(),(Long)auth.getPrincipal());}
+    @DeleteMapping("/{versionId}/files") public List<SkillFileService.FileView> delete(@PathVariable Long versionId,@RequestParam String path,@RequestParam int versionNo,Authentication auth){return files.deleteContent(versionId,path,versionNo,(Long)auth.getPrincipal());}
+    @PostMapping(value="/{versionId}/files:upload",consumes="multipart/form-data") public List<SkillFileService.FileView> upload(@PathVariable Long versionId,@RequestParam String path,@RequestParam int versionNo,@RequestPart MultipartFile file,Authentication auth){return files.uploadResource(versionId,path,file,versionNo,(Long)auth.getPrincipal());}
+    @PostMapping("/{versionId}/standard-config:reset") public List<SkillFileService.FileView> reset(@PathVariable Long versionId,@RequestParam int versionNo,Authentication auth){return files.resetStandardConfig(versionId,versionNo,(Long)auth.getPrincipal());}
     @PostMapping("/{versionId}:validate") public List<String> validate(@PathVariable Long versionId){return files.validate(versionId);}
-    public record ContentRequest(@NotBlank String path,@NotBlank String content){}
+    public record ContentRequest(@NotBlank String path,@NotBlank String content,int versionNo){}
 }

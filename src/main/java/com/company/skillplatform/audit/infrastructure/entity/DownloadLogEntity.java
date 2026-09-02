@@ -1,0 +1,3 @@
+package com.company.skillplatform.audit.infrastructure.entity;
+import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;import jakarta.persistence.*;
+@Entity@Table(name="download_log")public class DownloadLogEntity extends BaseJpaEntity{@ManyToOne(fetch=FetchType.LAZY,optional=false)@JoinColumn(name="user_id")private IamUserEntity user;@Column(name="artifact_id")private Long artifactId;@Column(name="bundle_id")private Long bundleId;@Column(name="object_key",nullable=false,length=512)private String objectKey;protected DownloadLogEntity(){}public DownloadLogEntity(IamUserEntity u,Long a,Long b,String key){user=u;artifactId=a;bundleId=b;objectKey=key;}}

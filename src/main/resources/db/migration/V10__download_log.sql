@@ -1,0 +1,1 @@
+CREATE TABLE download_log (id bigint NOT NULL AUTO_INCREMENT, user_id bigint NOT NULL, artifact_id bigint NULL, bundle_id bigint NULL, object_key varchar(512) NOT NULL, time_created datetime(3) NOT NULL, time_updated datetime(3) NOT NULL, PRIMARY KEY(id), CONSTRAINT fk_download_user FOREIGN KEY(user_id) REFERENCES iam_user(id));

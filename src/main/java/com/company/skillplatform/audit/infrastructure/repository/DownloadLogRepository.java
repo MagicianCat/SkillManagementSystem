@@ -1,0 +1,1 @@
+package com.company.skillplatform.audit.infrastructure.repository;import com.company.skillplatform.audit.infrastructure.entity.DownloadLogEntity;import org.springframework.data.jpa.repository.JpaRepository;public interface DownloadLogRepository extends JpaRepository<DownloadLogEntity,Long>{}

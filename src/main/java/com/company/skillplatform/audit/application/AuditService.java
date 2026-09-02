@@ -5,6 +5,7 @@ import com.company.skillplatform.audit.infrastructure.repository.AuditLogReposit
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import java.util.Map;
 import org.springframework.stereotype.Service;
+import org.springframework.security.access.prepost.PreAuthorize;import java.util.List;
 
 @Service
 public class AuditService {
@@ -25,4 +26,5 @@ public class AuditService {
         if (requestId == null || requestId.isBlank()) return "unknown";
         return requestId.substring(0, Math.min(requestId.length(), 64));
     }
+    @PreAuthorize("hasAuthority('admin:audit')") public List<AuditLogEntity> list(String targetType,Long targetId){return auditLogs.findByTargetTypeAndTargetIdOrderByTimeCreatedDesc(targetType,targetId);}
 }
