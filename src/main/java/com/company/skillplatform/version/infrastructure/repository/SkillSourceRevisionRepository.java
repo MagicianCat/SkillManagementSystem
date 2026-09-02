@@ -1,0 +1,1 @@
+package com.company.skillplatform.version.infrastructure.repository;import com.company.skillplatform.version.infrastructure.entity.SkillSourceRevisionEntity;import org.springframework.data.jpa.repository.JpaRepository;public interface SkillSourceRevisionRepository extends JpaRepository<SkillSourceRevisionEntity,Long>{}

@@ -1,0 +1,1 @@
+package com.company.skillplatform.workflow.infrastructure.repository;import com.company.skillplatform.workflow.infrastructure.entity.SkillStatusHistoryEntity;import org.springframework.data.jpa.repository.JpaRepository;public interface SkillStatusHistoryRepository extends JpaRepository<SkillStatusHistoryEntity,Long>{}

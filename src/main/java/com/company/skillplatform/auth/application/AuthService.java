@@ -57,14 +57,15 @@ public class AuthService {
     public TokenResult login(String username, String password, String provider, String clientInfo) {
         IdentityProvider identityProvider = providers.get(provider.toUpperCase(Locale.ROOT));
         if (identityProvider == null) throw new BusinessException("IDENTITY_PROVIDER_UNSUPPORTED", "Unsupported identity provider", HttpStatus.BAD_REQUEST);
-        IamUserEntity user = identityProvider.authenticate(username, password);
+        IdentityProvider.AuthenticationResult result = identityProvider.authenticate(username, password);
+        IamUserEntity user = activeUser(result.userId());
         user.recordLogin(clock.instant());
         return issue(user, clientInfo);
     }
 
     @Transactional
     public TokenResult refresh(String rawToken, String clientInfo) {
-        AuthRefreshTokenEntity stored = refreshTokens.findByTokenHash(sha256(rawToken))
+        AuthRefreshTokenEntity stored = refreshTokens.findByTokenHashForUpdate(sha256(rawToken))
                 .orElseThrow(this::invalidRefreshToken);
         Instant now = clock.instant();
         if (!stored.isUsableAt(now) || stored.getUser().getStatus() != UserStatus.ACTIVE) throw invalidRefreshToken();
@@ -80,20 +81,26 @@ public class AuthService {
     }
 
     @Transactional(readOnly = true)
-    public AuthenticatedUser currentUser(Long userId) { return loadUser(userId); }
+    public AuthenticatedUser currentUser(Long userId) { return loadActiveUser(userId); }
 
     private TokenResult issue(IamUserEntity user, String clientInfo) {
-        AuthenticatedUser principal = loadUser(user.getId());
+        AuthenticatedUser principal = loadActiveUser(user.getId());
         String refreshToken = newRefreshToken();
         refreshTokens.save(new AuthRefreshTokenEntity(user, sha256(refreshToken), jwt.refreshExpiresAt(), trim(clientInfo)));
         return new TokenResult(jwt.createAccessToken(principal), refreshToken, jwt.accessExpiresInSeconds(), principal);
     }
-    private AuthenticatedUser loadUser(Long userId) {
-        IamUserEntity user = users.findById(userId)
-                .orElseThrow(() -> new BusinessException("USER_NOT_FOUND", "User not found", HttpStatus.NOT_FOUND));
+    private AuthenticatedUser loadActiveUser(Long userId) {
+        IamUserEntity user = activeUser(userId);
         return new AuthenticatedUser(user.getId(), user.getUsername(), user.getDisplayName(),
                 List.copyOf(userRoles.findRoleKeysByUserId(userId)),
                 List.copyOf(rolePermissions.findPermissionKeysByUserId(userId)));
+    }
+    private IamUserEntity activeUser(Long userId) {
+        IamUserEntity user = users.findById(userId)
+                .orElseThrow(() -> new BusinessException("AUTHENTICATION_INVALID", "Authentication is no longer valid", HttpStatus.UNAUTHORIZED));
+        if (user.getStatus() != UserStatus.ACTIVE)
+            throw new BusinessException("AUTHENTICATION_INVALID", "Authentication is no longer valid", HttpStatus.UNAUTHORIZED);
+        return user;
     }
     private String newRefreshToken() {
         byte[] bytes = new byte[32]; random.nextBytes(bytes);

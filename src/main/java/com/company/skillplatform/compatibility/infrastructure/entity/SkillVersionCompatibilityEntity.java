@@ -1,0 +1,14 @@
+package com.company.skillplatform.compatibility.infrastructure.entity;
+import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;import com.company.skillplatform.compatibility.domain.*;import com.company.skillplatform.version.infrastructure.entity.SkillVersionEntity;import jakarta.persistence.*;import java.time.Instant;
+@Entity@Table(name="skill_version_compatibility")public class SkillVersionCompatibilityEntity extends BaseJpaEntity{
+ @ManyToOne(fetch=FetchType.LAZY,optional=false)@JoinColumn(name="skill_version_id")private SkillVersionEntity version;@ManyToOne(fetch=FetchType.LAZY,optional=false)@JoinColumn(name="platform_id")private PlatformEntity platform;
+ @ManyToOne(fetch=FetchType.LAZY)@JoinColumn(name="agent_id")private PlatformAgentEntity agent;@Enumerated(EnumType.STRING)@Column(name="os_type",nullable=false,length=32)private OsType osType;
+ @Column(nullable=false)private boolean required;@Enumerated(EnumType.STRING)@Column(name="declared_status",nullable=false,length=32)private CompatibilityStatus declaredStatus;
+ @Enumerated(EnumType.STRING)@Column(name="validated_status",length=32)private CompatibilityStatus validatedStatus;@Column(name="min_platform_version",length=64)private String minPlatformVersion;
+ @Column(name="max_platform_version",length=64)private String maxPlatformVersion;@Column(name="overlay_path",length=512)private String overlayPath;@Column(name="inherited_default",nullable=false)private boolean inheritedDefault;
+ @Lob@Column(name="validation_message",columnDefinition="text")private String validationMessage;@Column(name="validated_at")private Instant validatedAt;
+ @Column(name="agent_scope_id",insertable=false,updatable=false)private Long agentScopeId;protected SkillVersionCompatibilityEntity(){}
+ public SkillVersionCompatibilityEntity(SkillVersionEntity v,PlatformEntity p,PlatformAgentEntity a,OsType os,boolean req,CompatibilityStatus declared,String min,String max,String overlay){version=v;platform=p;agent=a;osType=os;required=req;declaredStatus=declared;minPlatformVersion=min;maxPlatformVersion=max;overlayPath=overlay;inheritedDefault=false;}
+ public void validate(Instant now){validatedStatus=declaredStatus==CompatibilityStatus.UNSUPPORTED?CompatibilityStatus.VALIDATION_FAILED:CompatibilityStatus.COMPATIBLE;validationMessage=validatedStatus.name();validatedAt=now;}
+ public PlatformEntity getPlatform(){return platform;}public PlatformAgentEntity getAgent(){return agent;}public OsType getOsType(){return osType;}public boolean isRequired(){return required;}public CompatibilityStatus getDeclaredStatus(){return declaredStatus;}public CompatibilityStatus getValidatedStatus(){return validatedStatus;}public String getMinPlatformVersion(){return minPlatformVersion;}public String getMaxPlatformVersion(){return maxPlatformVersion;}public String getOverlayPath(){return overlayPath;}
+}

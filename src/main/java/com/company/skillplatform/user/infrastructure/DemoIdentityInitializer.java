@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
@@ -23,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Component
 @EnableConfigurationProperties(MockAdminProperties.class)
+@ConditionalOnProperty(prefix = "skill-platform.auth.mock", name = "enabled", havingValue = "true")
 public class DemoIdentityInitializer implements ApplicationRunner {
     static final Map<String, String> PERMISSIONS = Map.ofEntries(
             Map.entry("skill:browse", "Browse skills"), Map.entry("skill:download", "Download skills"),
@@ -46,7 +48,6 @@ public class DemoIdentityInitializer implements ApplicationRunner {
     }
     @Override @Transactional
     public void run(ApplicationArguments args) {
-        if (!properties.enabled()) return;
         if (properties.adminPassword() == null || properties.adminPassword().isBlank())
             throw new IllegalStateException("MOCK_ADMIN_PASSWORD must be configured when Mock authentication is enabled");
         Map<String, IamPermissionEntity> permissionMap = new LinkedHashMap<>();

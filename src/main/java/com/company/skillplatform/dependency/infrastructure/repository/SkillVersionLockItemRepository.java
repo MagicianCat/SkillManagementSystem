@@ -1,0 +1,1 @@
+package com.company.skillplatform.dependency.infrastructure.repository;import com.company.skillplatform.dependency.infrastructure.entity.SkillVersionLockItemEntity;import org.springframework.data.jpa.repository.JpaRepository;public interface SkillVersionLockItemRepository extends JpaRepository<SkillVersionLockItemEntity,Long>{}

@@ -24,7 +24,8 @@ class MockIdentityProviderTest {
         when(users.findByUsername("user")).thenReturn(Optional.of(user));
         when(encoder.matches("password", "hash")).thenReturn(true);
         assertThat(provider.providerKey()).isEqualTo("MOCK");
-        assertThat(provider.authenticate("user", "password")).isSameAs(user);
+        org.springframework.test.util.ReflectionTestUtils.setField(user, "id", 7L);
+        assertThat(provider.authenticate("user", "password").userId()).isEqualTo(7L);
     }
 
     @Test void rejectsMissingWrongProviderInactiveMissingPasswordAndMismatch() {

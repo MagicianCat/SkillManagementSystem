@@ -1,0 +1,8 @@
+package com.company.skillplatform.dependency.interfaces;import com.company.skillplatform.dependency.application.DependencyService;import jakarta.validation.Valid;import jakarta.validation.constraints.*;import java.util.List;import org.springframework.security.core.Authentication;import org.springframework.web.bind.annotation.*;
+@RestController@RequestMapping("/api/v1/skill-versions/{versionId}")public class DependencyController{private final DependencyService service;public DependencyController(DependencyService s){service=s;}
+ @GetMapping("/dependencies")List<DependencyService.DependencyView> list(@PathVariable Long versionId){return service.list(versionId);}
+ @PutMapping("/dependencies")List<DependencyService.DependencyView> replace(@PathVariable Long versionId,@Valid@RequestBody ReplaceRequest r,Authentication a){return service.replace(versionId,r.versionNo,r.dependencies.stream().map(d->new DependencyService.DependencyCommand(d.skillKey,d.versionConstraint,d.dependencyType,d.required)).toList(),(Long)a.getPrincipal());}
+ @PostMapping("/dependencies:resolve")DependencyService.ResolveView resolve(@PathVariable Long versionId){return service.resolve(versionId);}
+ @GetMapping("/dependents")List<DependencyService.DependentView> dependents(@PathVariable Long versionId){return service.dependents(versionId);}
+ public record ReplaceRequest(@NotNull Integer versionNo,@NotNull List<@Valid DependencyRequest>dependencies){}public record DependencyRequest(@NotBlank String skillKey,@NotBlank String versionConstraint,com.company.skillplatform.dependency.domain.DependencyType dependencyType,boolean required){}
+}

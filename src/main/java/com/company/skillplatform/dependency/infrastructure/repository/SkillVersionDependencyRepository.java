@@ -1,0 +1,2 @@
+package com.company.skillplatform.dependency.infrastructure.repository;import com.company.skillplatform.dependency.infrastructure.entity.SkillVersionDependencyEntity;import java.util.*;import org.springframework.data.jpa.repository.JpaRepository;
+public interface SkillVersionDependencyRepository extends JpaRepository<SkillVersionDependencyEntity,Long>{List<SkillVersionDependencyEntity> findByVersionIdOrderBySortOrder(Long id);void deleteByVersionId(Long id);List<SkillVersionDependencyEntity> findByDependencySkillId(Long id);}

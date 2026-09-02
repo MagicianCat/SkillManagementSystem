@@ -1,0 +1,1 @@
+package com.company.skillplatform.compatibility.infrastructure.repository;import com.company.skillplatform.compatibility.infrastructure.entity.PlatformEntity;import java.util.Optional;import org.springframework.data.jpa.repository.JpaRepository;public interface PlatformRepository extends JpaRepository<PlatformEntity,Long>{Optional<PlatformEntity> findByPlatformKey(String key);}

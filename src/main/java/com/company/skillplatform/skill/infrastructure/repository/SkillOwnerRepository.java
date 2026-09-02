@@ -1,0 +1,2 @@
+package com.company.skillplatform.skill.infrastructure.repository;import com.company.skillplatform.skill.infrastructure.entity.SkillOwnerEntity;import java.util.*;import org.springframework.data.jpa.repository.*;
+public interface SkillOwnerRepository extends JpaRepository<SkillOwnerEntity,Long>{@Query("select o from SkillOwnerEntity o join fetch o.user where o.skill.id=:skillId")List<SkillOwnerEntity> findBySkillId(Long skillId);boolean existsBySkillIdAndUserId(Long skillId,Long userId);}

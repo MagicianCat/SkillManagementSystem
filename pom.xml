@@ -161,6 +161,11 @@
                                 <include>com/company/skillplatform/user/application/**</include>
                                 <include>com/company/skillplatform/auth/infrastructure/JwtTokenService*</include>
                                 <include>com/company/skillplatform/auth/infrastructure/MockIdentityProvider*</include>
+                                <include>com/company/skillplatform/skill/application/**</include>
+                                <include>com/company/skillplatform/version/domain/**</include>
+                                <include>com/company/skillplatform/dependency/application/**</include>
+                                <include>com/company/skillplatform/compatibility/application/**</include>
+                                <include>com/company/skillplatform/workflow/application/**</include>
                             </includes>
                             <rules>
                                 <rule>

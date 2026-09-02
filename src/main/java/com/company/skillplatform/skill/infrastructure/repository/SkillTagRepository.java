@@ -1,0 +1,1 @@
+package com.company.skillplatform.skill.infrastructure.repository;import com.company.skillplatform.skill.infrastructure.entity.SkillTagEntity;import java.util.*;import org.springframework.data.jpa.repository.JpaRepository;public interface SkillTagRepository extends JpaRepository<SkillTagEntity,Long>{List<SkillTagEntity> findAllByIdIn(Collection<Long> ids);}

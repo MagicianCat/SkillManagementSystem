@@ -55,7 +55,7 @@ class AuthServiceTest {
     }
 
     @Test void loginIssuesAccessAndRefreshTokensAndRecordsLogin() {
-        when(provider.authenticate("admin", "secret")).thenReturn(user);
+        when(provider.authenticate("admin", "secret")).thenReturn(new IdentityProvider.AuthenticationResult(1L));
         var result = service.login("admin", "secret", "mock", "x".repeat(600));
         assertThat(result.accessToken()).isEqualTo("access");
         assertThat(result.expiresIn()).isEqualTo(1800);
@@ -71,21 +71,21 @@ class AuthServiceTest {
 
     @Test void refreshRotatesUsableToken() {
         AuthRefreshTokenEntity stored = new AuthRefreshTokenEntity(user, AuthService.sha256("refresh"), now.plusSeconds(30), null);
-        when(tokens.findByTokenHash(AuthService.sha256("refresh"))).thenReturn(Optional.of(stored));
+        when(tokens.findByTokenHashForUpdate(AuthService.sha256("refresh"))).thenReturn(Optional.of(stored));
         var result = service.refresh("refresh", null);
         assertThat(result.accessToken()).isEqualTo("access");
         assertThat(stored.getRevokedAt()).isEqualTo(now);
     }
 
     @Test void refreshRejectsMissingExpiredAndDisabledTokens() {
-        when(tokens.findByTokenHash(any())).thenReturn(Optional.empty());
+        when(tokens.findByTokenHashForUpdate(any())).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.refresh("missing", null)).isInstanceOf(BusinessException.class);
         AuthRefreshTokenEntity expired = new AuthRefreshTokenEntity(user, "x", now.minusSeconds(1), null);
-        when(tokens.findByTokenHash(any())).thenReturn(Optional.of(expired));
+        when(tokens.findByTokenHashForUpdate(any())).thenReturn(Optional.of(expired));
         assertThatThrownBy(() -> service.refresh("expired", null)).isInstanceOf(BusinessException.class);
         user.changeStatus(com.company.skillplatform.user.domain.UserStatus.DISABLED);
         AuthRefreshTokenEntity active = new AuthRefreshTokenEntity(user, "x", now.plusSeconds(30), null);
-        when(tokens.findByTokenHash(any())).thenReturn(Optional.of(active));
+        when(tokens.findByTokenHashForUpdate(any())).thenReturn(Optional.of(active));
         assertThatThrownBy(() -> service.refresh("disabled", null)).isInstanceOf(BusinessException.class);
     }
 

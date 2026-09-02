@@ -13,4 +13,7 @@ public interface IamRolePermissionRepository extends JpaRepository<IamRolePermis
 
     @Query("select distinct rp.permission.permissionKey from IamRolePermissionEntity rp join IamUserRoleEntity ur on ur.role.id = rp.role.id where ur.user.id = :userId and ur.role.status = com.company.skillplatform.user.domain.RoleStatus.ACTIVE")
     List<String> findPermissionKeysByUserId(Long userId);
+
+    @Query("select rp.permission.permissionKey from IamRolePermissionEntity rp where rp.role.id = :roleId")
+    List<String> findPermissionKeysByRoleId(Long roleId);
 }
