@@ -40,6 +40,7 @@ public class SkillVersionEntity extends BaseJpaEntity {
         this.manifest=Map.of("storageStatus","PENDING");this.createdBy=actor;this.updatedBy=actor;
     }
     public void markUploaded(String changeLog,IamUserEntity actor){require(LifecycleStatus.DRAFT);sourceRevision++;changeType=ChangeType.ZIP_REUPLOAD;this.changeLog=changeLog;updatedBy=actor;}
+    public void markSourceChanged(String changeLog,IamUserEntity actor){require(LifecycleStatus.DRAFT);sourceRevision++;this.changeLog=changeLog;updatedBy=actor;}
     public void submit(String candidate,IamUserEntity actor){require(LifecycleStatus.DRAFT);candidateVersion=candidate;lifecycleStatus=LifecycleStatus.REVIEWING;updatedBy=actor;}
     public void approve(IamUserEntity actor){require(LifecycleStatus.REVIEWING);lifecycleStatus=LifecycleStatus.APPROVED;updatedBy=actor;}
     public void reject(IamUserEntity actor){require(LifecycleStatus.REVIEWING);lifecycleStatus=LifecycleStatus.DRAFT;updatedBy=actor;}
@@ -53,5 +54,6 @@ public class SkillVersionEntity extends BaseJpaEntity {
     public SkillEntity getSkill(){return skill;} public SkillVersionEntity getBaseVersion(){return baseVersion;} public ChangeType getChangeType(){return changeType;}
     public String getCandidateVersion(){return candidateVersion;} public String getVersion(){return version;} public LifecycleStatus getLifecycleStatus(){return lifecycleStatus;}
     public int getSourceRevision(){return sourceRevision;} public int getVersionNo(){return versionNo;} public SkillVersionEntity getReplacementVersion(){return replacementVersion;}
-    public String getSourceSha256(){return sourceSha256;} public long getSourceSizeBytes(){return sourceSizeBytes;}
+    public String getSourceSha256(){return sourceSha256;} public long getSourceSizeBytes(){return sourceSizeBytes;} public String getSourceObjectKey(){return sourceObjectKey;}
+    public void storeSource(String objectKey,String sha256,long size,Map<String,Object> manifest){this.sourceObjectKey=objectKey;this.sourceSha256=sha256;this.sourceSizeBytes=size;this.manifest=manifest;}
 }

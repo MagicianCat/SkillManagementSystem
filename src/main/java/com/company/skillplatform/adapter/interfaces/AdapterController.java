@@ -1,0 +1,3 @@
+package com.company.skillplatform.adapter.interfaces;
+import com.company.skillplatform.adapter.application.AdapterRegistry;import java.util.List;import org.springframework.security.access.prepost.PreAuthorize;import org.springframework.web.bind.annotation.*;
+@RestController @RequestMapping("/api/v1/adapters") public class AdapterController {private final AdapterRegistry registry;public AdapterController(AdapterRegistry registry){this.registry=registry;}@GetMapping @PreAuthorize("hasAuthority('skill:browse')") public List<AdapterRegistry.AdapterDescriptor> list(){return registry.descriptors();}}
