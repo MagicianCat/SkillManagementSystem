@@ -20,5 +20,6 @@ public class SkillFileController {
     @PostMapping(value="/{versionId}/files:upload",consumes="multipart/form-data") public List<SkillFileService.FileView> upload(@PathVariable Long versionId,@RequestParam String path,@RequestParam int versionNo,@RequestPart MultipartFile file,Authentication auth){return files.uploadResource(versionId,path,file,versionNo,(Long)auth.getPrincipal());}
     @PostMapping("/{versionId}/standard-config:reset") public List<SkillFileService.FileView> reset(@PathVariable Long versionId,@RequestParam int versionNo,Authentication auth){return files.resetStandardConfig(versionId,versionNo,(Long)auth.getPrincipal());}
     @PostMapping("/{versionId}:validate") public List<String> validate(@PathVariable Long versionId){return files.validate(versionId);}
+    @GetMapping("/{versionId}/diff") public List<SkillFileService.FileDiffView> diff(@PathVariable Long versionId){return files.diff(versionId);}
     public record ContentRequest(@NotBlank String path,@NotBlank String content,int versionNo){}
 }

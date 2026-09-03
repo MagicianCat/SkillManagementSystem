@@ -10,6 +10,7 @@ public interface IamRolePermissionRepository extends JpaRepository<IamRolePermis
     @Modifying
     void deleteAllByRoleId(Long roleId);
     boolean existsByRoleIdAndPermissionId(Long roleId, Long permissionId);
+    List<IamRolePermissionEntity> findAllByRoleId(Long roleId);
 
     @Query("select distinct rp.permission.permissionKey from IamRolePermissionEntity rp join IamUserRoleEntity ur on ur.role.id = rp.role.id where ur.user.id = :userId and ur.role.status = com.company.skillplatform.user.domain.RoleStatus.ACTIVE")
     List<String> findPermissionKeysByUserId(Long userId);

@@ -13,4 +13,5 @@ public class SkillCategoryEntity extends BaseJpaEntity {
     @Version @Column(name="version_no",nullable=false) private int versionNo;
     protected SkillCategoryEntity() {}
     public String getCategoryKey(){return categoryKey;} public String getCategoryName(){return categoryName;}
+    public SkillCategoryEntity getParent(){return parent;} public int getSortOrder(){return sortOrder;} public String getStatus(){return status;}
 }

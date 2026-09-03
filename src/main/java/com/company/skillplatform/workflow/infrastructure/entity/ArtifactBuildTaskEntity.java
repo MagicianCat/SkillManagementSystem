@@ -10,4 +10,5 @@ import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;impo
  public void complete(String objectKey,String sha256,long size,String contentType,Instant now){status="SUCCEEDED";artifactObjectKey=objectKey;artifactSha256=sha256;artifactSizeBytes=size;artifactContentType=contentType;finishedAt=now;}
  public void fail(String code,String message,Instant now){status="FAILED";errorCode=code;errorMessage=message;finishedAt=now;}
  public String getStatus(){return status;}public String getIdempotencyKey(){return idempotencyKey;}public SkillVersionEntity getVersion(){return version;}public String getArtifactObjectKey(){return artifactObjectKey;}public String getArtifactSha256(){return artifactSha256;}public Long getArtifactSizeBytes(){return artifactSizeBytes;}public String getArtifactContentType(){return artifactContentType;}
+ public Instant getStartedAt(){return startedAt;}public Instant getFinishedAt(){return finishedAt;}public String getErrorCode(){return errorCode;}public String getErrorMessage(){return errorMessage;}
 }

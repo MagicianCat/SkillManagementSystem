@@ -43,6 +43,14 @@ public class IdentityAdminService {
     }
     @Transactional(readOnly = true) public Page<IamUserEntity> users(Pageable pageable) { return users.findAll(pageable); }
     @Transactional(readOnly = true) public List<IamRoleEntity> roles() { return roles.findAll(); }
+    @Transactional(readOnly = true) public List<IamPermissionEntity> permissions() { return permissions.findAll(); }
+    @Transactional(readOnly = true) public List<Long> userRoleIds(Long userId) {
+        user(userId); return userRoles.findAllByUserId(userId).stream().map(link -> link.getRole().getId()).toList();
+    }
+    @Transactional(readOnly = true) public List<Long> rolePermissionIds(Long roleId) {
+        if (!roles.existsById(roleId)) throw notFound("ROLE_NOT_FOUND", "Role not found");
+        return rolePermissions.findAllByRoleId(roleId).stream().map(link -> link.getPermission().getId()).toList();
+    }
     @Transactional
     public IamUserEntity createUser(String username, String password, String displayName, String email,
                                     Long operatorId, String requestId) {

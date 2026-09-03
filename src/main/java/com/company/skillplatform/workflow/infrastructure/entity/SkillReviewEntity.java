@@ -10,4 +10,5 @@ import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;impo
  public void approve(IamUserEntity actor,String comment,Instant now){status=ReviewStatus.APPROVED;reviewer=actor;reviewComment=comment;reviewedAt=now;}
  public void reject(IamUserEntity actor,String comment,Instant now){status=ReviewStatus.REJECTED;reviewer=actor;reviewComment=comment;reviewedAt=now;}
  public SkillVersionEntity getVersion(){return version;}public int getReviewNo(){return reviewNo;}public ReviewStatus getStatus(){return status;}public String getSubmitComment(){return submitComment;}public String getReviewComment(){return reviewComment;}
+ public IamUserEntity getSubmitter(){return submitter;}public IamUserEntity getReviewer(){return reviewer;}public Instant getSubmittedAt(){return submittedAt;}public Instant getReviewedAt(){return reviewedAt;}
 }

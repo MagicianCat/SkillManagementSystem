@@ -26,6 +26,8 @@ public class SkillEntity extends BaseJpaEntity {
     public void setActiveDraftVersion(SkillVersionEntity value,IamUserEntity actor){this.activeDraftVersion=value;this.updatedBy=actor;}
     public void publish(SkillVersionEntity value,IamUserEntity actor){this.latestPublishedVersion=value;this.activeDraftVersion=null;this.updatedBy=actor;}
     public void clearDraft(IamUserEntity actor){this.activeDraftVersion=null;this.updatedBy=actor;}
+    public void archive(IamUserEntity actor){this.status=SkillStatus.ARCHIVED;this.updatedBy=actor;}
+    public void unarchive(IamUserEntity actor){this.status=SkillStatus.ACTIVE;this.updatedBy=actor;}
     public String getSkillKey(){return skillKey;} public String getDisplayName(){return displayName;} public String getDescription(){return description;}
     public SkillStatus getStatus(){return status;} public SkillVersionEntity getLatestPublishedVersion(){return latestPublishedVersion;}
     public SkillVersionEntity getActiveDraftVersion(){return activeDraftVersion;} public int getVersionNo(){return versionNo;} public SkillCategoryEntity getCategory(){return category;}

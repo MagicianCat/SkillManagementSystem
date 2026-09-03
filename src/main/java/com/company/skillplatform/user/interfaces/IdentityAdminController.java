@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import com.company.skillplatform.user.domain.UserStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
+import com.company.skillplatform.user.infrastructure.entity.IamPermissionEntity;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -43,6 +44,9 @@ public class IdentityAdminController {
                 (Long) auth.getPrincipal(), servletRequest.getRequestId()));
     }
     @GetMapping("/roles") List<RoleView> roles() { return service.roles().stream().map(RoleView::from).toList(); }
+    @GetMapping("/permissions") List<PermissionView> permissions() { return service.permissions().stream().map(PermissionView::from).toList(); }
+    @GetMapping("/users/{id}/roles") IdList userRoles(@PathVariable Long id) { return new IdList(service.userRoleIds(id)); }
+    @GetMapping("/roles/{id}/permissions") IdList rolePermissions(@PathVariable Long id) { return new IdList(service.rolePermissionIds(id)); }
     @PostMapping("/roles") RoleView createRole(@Valid @RequestBody CreateRole request,
                                                 Authentication auth, HttpServletRequest servletRequest) {
         return RoleView.from(service.createRole(request.roleKey(), request.roleName(), request.description(),
@@ -66,4 +70,8 @@ public class IdentityAdminController {
     public record RoleView(Long id, String roleKey, String roleName, String description, int versionNo) {
         static RoleView from(IamRoleEntity e) { return new RoleView(e.getId(), e.getRoleKey(), e.getRoleName(), e.getDescription(), e.getVersionNo()); }
     }
+    public record PermissionView(Long id, String permissionKey, String permissionName, String description) {
+        static PermissionView from(IamPermissionEntity e) { return new PermissionView(e.getId(), e.getPermissionKey(), e.getPermissionName(), e.getDescription()); }
+    }
+    public record IdList(List<Long> ids) {}
 }

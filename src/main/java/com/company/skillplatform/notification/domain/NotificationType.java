@@ -1,0 +1,12 @@
+package com.company.skillplatform.notification.domain;
+
+public enum NotificationType {
+    REVIEW_SUBMITTED,
+    REVIEW_APPROVED,
+    REVIEW_REJECTED,
+    PUBLISH_SUCCEEDED,
+    PUBLISH_FAILED,
+    SKILL_DEPRECATED,
+    SKILL_OFFLINE,
+    SKILL_VERSION_UPDATED
+}
