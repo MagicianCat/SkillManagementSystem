@@ -26,6 +26,10 @@ import org.springframework.transaction.annotation.Transactional;
 @EnableConfigurationProperties(MockAdminProperties.class)
 @ConditionalOnProperty(prefix = "skill-platform.auth.mock", name = "enabled", havingValue = "true")
 public class DemoIdentityInitializer implements ApplicationRunner {
+    static final String TEST_USER = "test-user";
+    static final String TEST_MAINTAINER = "test-maintainer";
+    static final String TEST_ADMIN = "test-admin";
+    static final String TEST_PASSWORD = "Test@123456";
     static final Map<String, String> PERMISSIONS = Map.ofEntries(
             Map.entry("skill:browse", "Browse skills"), Map.entry("skill:download", "Download skills"),
             Map.entry("skill:upload", "Upload skills"), Map.entry("skill:edit", "Edit skills"),
@@ -69,6 +73,23 @@ public class DemoIdentityInitializer implements ApplicationRunner {
                     .map(permission -> new IamRolePermissionEntity(role, permission, admin)).toList();
             if (!missing.isEmpty()) rolePermissions.saveAll(missing);
         });
+        IamUserEntity maintainer = ensureTestUser(TEST_MAINTAINER, "Skill Maintainer");
+        IamUserEntity consumer = ensureTestUser(TEST_USER, "Test User");
+        IamUserEntity testAdmin = ensureTestUser(TEST_ADMIN, "Test Administrator");
+        assignRole(maintainer, roleMap.get("MAINTAINER"), admin);
+        assignRole(consumer, roleMap.get("CONSUMER"), admin);
+        assignRole(testAdmin, adminRole, admin);
+        if (!admin.getUsername().equals(TEST_MAINTAINER) && !admin.getUsername().equals(TEST_USER)) {
+            assignRole(admin, adminRole, admin);
+        }
+    }
+    private IamUserEntity ensureTestUser(String username, String displayName) {
+        return users.findByUsername(username).orElseGet(() -> users.save(new IamUserEntity(
+                IdentityProviderType.MOCK, username, username, encoder.encode(TEST_PASSWORD), displayName, null)));
+    }
+    private void assignRole(IamUserEntity user, IamRoleEntity role, IamUserEntity actor) {
+        if (userRoles.findAllByUserId(user.getId()).stream().noneMatch(item -> item.getRole().getId().equals(role.getId())))
+            userRoles.save(new IamUserRoleEntity(user, role, actor));
     }
     private static Map<String, List<String>> roles() {
         Map<String, List<String>> result = new LinkedHashMap<>();

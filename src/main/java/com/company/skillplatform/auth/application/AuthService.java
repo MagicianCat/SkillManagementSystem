@@ -6,6 +6,7 @@ import com.company.skillplatform.auth.infrastructure.JwtTokenService;
 import com.company.skillplatform.auth.infrastructure.entity.AuthRefreshTokenEntity;
 import com.company.skillplatform.auth.infrastructure.repository.AuthRefreshTokenRepository;
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.common.logging.LogContext;
 import com.company.skillplatform.user.domain.UserStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamRolePermissionRepository;
@@ -30,6 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class AuthService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthService.class);
     private final Map<String, IdentityProvider> providers;
     private final IamUserRepository users;
     private final IamUserRoleRepository userRoles;
@@ -55,28 +57,56 @@ public class AuthService {
 
     @Transactional
     public TokenResult login(String username, String password, String provider, String clientInfo) {
+        long startNanos = System.nanoTime();
         IdentityProvider identityProvider = providers.get(provider.toUpperCase(Locale.ROOT));
-        if (identityProvider == null) throw new BusinessException("IDENTITY_PROVIDER_UNSUPPORTED", "Unsupported identity provider", HttpStatus.BAD_REQUEST);
-        IdentityProvider.AuthenticationResult result = identityProvider.authenticate(username, password);
-        IamUserEntity user = activeUser(result.userId());
-        user.recordLogin(clock.instant());
-        return issue(user, clientInfo);
+        if (identityProvider == null) {
+            log.warn("event=auth.login.failure requestId={} username={} provider={} errorCode={} durationMs={}",
+                    LogContext.requestId(), username, provider, "IDENTITY_PROVIDER_UNSUPPORTED", elapsedMs(startNanos));
+            throw new BusinessException("IDENTITY_PROVIDER_UNSUPPORTED", "Unsupported identity provider", HttpStatus.BAD_REQUEST);
+        }
+        try {
+            IdentityProvider.AuthenticationResult result = identityProvider.authenticate(username, password);
+            IamUserEntity user = activeUser(result.userId());
+            user.recordLogin(clock.instant());
+            TokenResult tokenResult = issue(user, clientInfo);
+            log.info("event=auth.login.success requestId={} actorId={} username={} provider={} durationMs={}",
+                    LogContext.requestId(), user.getId(), username, provider, elapsedMs(startNanos));
+            return tokenResult;
+        } catch (BusinessException ex) {
+            log.warn("event=auth.login.failure requestId={} username={} provider={} errorCode={} durationMs={}",
+                    LogContext.requestId(), username, provider, ex.getCode(), elapsedMs(startNanos));
+            throw ex;
+        }
     }
 
     @Transactional
     public TokenResult refresh(String rawToken, String clientInfo) {
-        AuthRefreshTokenEntity stored = refreshTokens.findByTokenHashForUpdate(sha256(rawToken))
-                .orElseThrow(this::invalidRefreshToken);
-        Instant now = clock.instant();
-        if (!stored.isUsableAt(now) || stored.getUser().getStatus() != UserStatus.ACTIVE) throw invalidRefreshToken();
-        stored.revoke(now);
-        return issue(stored.getUser(), clientInfo);
+        long startNanos = System.nanoTime();
+        try {
+            AuthRefreshTokenEntity stored = refreshTokens.findByTokenHashForUpdate(sha256(rawToken))
+                    .orElseThrow(this::invalidRefreshToken);
+            Instant now = clock.instant();
+            if (!stored.isUsableAt(now) || stored.getUser().getStatus() != UserStatus.ACTIVE) throw invalidRefreshToken();
+            stored.revoke(now);
+            TokenResult tokenResult = issue(stored.getUser(), clientInfo);
+            log.info("event=auth.refresh.success requestId={} actorId={} durationMs={}",
+                    LogContext.requestId(), stored.getUser().getId(), elapsedMs(startNanos));
+            return tokenResult;
+        } catch (BusinessException ex) {
+            log.warn("event=auth.refresh.failure requestId={} errorCode={} durationMs={}",
+                    LogContext.requestId(), ex.getCode(), elapsedMs(startNanos));
+            throw ex;
+        }
     }
 
     @Transactional
     public void logout(String rawToken) {
         refreshTokens.findByTokenHash(sha256(rawToken)).ifPresent(token -> {
-            if (token.getRevokedAt() == null) token.revoke(clock.instant());
+            if (token.getRevokedAt() == null) {
+                token.revoke(clock.instant());
+                log.info("event=auth.logout.success requestId={} actorId={}",
+                        LogContext.requestId(), token.getUser().getId());
+            }
         });
     }
 
@@ -113,6 +143,7 @@ public class AuthService {
         } catch (NoSuchAlgorithmException ex) { throw new IllegalStateException(ex); }
     }
     private String trim(String value) { return value == null ? null : value.substring(0, Math.min(value.length(), 512)); }
+    private long elapsedMs(long startNanos) { return (System.nanoTime() - startNanos) / 1_000_000L; }
     private BusinessException invalidRefreshToken() {
         return new BusinessException("INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired", HttpStatus.UNAUTHORIZED);
     }

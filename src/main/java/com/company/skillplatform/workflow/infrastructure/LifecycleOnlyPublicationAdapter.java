@@ -9,6 +9,7 @@ import com.company.skillplatform.compatibility.domain.OsType;
 import com.company.skillplatform.compatibility.infrastructure.repository.PlatformRepository;
 import com.company.skillplatform.compatibility.infrastructure.repository.SkillVersionCompatibilityRepository;
 import com.company.skillplatform.storage.domain.ObjectStoragePort;
+import com.company.skillplatform.common.logging.LogContext;
 import com.company.skillplatform.version.application.SkillFileService;
 import com.company.skillplatform.version.infrastructure.entity.SkillVersionEntity;
 import com.company.skillplatform.workflow.domain.PublicationPort;
@@ -21,6 +22,7 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class LifecycleOnlyPublicationAdapter implements PublicationPort {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(LifecycleOnlyPublicationAdapter.class);
     private final AdapterRegistry registry;
     private final SkillFileService files;
     private final ObjectStoragePort storage;
@@ -47,6 +49,9 @@ public class LifecycleOnlyPublicationAdapter implements PublicationPort {
                     .filter(item -> item.getDeclaredStatus() != CompatibilityStatus.UNSUPPORTED)
                     .map(item -> item.getOsType()).forEach(targets::add);
             if (targets.isEmpty()) targets.add(OsType.ANY);
+            log.info("event=adapter.route requestId={} versionId={} skillKey={} platform={} adapterVersion={} osTargets={}",
+                    LogContext.requestId(), versionId, version.getSkill().getSkillKey(), adapter.platformKey(),
+                    adapter.adapterVersion(), targets);
             for (OsType os : targets) {
                 if (artifacts.findFirstByVersionIdAndPlatformPlatformKeyAndOsTypeAndStatus(
                         versionId, adapter.platformKey().toUpperCase(), os.name(), "AVAILABLE").isPresent()) continue;
@@ -62,6 +67,9 @@ public class LifecycleOnlyPublicationAdapter implements PublicationPort {
                         result.contentType());
                 artifacts.save(new SkillArtifactEntity(version, platform, os.name(), "PLATFORM_SKILL", objectKey,
                         fileName, result.artifact().length, result.sha256(), adapter.adapterVersion(), null));
+                log.info("event=artifact.built requestId={} versionId={} skillKey={} platform={} osType={} adapterVersion={} sizeBytes={}",
+                        LogContext.requestId(), versionId, version.getSkill().getSkillKey(), adapter.platformKey(),
+                        os.name(), adapter.adapterVersion(), result.artifact().length);
             }
         }
     }

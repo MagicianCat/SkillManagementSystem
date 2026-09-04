@@ -1,6 +1,7 @@
 package com.company.skillplatform.notification.application;
 
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.common.logging.LogContext;
 import com.company.skillplatform.notification.domain.NotificationType;
 import com.company.skillplatform.notification.infrastructure.entity.UserNotificationEntity;
 import com.company.skillplatform.notification.infrastructure.repository.UserNotificationRepository;
@@ -22,12 +23,14 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class NotificationService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(NotificationService.class);
     private final UserNotificationRepository notifications;
     private final IamUserRoleRepository userRoles;
     private final IamUserRepository users;
     private final Clock clock;
     private SkillOwnerRepository owners;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public NotificationService(UserNotificationRepository notifications, IamUserRoleRepository userRoles,
                                IamUserRepository users) {
         this(notifications, userRoles, users, Clock.systemUTC());
@@ -100,14 +103,24 @@ public class NotificationService {
         UserNotificationEntity entity = notifications.findByIdAndRecipientId(id, userId).orElseThrow(() ->
                 new BusinessException("NOTIFICATION_NOT_FOUND", "Notification not found", HttpStatus.NOT_FOUND));
         entity.markRead(clock.instant());
+        log.info("event=notification.read requestId={} actorId={} notificationId={} type={}",
+                LogContext.requestId(), userId, id, entity.getType());
         return view(entity);
     }
 
     private void save(Collection<IamUserEntity> recipients, NotificationType type, String title, String content,
                       String targetType, Long targetId, SkillVersionEntity version) {
-        if (recipients.isEmpty()) return;
+        if (recipients.isEmpty()) {
+            log.info("event=notification.skipped requestId={} type={} targetType={} targetId={} skillKey={} versionId={} reason=no_recipients",
+                    LogContext.requestId(), type, targetType, targetId,
+                    version == null ? null : version.getSkill().getSkillKey(), version == null ? null : version.getId());
+            return;
+        }
         notifications.saveAll(recipients.stream().map(user -> new UserNotificationEntity(
                 user, type, title, content, targetType, targetId, version)).toList());
+        log.info("event=notification.created requestId={} type={} targetType={} targetId={} skillKey={} versionId={} recipientCount={}",
+                LogContext.requestId(), type, targetType, targetId,
+                version == null ? null : version.getSkill().getSkillKey(), version == null ? null : version.getId(), recipients.size());
     }
 
     private LinkedHashMap<Long,IamUserEntity> ownerRecipients(SkillVersionEntity version) {

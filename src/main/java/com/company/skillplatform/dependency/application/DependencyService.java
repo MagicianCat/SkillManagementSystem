@@ -1,6 +1,7 @@
 package com.company.skillplatform.dependency.application;
 
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.common.logging.LogContext;
 import com.company.skillplatform.dependency.domain.DependencyType;
 import com.company.skillplatform.dependency.infrastructure.entity.SkillVersionDependencyEntity;
 import com.company.skillplatform.dependency.infrastructure.repository.SkillVersionDependencyRepository;
@@ -19,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class DependencyService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(DependencyService.class);
     private static final List<LifecycleStatus> RESOLVABLE = List.of(LifecycleStatus.PUBLISHED, LifecycleStatus.DEPRECATED);
     private final SkillVersionDependencyRepository dependencies;
     private final SkillVersionRepository versions;
@@ -40,19 +42,37 @@ public class DependencyService {
             SkillEntity target = skills.findBySkillKey(command.skillKey()).orElseThrow(() -> notFound("DEPENDENCY_SKILL_NOT_FOUND"));
             if (target.getId().equals(version.getSkill().getId())) throw conflict("SELF_DEPENDENCY");
             validateConstraint(command.versionConstraint());
-            if (reaches(target.getId(), version.getSkill().getId(), new HashSet<>())) throw conflict("DEPENDENCY_CYCLE");
+            if (reaches(target.getId(), version.getSkill().getId(), new HashSet<>())) {
+                log.warn("event=dependency.cycle.detected requestId={} actorId={} versionId={} skillKey={} dependencySkillKey={} errorCode={}",
+                        LogContext.requestId(), actorId, versionId, version.getSkill().getSkillKey(), command.skillKey(), "DEPENDENCY_CYCLE");
+                throw conflict("DEPENDENCY_CYCLE");
+            }
             next.add(new SkillVersionDependencyEntity(version, target, command.versionConstraint(), command.dependencyType() == null ? DependencyType.RUNTIME : command.dependencyType(), command.required(), order++));
         }
         if (versions.incrementVersion(versionId, versionNo) != 1) throw conflict("OPTIMISTIC_LOCK_CONFLICT");
-        dependencies.deleteByVersionId(versionId); dependencies.saveAll(next); return next.stream().map(this::view).toList();
+        dependencies.deleteByVersionId(versionId); dependencies.saveAll(next);
+        log.info("event=dependency.replaced requestId={} actorId={} versionId={} skillKey={} count={}",
+                LogContext.requestId(), actorId, versionId, version.getSkill().getSkillKey(), next.size());
+        return next.stream().map(this::view).toList();
     }
     @PreAuthorize("hasAuthority('skill:edit')") @Transactional(readOnly = true)
     public ResolveView resolve(Long versionId) {
         SkillVersionEntity root = skillService.version(versionId); LinkedHashMap<String, ResolvedItem> resolved = new LinkedHashMap<>();
         LinkedHashMap<String, List<String>> constraints = new LinkedHashMap<>(); LinkedHashSet<String> conflicts = new LinkedHashSet<>();
         try { resolve(root, 0, root.getSkill().getSkillKey(), resolved, constraints, conflicts, new LinkedHashSet<>()); }
-        catch (DependencyCycleException cycle) { conflicts.add("DEPENDENCY_CYCLE: " + cycle.path); }
-        return new ResolveView(List.copyOf(resolved.values()), List.copyOf(conflicts));
+        catch (DependencyCycleException cycle) {
+            conflicts.add("DEPENDENCY_CYCLE: " + cycle.path);
+            log.warn("event=dependency.resolve.cycle requestId={} versionId={} skillKey={} errorCode={}",
+                    LogContext.requestId(), versionId, root.getSkill().getSkillKey(), "DEPENDENCY_CYCLE");
+        }
+        ResolveView result = new ResolveView(List.copyOf(resolved.values()), List.copyOf(conflicts));
+        if (result.conflicts().isEmpty())
+            log.info("event=dependency.resolve.succeeded requestId={} versionId={} skillKey={} resolvedCount={}",
+                    LogContext.requestId(), versionId, root.getSkill().getSkillKey(), result.items().size());
+        else
+            log.warn("event=dependency.resolve.conflict requestId={} versionId={} skillKey={} resolvedCount={} conflictCount={}",
+                    LogContext.requestId(), versionId, root.getSkill().getSkillKey(), result.items().size(), result.conflicts().size());
+        return result;
     }
     private void resolve(SkillVersionEntity version, int depth, String path, Map<String, ResolvedItem> resolved, Map<String, List<String>> constraints, Set<String> conflicts, Set<Long> visiting) {
         if (!visiting.add(version.getSkill().getId())) throw new DependencyCycleException(path);

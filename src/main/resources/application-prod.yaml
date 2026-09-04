@@ -1,0 +1,6 @@
+# 生产环境日志配置：仅在启用 prod profile 时生效。
+# 接入日志采集系统（如 ELK/Loki）时，建议将 console 替换为 logstash-logback-encoder 的 JSON 格式。
+logging:
+  level:
+    root: warn
+    com.company.skillplatform: info

@@ -50,6 +50,18 @@
 
 ## 3. 认证与当前用户
 
+### Mock 测试账号
+
+仅在 `skill-platform.auth.mock.enabled=true` 时自动幂等创建以下账号，密码均为 `Test@123456`：
+
+| 用户名 | 用途 | 角色 | 主要权限 |
+|---|---|---|---|
+| `test-user` | 普通用户 | `CONSUMER` | `skill:browse`、`skill:download` |
+| `test-maintainer` | Skill 管理者 | `MAINTAINER` | `skill:browse`、`skill:download`、`skill:upload`、`skill:edit` |
+| `test-admin` | 管理员 | `ADMIN` | 全部 Skill、审核、发布、下架、身份和审计权限 |
+
+管理员用户名可由 `MOCK_ADMIN_USERNAME` 覆盖；管理员密码仍必须通过 `MOCK_ADMIN_PASSWORD` 配置。测试账号只应在开发/测试环境使用。
+
 ### POST `/auth/login`
 
 匿名登录。请求：
@@ -171,14 +183,18 @@
 
 权限：`skill:browse`。
 
-查询参数：`keyword`、`categoryId`、`tag`、`platform`、`osType`、`lifecycleStatus`、`ownerId`、`page`、`size`、`sort`。
+查询参数：`keyword`、`categoryId`、`tag`、`platform`、`osType`、`lifecycleStatus`、`developmentStage`、`ownerId`、`page`、`size`、`sort`。
 
 `platform`、`osType` 会按最新已发布版本的兼容性声明过滤，枚举值大小写不敏感。
+
+`developmentStage` 按 Skill 本体的开发阶段过滤（与版本 `lifecycleStatus` 无关），大小写不敏感，取值：`REQUIREMENT`（需求）、`DESIGN`（设计）、`FRONTEND_CODING`（前端编码）、`BACKEND_CODING`（后端编码）、`TESTING`（测试）、`RELEASED`（已发布）、`OTHER`（历史数据/未标记）。非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
+
+排序字段使用实体属性名，如 `sort=timeUpdated,desc`（不要使用 `updatedAt` 等不存在的属性，否则会返回 500）。
 
 返回 `PageResponse<SkillView>`。`SkillView` 字段：
 
 ```json
-{"id":1,"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":10,"category":{"id":10,"key":"development","name":"Development","parentId":null,"sortOrder":1},"tags":[{"id":21,"key":"java","name":"Java"}],"owners":[{"userId":2,"username":"maintainer","displayName":"Maintainer","ownerType":"PRIMARY"}],"status":"ACTIVE","versionNo":0,"latestPublishedVersion":"1.0.0","activeDraftVersionId":2}
+{"id":1,"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":10,"category":{"id":10,"key":"development","name":"Development","parentId":null,"sortOrder":1},"tags":[{"id":21,"key":"java","name":"Java"}],"owners":[{"userId":2,"username":"maintainer","displayName":"Maintainer","ownerType":"PRIMARY"}],"status":"ACTIVE","developmentStage":"BACKEND_CODING","versionNo":0,"latestPublishedVersion":"1.0.0","activeDraftVersionId":2}
 ```
 
 ### POST `/skills`
@@ -186,12 +202,13 @@
 权限：`skill:upload`。
 
 ```json
-{"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":10,"ownerUserIds":[],"tagIds":[21,22]}
+{"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":10,"ownerUserIds":[],"tagIds":[21,22],"developmentStage":"REQUIREMENT"}
 ```
 
 - `skillKey` 只能使用小写字母、数字和单个连字符分段。
 - 非管理员只能把自己设为 Owner；`ownerUserIds` 为空时自动使用当前用户。
 - 管理员可以指定其他 Owner。
+- `developmentStage` 可选，缺省为 `REQUIREMENT`；非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
 
 返回 `SkillView`。
 
@@ -212,8 +229,10 @@
 权限：`skill:edit`，且要求 Skill Owner 或管理员。
 
 ```json
-{"displayName":"New name","description":"New description","categoryId":10,"tagIds":[21],"versionNo":0}
+{"displayName":"New name","description":"New description","categoryId":10,"tagIds":[21],"developmentStage":"TESTING","versionNo":0}
 ```
+
+- `developmentStage` 可选；传 `null`/缺省表示不修改当前阶段，非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
 
 返回更新后的 `SkillView`。
 

@@ -2,6 +2,7 @@ package com.company.skillplatform.user.application;
 
 import com.company.skillplatform.audit.application.AuditService;
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.common.logging.LogContext;
 import com.company.skillplatform.user.domain.IdentityProviderType;
 import com.company.skillplatform.user.domain.UserStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamPermissionEntity;
@@ -28,6 +29,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @PreAuthorize("hasAuthority('admin:identity')")
 public class IdentityAdminService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(IdentityAdminService.class);
     private final IamUserRepository users;
     private final IamRoleRepository roles;
     private final IamPermissionRepository permissions;
@@ -59,6 +61,7 @@ public class IdentityAdminService {
                 encoder.encode(password), displayName, email));
         audit.success("IDENTITY_USER_CREATED", user(operatorId), "IAM_USER", created.getId(), requestId,
                 null, Map.of("username", created.getUsername(), "status", created.getStatus().name()), Map.of());
+        log.info("event=identity.user.created requestId={} actorId={} targetUserId={} username={}", requestId, operatorId, created.getId(), username);
         return created;
     }
     @Transactional
@@ -69,6 +72,7 @@ public class IdentityAdminService {
         user.changeStatus(status);
         audit.success("IDENTITY_USER_STATUS_CHANGED", user(operatorId), "IAM_USER", userId, requestId,
                 Map.of("status", previous.name()), Map.of("status", status.name()), Map.of());
+        log.info("event=identity.user.status_changed requestId={} actorId={} targetUserId={} fromStatus={} toStatus={}", requestId, operatorId, userId, previous, status);
         return user;
     }
     @Transactional
@@ -77,6 +81,7 @@ public class IdentityAdminService {
         IamRoleEntity created = roles.save(new IamRoleEntity(key, name, description));
         audit.success("IDENTITY_ROLE_CREATED", user(operatorId), "IAM_ROLE", created.getId(), requestId,
                 null, Map.of("roleKey", created.getRoleKey(), "status", created.getStatus().name()), Map.of());
+        log.info("event=identity.role.created requestId={} actorId={} roleId={} roleKey={}", requestId, operatorId, created.getId(), key);
         return created;
     }
     @Transactional
@@ -90,6 +95,7 @@ public class IdentityAdminService {
         userRoles.saveAll(selected.stream().map(role -> new IamUserRoleEntity(user, role, operator)).toList());
         audit.success("IDENTITY_USER_ROLES_REPLACED", operator, "IAM_USER", userId, requestId,
                 Map.of("roles", previous), Map.of("roles", selected.stream().map(IamRoleEntity::getRoleKey).toList()), Map.of());
+        log.info("event=identity.user.roles_replaced requestId={} actorId={} targetUserId={} roleCount={}", requestId, operatorId, userId, selected.size());
     }
     @Transactional
     public void replaceRolePermissions(Long roleId, Collection<Long> permissionIds, int versionNo,
@@ -105,6 +111,7 @@ public class IdentityAdminService {
         audit.success("IDENTITY_ROLE_PERMISSIONS_REPLACED", operator, "IAM_ROLE", roleId, requestId,
                 Map.of("permissions", previous),
                 Map.of("permissions", selected.stream().map(IamPermissionEntity::getPermissionKey).toList()), Map.of());
+        log.info("event=identity.role.permissions_replaced requestId={} actorId={} roleId={} permissionCount={}", requestId, operatorId, roleId, selected.size());
     }
     private IamUserEntity user(Long id) { return users.findById(id).orElseThrow(() -> notFound("USER_NOT_FOUND", "User not found")); }
     private void checkVersion(int actual, int expected) {
