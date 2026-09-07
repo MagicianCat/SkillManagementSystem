@@ -1,0 +1,14 @@
+server:
+  port: 8090
+
+agent:
+  mcp:
+    run-ttl: PT30M
+    # Inject a dedicated secret in non-local environments.
+    signing-key: ${AGENT_MCP_SIGNING_KEY:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}
+  runtime:
+    base-url: ${DSH_BASE_URL:http://127.0.0.1:3090}
+    service-token: ${DSH_SERVICE_TOKEN:local-dsh-service-token}
+    version: ${DSH_RUNTIME_VERSION:local}
+    model-key: deepseek-v4-pro
+    timeout: PT130S
