@@ -8,4 +8,7 @@ public record AgentRun(String runRef, Long userId, String profileKey, String pla
     public static AgentRun create(Long userId, String profileKey, String platform, String osType, Instant expiresAt) {
         return new AgentRun(UUID.randomUUID().toString(), userId, profileKey, platform, osType, expiresAt, "ACTIVE");
     }
+    public static AgentRun create(String runRef, Long userId, String profileKey, String platform, String osType, Instant expiresAt) {
+        return new AgentRun(runRef, userId, profileKey, platform, osType, expiresAt, "ACTIVE");
+    }
 }

@@ -30,13 +30,17 @@ public class AgentRunService {
         this.ttl = ttl;
     }
     public IssuedRun issue(Long userId, String profileKey, String platform, String osType) {
-        Instant expires = clock.instant().plus(ttl);
-        AgentRun run = AgentRun.create(userId, profileKey, platform, osType, expires);
+        return issue(AgentRun.create(userId, profileKey, platform, osType, clock.instant().plus(ttl)));
+    }
+    public IssuedRun issueForRun(String runRef, Long userId, String profileKey, String platform, String osType) {
+        return issue(AgentRun.create(runRef, userId, profileKey, platform, osType, clock.instant().plus(ttl)));
+    }
+    private IssuedRun issue(AgentRun run) {
         runs.put(run.runRef(), run);
-        String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(userId))
-                .claim("runRef", run.runRef()).claim("profileKey", profileKey)
+        String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(run.userId()))
+                .claim("runRef", run.runRef()).claim("profileKey", run.profileKey())
                 .claim("capabilities", java.util.List.of("skill.search", "skill.detail", "skill.recommendation.submit"))
-                .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
+                .issuedAt(Date.from(clock.instant())).expiration(Date.from(run.expiresAt())).signWith(key).compact();
         return new IssuedRun(run, token);
     }
     public AgentRun require(String token) {

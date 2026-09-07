@@ -9,6 +9,8 @@ import com.company.skillplatform.version.infrastructure.entity.SkillVersionEntit
 import com.company.skillplatform.version.infrastructure.repository.SkillVersionRepository;
 import com.company.skillplatform.agent.infrastructure.repository.AgentRecommendationRepository;
 import com.company.skillplatform.agent.infrastructure.entity.AgentRecommendationEntity;
+import com.company.skillplatform.agent.infrastructure.repository.AgentRunRepository;
+import com.company.skillplatform.agent.application.AgentEventHub;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
@@ -34,10 +36,13 @@ public class AgentMcpConfiguration {
     private final ObjectStoragePort storage;
     private final AgentRunService runs;
     private final AgentRecommendationRepository recommendations;
+    private final AgentRunRepository persistentRuns;
+    private final AgentEventHub events;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
-                                 ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;
+                                 ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
+                                 AgentRunRepository persistentRuns, AgentEventHub events) {
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events;
     }
 
     @Bean
@@ -56,7 +61,7 @@ public class AgentMcpConfiguration {
                         tool("get_skill_file_content", "Get a safe, bounded segment of a published text file.",
                                 schema("object", List.of("skillKey", "path")), this::file),
                         tool("submit_skill_recommendation", "Submit the final structured skill recommendation.",
-                                schema("object", List.of("summary", "items")), this::submit))
+                                recommendationSchema(), this::submit))
                 .build();
         return new ServletRegistrationBean<>(transport, "/internal/mcp/*");
     }
@@ -76,6 +81,18 @@ public class AgentMcpConfiguration {
         props.put("summary", Map.of("type", "string", "maxLength", 2000)); props.put("items", Map.of("type", "array", "maxItems", 20));
         return new McpSchema.JsonSchema(type, props, required, false, Map.of(), Map.of());
     }
+    private McpSchema.JsonSchema recommendationSchema() {
+        Map<String,Object> itemProperties=new LinkedHashMap<>();
+        itemProperties.put("skillKey",Map.of("type","string","minLength",1,"maxLength",64));
+        itemProperties.put("priority",Map.of("type","string","enum",List.of("REQUIRED","RECOMMENDED","OPTIONAL")));
+        itemProperties.put("reason",Map.of("type","string","minLength",1,"maxLength",2048));
+        Map<String,Object> item=Map.of("type","object","properties",itemProperties,"required",List.of("skillKey","priority","reason"),"additionalProperties",false);
+        Map<String,Object> props=new LinkedHashMap<>();
+        props.put("summary",Map.of("type","string","maxLength",2000));
+        props.put("items",Map.of("type","array","maxItems",20,"items",item));
+        props.put("citations",Map.of("type","array","maxItems",20));
+        return new McpSchema.JsonSchema("object",props,List.of("summary","items"),false,Map.of(),Map.of());
+    }
     private McpSchema.CallToolResult search(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         run(ex); String stage = str(args, "developmentStage"); int page = integer(args, "page", 0), size = Math.min(integer(args, "pageSize", 20), 20);
         var result = skills.search(null, null, null, str(args,"platform"), str(args,"osType"), "PUBLISHED", null, stage,
@@ -92,11 +109,14 @@ public class AgentMcpConfiguration {
         return ok(Map.of("skillKey", key, "path", path, "content", content, "offset", integer(args,"offset",0), "hasMore", content.length() >= bounded(args)));
     }
     private McpSchema.CallToolResult submit(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
-        var run = run(ex); Object items = args.get("items"); if (!(items instanceof List<?> list) || list.isEmpty() || list.size() > 20) throw new IllegalArgumentException("items must contain 1..20 recommendations");
-        List<Map<String,Object>> accepted = new ArrayList<>(); for (Object item : list) { if (!(item instanceof Map<?,?> m)) throw new IllegalArgumentException("invalid item"); String key = String.valueOf(m.get("skillKey")); var view = skills.get(key); if (view.status() != com.company.skillplatform.skill.domain.SkillStatus.ACTIVE || view.latestPublishedVersion() == null) throw new IllegalArgumentException("skill is not published: " + key); Object priority=m.get("priority"), reason=m.get("reason"); String p=priority==null?"RECOMMENDED":String.valueOf(priority).toUpperCase(); if (!Set.of("REQUIRED","RECOMMENDED","OPTIONAL").contains(p)) throw new IllegalArgumentException("invalid priority"); accepted.add(Map.of("skillKey", key, "priority", p, "reason", reason==null?"":String.valueOf(reason))); }
+        var run = run(ex); Object items = args.get("items"); if (!(items instanceof List<?> list) || list.size() > 20) throw new IllegalArgumentException("items must contain 0..20 recommendations");
+        List<Map<String,Object>> accepted = new ArrayList<>(); for (Object item : list) { if (!(item instanceof Map<?,?> m)) throw new IllegalArgumentException("invalid item"); String key = String.valueOf(m.get("skillKey")); var view = skills.get(key); if (view.status() != com.company.skillplatform.skill.domain.SkillStatus.ACTIVE || view.latestPublishedVersion() == null) continue; Object priority=m.get("priority"), reason=m.get("reason"); String p=priority==null?"RECOMMENDED":String.valueOf(priority).toUpperCase(); if (!Set.of("REQUIRED","RECOMMENDED","OPTIONAL").contains(p)) throw new IllegalArgumentException("invalid priority"); Map<String,Object>trusted=new LinkedHashMap<>();trusted.put("skillKey",key);trusted.put("displayName",view.displayName());trusted.put("description",view.description());trusted.put("version",view.latestPublishedVersion());trusted.put("developmentStage",view.developmentStage());trusted.put("priority",p);trusted.put("reason",reason==null?"":String.valueOf(reason));accepted.add(trusted); }
         String summary = args.get("summary") == null ? "" : String.valueOf(args.get("summary"));
-        Map<String,Object> result = Map.of("accepted", true, "runRef", run.runRef(), "summary", summary, "items", accepted);
-        recommendations.save(new AgentRecommendationEntity(run.runRef(), summary, write(result)));
+        String status=accepted.size()==list.size()?"VALID":accepted.isEmpty()?"EMPTY":"PARTIALLY_VALID";
+        Map<String,Object> result = Map.of("accepted", true, "runRef", run.runRef(), "summary", summary, "status",status,"items", accepted);
+        String payload=write(result);var existing=recommendations.findByRunRef(run.runRef());
+        if(existing.isPresent()&&!existing.get().getPayload().equals(payload))throw new IllegalArgumentException("recommendation already submitted");
+        if(existing.isEmpty()){var persistent=persistentRuns.findByRunKey(run.runRef()).orElse(null);recommendations.save(new AgentRecommendationEntity(run.runRef(),persistent,summary,status,payload));events.publish(run.runRef(),"recommendation.completed",new LinkedHashMap<>(result));}
         return ok(result);
     }
     private com.company.skillplatform.agent.domain.AgentRun run(io.modelcontextprotocol.server.McpSyncServerExchange ex) { HttpServletRequest req=(HttpServletRequest)ex.transportContext().get("request"); String h=req==null?null:req.getHeader("Authorization"); if(h==null||!h.startsWith("Bearer ")) throw new IllegalArgumentException("agent token required"); var run=runs.require(h.substring(7)); var auth=new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(run.userId(), null, java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("skill:browse"))); org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(auth); return run; }
