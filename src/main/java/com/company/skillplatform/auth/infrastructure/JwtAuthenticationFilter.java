@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 import com.company.skillplatform.agent.application.AgentRunService;
 import org.springframework.beans.factory.annotation.Autowired;
+import com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository;
 
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
@@ -26,15 +27,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final JwtTokenService tokens;
     private final AuthService authService;
     private final AgentRunService agentRuns;
+    private final ScopedRoleAssignmentRepository scopedRoles;
     @Autowired
-    public JwtAuthenticationFilter(JwtTokenService tokens, AuthService authService, AgentRunService agentRuns) {
-        this.tokens = tokens;
-        this.authService = authService;
-        this.agentRuns = agentRuns;
+    public JwtAuthenticationFilter(JwtTokenService tokens, AuthService authService, AgentRunService agentRuns, ScopedRoleAssignmentRepository scopedRoles) {
+        this.tokens = tokens; this.authService = authService; this.agentRuns = agentRuns; this.scopedRoles = scopedRoles;
     }
     /** Backward-compatible constructor for existing unit tests and embedders. */
     public JwtAuthenticationFilter(JwtTokenService tokens, AuthService authService) {
-        this(tokens, authService, null);
+        this(tokens, authService, null, null);
     }
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
@@ -44,7 +44,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 Claims claims = tokens.parse(header.substring(7));
                 Long userId = Long.valueOf(claims.getSubject());
                 var currentUser = authService.currentUser(userId);
-                var authorities = currentUser.permissions().stream()
+                var permissions = new java.util.HashSet<>(currentUser.permissions());
+                if (scopedRoles != null) scopedRoles.findByUserId(userId).forEach(a -> {
+                    if (java.util.Set.of("TEAM_ADMIN","TEAM_MAINTAINER","PLATFORM_MAINTAINER").contains(a.getRoleKey())) permissions.addAll(java.util.List.of("skill:browse","skill:download","skill:upload","skill:edit"));
+                    if (java.util.Set.of("TEAM_ADMIN").contains(a.getRoleKey())) permissions.add("skill:review");
+                });
+                var authorities = permissions.stream()
                         .map(org.springframework.security.core.authority.SimpleGrantedAuthority::new).toList();
                 var authentication = new UsernamePasswordAuthenticationToken(userId, null, authorities);
                 SecurityContextHolder.getContext().setAuthentication(authentication);

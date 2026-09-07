@@ -8,6 +8,8 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authorization.AuthorizationDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -39,6 +41,12 @@ public class ApiExceptionHandler {
         log.warn("event=request.optimistic_lock.conflict requestId={} actorId={} method={} path={} errorCode={}",
                 LogContext.requestId(), LogContext.actorId(), request.getMethod(), request.getRequestURI(), "OPTIMISTIC_LOCK_CONFLICT");
         return ResponseEntity.status(409).body(body("OPTIMISTIC_LOCK_CONFLICT", "Resource version is stale", request, Map.of()));
+    }
+    @ExceptionHandler({AuthorizationDeniedException.class, AccessDeniedException.class})
+    ResponseEntity<ApiErrorResponse> handleAccessDenied(RuntimeException ex, HttpServletRequest request) {
+        log.warn("event=auth.access.denied requestId={} actorId={} method={} path={} errorCode={}",
+                LogContext.requestId(), LogContext.actorId(), request.getMethod(), request.getRequestURI(), "ACCESS_DENIED");
+        return ResponseEntity.status(403).body(body("ACCESS_DENIED", "Access denied", request, Map.of()));
     }
     @ExceptionHandler(Exception.class)
     ResponseEntity<ApiErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {

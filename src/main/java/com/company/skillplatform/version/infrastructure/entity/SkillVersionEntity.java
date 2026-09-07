@@ -42,7 +42,7 @@ public class SkillVersionEntity extends BaseJpaEntity {
     public void markUploaded(String changeLog,IamUserEntity actor){require(LifecycleStatus.DRAFT);sourceRevision++;changeType=ChangeType.ZIP_REUPLOAD;this.changeLog=changeLog;updatedBy=actor;}
     public void markSourceChanged(String changeLog,IamUserEntity actor){require(LifecycleStatus.DRAFT);sourceRevision++;this.changeLog=changeLog;updatedBy=actor;}
     public void submit(String candidate,IamUserEntity actor){require(LifecycleStatus.DRAFT);candidateVersion=candidate;lifecycleStatus=LifecycleStatus.REVIEWING;updatedBy=actor;}
-    public void approve(IamUserEntity actor){require(LifecycleStatus.REVIEWING);lifecycleStatus=LifecycleStatus.APPROVED;updatedBy=actor;}
+    public void approve(IamUserEntity actor){if(lifecycleStatus==LifecycleStatus.PUBLISHED){updatedBy=actor;return;}require(LifecycleStatus.REVIEWING);lifecycleStatus=LifecycleStatus.APPROVED;updatedBy=actor;}
     public void reject(IamUserEntity actor){require(LifecycleStatus.REVIEWING);lifecycleStatus=LifecycleStatus.DRAFT;updatedBy=actor;}
     public void withdraw(IamUserEntity actor){require(LifecycleStatus.APPROVED);lifecycleStatus=LifecycleStatus.DRAFT;updatedBy=actor;}
     public void publish(Instant now,IamUserEntity actor){require(LifecycleStatus.APPROVED);version=candidateVersion;lifecycleStatus=LifecycleStatus.PUBLISHED;publishedAt=now;updatedBy=actor;}
@@ -54,6 +54,9 @@ public class SkillVersionEntity extends BaseJpaEntity {
     public SkillEntity getSkill(){return skill;} public SkillVersionEntity getBaseVersion(){return baseVersion;} public ChangeType getChangeType(){return changeType;}
     public String getCandidateVersion(){return candidateVersion;} public String getVersion(){return version;} public LifecycleStatus getLifecycleStatus(){return lifecycleStatus;}
     public int getSourceRevision(){return sourceRevision;} public int getVersionNo(){return versionNo;} public SkillVersionEntity getReplacementVersion(){return replacementVersion;}
-    public String getSourceSha256(){return sourceSha256;} public long getSourceSizeBytes(){return sourceSizeBytes;} public String getSourceObjectKey(){return sourceObjectKey;}
+    public String getSourceSha256(){return sourceSha256;} public long getSourceSizeBytes(){return sourceSizeBytes;} public String getSourceObjectKey(){return sourceObjectKey;} public Map<String,Object> getManifest(){return manifest;}
     public void storeSource(String objectKey,String sha256,long size,Map<String,Object> manifest){this.sourceObjectKey=objectKey;this.sourceSha256=sha256;this.sourceSizeBytes=size;this.manifest=manifest;}
+    public void assignCandidateVersion(String candidate){if(this.candidateVersion==null)this.candidateVersion=candidate;}
+    /** 从 base 版本继承源码指针（共享 objectKey，不物理复制）。仅在 base 已完成首次上传时调用。 */
+    public void inheritSourceFrom(SkillVersionEntity base){String baseObjectKey=base.getSourceObjectKey();if(baseObjectKey==null||baseObjectKey.equals("pending"))return;Map<String,Object> baseManifest=base.getManifest();this.sourceRevision=base.getSourceRevision();this.sourceObjectKey=baseObjectKey;this.sourceSha256=base.getSourceSha256();this.sourceSizeBytes=base.getSourceSizeBytes();this.manifest=Map.of("storageStatus","READY","fileCount",baseManifest==null?0:baseManifest.getOrDefault("fileCount",0));}
 }

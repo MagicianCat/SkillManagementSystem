@@ -95,7 +95,7 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult search(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         run(ex); String stage = str(args, "developmentStage"); int page = integer(args, "page", 0), size = Math.min(integer(args, "pageSize", 20), 20);
-        var result = skills.search(null, null, null, str(args,"platform"), str(args,"osType"), "PUBLISHED", null, stage,
+        var result = skills.search(null, null, null, str(args,"platform"), str(args,"osType"), "PUBLISHED", null, stage, null,
                 org.springframework.data.domain.PageRequest.of(page, size, org.springframework.data.domain.Sort.by("skillKey").ascending()));
         return ok(Map.of("items", result.getContent(), "page", result.getNumber(), "pageSize", result.getSize(), "total", result.getTotalElements()));
     }

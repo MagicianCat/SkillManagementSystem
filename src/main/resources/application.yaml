@@ -58,6 +58,17 @@ management:
       show-details: when_authorized
 
 skill-platform:
+  feishu:
+    enabled: ${FEISHU_ENABLED:false}
+    app-id: ${FEISHU_APP_ID:}
+    app-secret: ${FEISHU_APP_SECRET:}
+    redirect-uri: ${FEISHU_REDIRECT_URI:}
+    authorize-url: ${FEISHU_AUTHORIZE_URL:https://accounts.feishu.cn/open-apis/authen/v1/authorize}
+    token-url: ${FEISHU_TOKEN_URL:https://open.feishu.cn/open-apis/authen/v2/oauth/token}
+    user-info-url: ${FEISHU_USER_INFO_URL:https://open.feishu.cn/open-apis/authen/v1/user_info}
+    api-base-url: ${FEISHU_API_BASE_URL:https://open.feishu.cn/open-apis}
+    event-enabled: ${FEISHU_EVENT_ENABLED:false}
+    oauth-state-ttl: ${FEISHU_OAUTH_STATE_TTL:5m}
   auth:
     jwt:
       issuer: ${JWT_ISSUER:skill-management-system}

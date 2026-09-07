@@ -14,6 +14,8 @@ public class SkillEntity extends BaseJpaEntity {
     @Column(nullable=false,length=1024) private String description;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="category_id") private SkillCategoryEntity category;
     @Enumerated(EnumType.STRING) @Column(nullable=false,length=32) private SkillStatus status;
+    @Column(name="scope_type",nullable=false,length=32) private String scopeType="PLATFORM";
+    @Column(name="team_id") private Long teamId;
     @Enumerated(EnumType.STRING) @Column(name="development_stage",nullable=false,length=32) private DevelopmentStage developmentStage;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="latest_published_version_id") private SkillVersionEntity latestPublishedVersion;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="active_draft_version_id") private SkillVersionEntity activeDraftVersion;
@@ -37,5 +39,5 @@ public class SkillEntity extends BaseJpaEntity {
     public void unarchive(IamUserEntity actor){this.status=SkillStatus.ACTIVE;this.updatedBy=actor;}
     public String getSkillKey(){return skillKey;} public String getDisplayName(){return displayName;} public String getDescription(){return description;}
     public SkillStatus getStatus(){return status;} public DevelopmentStage getDevelopmentStage(){return developmentStage;} public SkillVersionEntity getLatestPublishedVersion(){return latestPublishedVersion;}
-    public SkillVersionEntity getActiveDraftVersion(){return activeDraftVersion;} public int getVersionNo(){return versionNo;} public SkillCategoryEntity getCategory(){return category;}
+    public SkillVersionEntity getActiveDraftVersion(){return activeDraftVersion;} public int getVersionNo(){return versionNo;} public SkillCategoryEntity getCategory(){return category;} public String getScopeType(){return scopeType;} public Long getTeamId(){return teamId;} public void assignTeam(Long id){teamId=id;scopeType=id==null?"PLATFORM":"TEAM";}
 }

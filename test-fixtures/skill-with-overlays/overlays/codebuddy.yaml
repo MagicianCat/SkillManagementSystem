@@ -1,0 +1,4 @@
+agent: codebuddy
+capabilities:
+  - inline-edit
+  - repository-context

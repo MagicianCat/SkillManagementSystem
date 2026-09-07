@@ -101,6 +101,24 @@
 
 成功返回空响应。
 
+### GET `/auth/providers`
+
+匿名接口，返回当前启用的登录方式：
+
+```json
+{"passwordLogin":true,"providers":["feishu"]}
+```
+
+### GET `/auth/oauth/feishu/authorize`
+
+匿名接口。参数 `redirectPath` 为登录成功后的站内路径，默认 `/skills`。返回飞书授权地址，前端应使用浏览器跳转。
+
+### POST `/auth/oauth/feishu/callback`
+
+匿名接口。请求体为 `{"code":"...","state":"..."}`，由服务端完成飞书授权码换 Token 和用户信息查询，成功响应结构与登录一致。state 有效期默认 5 分钟且只能使用一次。
+
+旧版 `/auth/feishu/authorize` 和 `/auth/feishu/callback` 保留作为兼容入口。
+
 ### GET `/users/me`
 
 权限：已登录。返回当前用户的 `id`、`username`、`displayName`、`roles`、`permissions`。
@@ -183,11 +201,13 @@
 
 权限：`skill:browse`。
 
-查询参数：`keyword`、`categoryId`、`tag`、`platform`、`osType`、`lifecycleStatus`、`developmentStage`、`ownerId`、`page`、`size`、`sort`。
+查询参数：`keyword`、`categoryId`、`tag`、`platform`、`osType`、`lifecycleStatus`、`developmentStage`、`status`、`ownerId`、`page`、`size`、`sort`。
 
 `platform`、`osType` 会按最新已发布版本的兼容性声明过滤，枚举值大小写不敏感。
 
 `developmentStage` 按 Skill 本体的开发阶段过滤（与版本 `lifecycleStatus` 无关），大小写不敏感，取值：`REQUIREMENT`（需求）、`DESIGN`（设计）、`FRONTEND_CODING`（前端编码）、`BACKEND_CODING`（后端编码）、`TESTING`（测试）、`RELEASED`（已发布）、`OTHER`（历史数据/未标记）。非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
+
+`status` 按 Skill 有效状态过滤，大小写不敏感，取值：`ACTIVE`（有效）、`ARCHIVED`（已归档）。非法值返回 `400 INVALID_SKILL_STATUS`。Skill 市场固定传入 `status=ACTIVE`，不展示已归档 Skill。
 
 排序字段使用实体属性名，如 `sort=timeUpdated,desc`（不要使用 `updatedAt` 等不存在的属性，否则会返回 500）。
 
@@ -459,7 +479,7 @@
 {"comment":"Approved"}
 ```
 
-审核意见必填，返回 `ReviewView`。版本进入 `APPROVED`。
+审核意见必填，返回 `ReviewView`。审核通过后后端立即触发发布构建：构建成功时版本进入 `PUBLISHED` 并生成可下载制品；构建失败时审核仍保留为通过、版本保持 `APPROVED`，可通过构建任务/通知查看失败原因并重试发布。
 
 ### POST `/reviews/{reviewId}:reject`
 
@@ -470,6 +490,26 @@
 ```
 
 版本退回 `DRAFT`。发起者可修改后再次提交，或取消草稿；每次重提创建新的 `reviewId/reviewNo`。
+
+### POST `/reviews:batch-approve`
+
+权限：`skill:review`。管理员批量通过审核，单批最多 50 条。每条成功审核会立即触发发布构建；构建成功的版本进入 `PUBLISHED`，构建失败的版本保持 `APPROVED` 并在结果/构建任务中体现失败。批次采用部分成功策略，已处理或不存在的记录在 `items` 中单独返回失败原因。
+
+```json
+{"reviewIds":[101,102,103],"comment":"批量审核通过"}
+```
+
+`comment` 可选，将应用于本批所有记录。返回 `total`、`successCount`、`failureCount` 以及逐条 `items`（`reviewId`、`success`、成功时的 `review`，失败时的 `errorCode`/`errorMessage`）。
+
+### POST `/reviews:batch-reject`
+
+权限：`skill:review`。请求格式和返回格式同批量通过；成功记录的审核状态为 `REJECTED`，对应 Skill 版本退回 `DRAFT`，维护者可修改后重新提交。
+
+```json
+{"reviewIds":[101,102],"comment":"请补充使用说明"}
+```
+
+`reviewIds` 必填且不可重复，最多 50 条；空列表、重复 ID 或超过上限返回 400。
 
 ### POST `/skill-versions/{versionId}:withdraw`
 
@@ -623,12 +663,12 @@ POST /skills
 → GET /skills/{key}/versions 或 GET /skills/{key}/draft 查看结果
 ```
 
-审核发布流程：
+审核发布流程（审核通过自动触发发布，无需再次点击发布）：
 
 ```text
 GET /reviews
 → POST /reviews/{id}:approve 或 :reject
-→ 审核通过后 POST /skill-versions/{id}:publish
+→（通过时后端自动创建并执行发布构建）
 → GET /build-tasks/{taskId}
 ```
 
@@ -647,7 +687,14 @@ GET /skills
 
 ### GET `/notifications`
 
-查询参数：`unreadOnly`（默认 `false`）、`page`、`size`、`sort`。返回 `PageResponse<NotificationView>`：
+查询参数：
+
+- `unreadOnly`：可选布尔值，默认 `false`；`true` 仅返回未读通知（`readAt IS NULL`），`false` 返回当前用户的全部通知。
+- `page`：可选页码，从 `0` 开始，默认由 Spring Pageable 处理。
+- `size`：可选每页条数，默认由 Spring Pageable 处理。
+- `sort`：可重复传递的排序参数，格式为 `实体属性,方向`，方向为 `asc` 或 `desc`。通知创建时间必须使用 JPA 实体属性 `timeCreated`，例如 `sort=timeCreated,desc`；不能使用返回字段名 `createdAt`。
+
+返回 `PageResponse<NotificationView>`。响应中的创建时间字段仍为 `createdAt`：
 
 ```json
 {"items":[{"id":1,"type":"REVIEW_SUBMITTED","title":"新的 Skill 审核任务","content":"Demo 已提交审核","targetType":"REVIEW","targetId":10,"skillKey":"demo","versionId":20,"readAt":null,"createdAt":"2026-09-03T01:00:00Z"}],"page":0,"size":20,"totalElements":1,"totalPages":1}
@@ -671,5 +718,71 @@ GET /skills
 
 ## 15. 当前已知对接注意事项
 
+## 16. 平台与操作系统选择
+
+Skill 市场的 `GET /skills` 和 Agent 会话均支持 `platform`、`osType`。支持的平台为 `CODEBUDDY`、`OPENCODE`，操作系统为 `ANY`、`WINDOWS`、`MACOS`、`LINUX`。
+
+前端应将用户显式选择的值通过详情页查询参数继续传递：`/skills/{skillKey}?platform=OPENCODE&osType=LINUX`。未传值时使用 `CODEBUDDY` 和 `ANY`。下载接口优先返回精确匹配的 Artifact，没有精确匹配时回退到同平台 `ANY` Artifact。
+
+## 17. 评价、评论与下载统计
+
+### GET `/skills/{skillKey}/feedback`
+
+权限：`skill:browse`。查询参数使用标准分页参数。返回平均评分、评分数量、下载数量、当前用户评价和其他用户评价：
+
+```json
+{"averageRating":4.5,"ratingCount":2,"downloadCount":18,"mine":{"rating":5,"comment":"很好用"},"items":{"content":[],"totalElements":2,"totalPages":1}}
+```
+
+### PUT `/skills/{skillKey}/feedback`
+
+权限：`skill:browse`。同一用户对同一 Skill 只有一条评价，重复提交会更新原评价。评分必须为 1 至 5：
+
+```json
+{"rating":5,"comment":"很好用"}
+```
+
+### DELETE `/skills/{skillKey}/feedback`
+
+权限：`skill:browse`。删除当前用户自己的评价。
+
+## 18. 飞书登录
+
+启用 `FEISHU_ENABLED=true` 并配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_REDIRECT_URI` 后，访问 `GET /auth/feishu/authorize` 跳转飞书 OAuth 授权页；飞书回调 `GET /auth/feishu/callback?code=...&state=...` 后换取平台 Token。
+
+飞书通讯录同步使用应用身份的 `tenant_access_token`，只同步飞书开放平台后台授予应用通讯录权限范围内的部门和成员。应用密钥只允许通过环境变量或密钥管理系统注入。
+
 - 上传 ZIP 中的 `skill.yaml`、`overlays/**` 属于保留路径；平台会自动生成标准配置。前端如需调整，应调用文件编辑/重置接口。
 - 发布接口实际构建可能同步完成，但仍使用 HTTP 202 和构建任务响应；前端应以任务状态和版本状态为准。
+
+### 18.1 飞书通讯录同步与团队树
+
+`POST /admin/feishu/sync` 要求 `admin:identity`，立即返回 `202 Accepted` 并在后台使用应用身份同步飞书部门与成员。同步成功或失败都会向发起人及平台管理员发送通知，结果请在通知中心查看；已有同步任务运行时不会重复启动。
+
+`GET /admin/teams/tree` 和 `GET /admin/teams/{teamId}/members` 要求 `admin:identity` 或 `skill:review`。超级管理员可查看全部团队；团队管理员只能查看自己管理的团队。
+
+成员接口返回 `userId`、`username`、`displayName`、`membershipType` 以及 `roles`。`roles` 中包含角色键、作用域类型、团队 ID 和版本号，前端可据此展示当前角色。
+
+团队角色接口：
+
+- `POST /admin/teams/{teamId}/members/{userId}/roles?roleKey=TEAM_ADMIN|TEAM_MAINTAINER`
+- `DELETE /admin/teams/{teamId}/members/{userId}/roles/{roleKey}`
+
+超级管理员可授予团队管理员、团队 Skill 维护员；团队管理员仅可在自己的团队内授予或撤销团队 Skill 维护员。角色授权要求目标用户属于团队，并写入审计日志。飞书未配置时同步返回 `503 FEISHU_NOT_CONFIGURED`。
+
+### 18.2 Skill 可见范围与审核升级
+
+创建 Skill 时可传 `teamId`。不传表示平台级 Skill；传入团队 ID 表示团队内部 Skill，仅该团队成员可在市场、详情、版本、下载和评价接口中访问。
+
+- `POST /skill-versions/{versionId}:submit-review`：团队 Skill 产生团队审核任务，平台级 Skill 直接产生平台审核任务。
+- `POST /skill-versions/{versionId}:push-to-company`：团队管理员将已发布的团队版本提交给平台二次审核。
+- 平台审核通过团队升级任务后，Skill 变为平台级并对全员可见。
+- `POST /admin/platform-maintainers/{userId}` / `DELETE /admin/platform-maintainers/{userId}`：超级管理员管理平台级 Skill 维护员。
+
+### 18.3 平台、操作系统与包回退
+
+市场查询支持 `platform=CODEBUDDY|OPENCODE` 和 `osType` 参数，前端会把用户选择带入详情页。下载接口优先匹配所选平台与系统的包；没有精确包时回退到同平台 `ANY` 系统包，没有选择时使用前端默认选项。
+
+### 18.4 下载量、评分与评论
+
+`GET /skills/{skillKey}/feedback` 返回 `downloadCount`、五分制 `averageRating`、`ratingCount`、当前用户 `mine` 和分页的全部用户评论。`PUT /skills/{skillKey}/feedback` 使用 1 至 5 分更新当前用户评价；每个用户对同一 Skill 保持一条评价。

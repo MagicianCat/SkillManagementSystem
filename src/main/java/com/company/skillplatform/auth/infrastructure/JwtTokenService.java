@@ -7,6 +7,7 @@ import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.Date;
 import javax.crypto.SecretKey;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,6 +30,14 @@ public class JwtTokenService {
                 .claim("username", user.username()).claim("roles", user.roles())
                 .claim("permissions", user.permissions()).issuedAt(Date.from(now))
                 .expiration(Date.from(now.plus(properties.accessTtl()))).signWith(key).compact();
+    }
+    public String createSignedState(String provider, String redirectPath, String nonce, Duration ttl) {
+        Instant now = clock.instant();
+        return Jwts.builder().issuer(properties.issuer()).subject(nonce)
+                .claim("typ", "oauth_state").claim("provider", provider)
+                .claim("redirect_path", redirectPath).claim("nonce", nonce)
+                .issuedAt(Date.from(now)).expiration(Date.from(now.plus(ttl)))
+                .signWith(key).compact();
     }
     public Claims parse(String token) {
         return Jwts.parser().verifyWith(key).requireIssuer(properties.issuer())

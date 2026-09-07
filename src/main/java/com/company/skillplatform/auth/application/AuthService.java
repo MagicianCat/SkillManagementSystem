@@ -12,6 +12,10 @@ import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamRolePermissionRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRoleRepository;
+import com.company.skillplatform.user.infrastructure.repository.IamRoleRepository;
+import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
+import com.company.skillplatform.user.infrastructure.entity.IamUserRoleEntity;
+import com.company.skillplatform.user.domain.IdentityProviderType;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -35,6 +39,7 @@ public class AuthService {
     private final Map<String, IdentityProvider> providers;
     private final IamUserRepository users;
     private final IamUserRoleRepository userRoles;
+    private final IamRoleRepository roles;
     private final IamRolePermissionRepository rolePermissions;
     private final AuthRefreshTokenRepository refreshTokens;
     private final JwtTokenService jwt;
@@ -43,16 +48,48 @@ public class AuthService {
 
     @Autowired
     public AuthService(List<IdentityProvider> providers, IamUserRepository users,
-                       IamUserRoleRepository userRoles, IamRolePermissionRepository rolePermissions,
+                       IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
                        AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt) {
-        this(providers, users, userRoles, rolePermissions, refreshTokens, jwt, Clock.systemUTC(), new SecureRandom());
+        this(providers, users, userRoles, roles, rolePermissions, refreshTokens, jwt, Clock.systemUTC(), new SecureRandom());
     }
     AuthService(List<IdentityProvider> providers, IamUserRepository users,
                 IamUserRoleRepository userRoles, IamRolePermissionRepository rolePermissions,
                 AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt, Clock clock, SecureRandom random) {
+        this(providers,users,userRoles,null,rolePermissions,refreshTokens,jwt,clock,random);
+    }
+    AuthService(List<IdentityProvider> providers, IamUserRepository users,
+                IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
+                AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt, Clock clock, SecureRandom random) {
         this.providers = providers.stream().collect(Collectors.toUnmodifiableMap(IdentityProvider::providerKey, Function.identity()));
-        this.users = users; this.userRoles = userRoles; this.rolePermissions = rolePermissions;
+        this.users = users; this.userRoles = userRoles; this.roles=roles; this.rolePermissions = rolePermissions;
         this.refreshTokens = refreshTokens; this.jwt = jwt; this.clock = clock; this.random = random;
+    }
+
+    @Transactional
+    public TokenResult loginFeishu(String externalId,String username,String displayName,String email,String clientInfo) {
+        return loginFeishu(new FeishuIdentity(externalId, externalId, null, username, displayName, email, null), clientInfo);
+    }
+
+    @Transactional
+    public TokenResult loginFeishu(FeishuIdentity identity, String clientInfo) {
+        IamUserEntity user = users.findByFeishuOpenId(identity.openId())
+                .or(() -> users.findByFeishuUserId(identity.userId()))
+                .or(() -> users.findByIdentityProviderAndExternalUserId(IdentityProviderType.FEISHU, identity.externalId()))
+                .orElse(null);
+        if (user == null) {
+            user = users.save(new IamUserEntity(IdentityProviderType.FEISHU, identity.externalId(), identity.username(), null,
+                    identity.displayName(), identity.email()));
+            user.updateFeishuIds(identity.openId(), identity.unionId(), identity.userId());
+            IamRoleEntity consumer = roles.findByRoleKey("CONSUMER").orElse(null);
+            if (consumer != null) userRoles.save(new IamUserRoleEntity(user, consumer, user));
+        } else {
+            if (user.getStatus() != UserStatus.ACTIVE) throw new BusinessException("AUTHENTICATION_INVALID", "Authentication is no longer valid", HttpStatus.UNAUTHORIZED);
+            user.updateExternalProfile(identity.username(), identity.displayName(), identity.email());
+            user.updateFeishuIds(identity.openId(), identity.unionId(), identity.userId());
+            users.save(user);
+        }
+        user.recordLogin(clock.instant());
+        return issue(user, clientInfo);
     }
 
     @Transactional
@@ -148,4 +185,6 @@ public class AuthService {
         return new BusinessException("INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired", HttpStatus.UNAUTHORIZED);
     }
     public record TokenResult(String accessToken, String refreshToken, long expiresIn, AuthenticatedUser user) {}
+    public record FeishuIdentity(String externalId, String openId, String userId, String username,
+                                 String displayName, String email, String unionId) {}
 }

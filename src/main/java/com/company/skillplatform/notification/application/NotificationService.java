@@ -79,6 +79,16 @@ public class NotificationService {
                 "SKILL_VERSION", version.getId(), version);
     }
 
+    @Transactional
+    public void directorySyncCompleted(Long actorId, boolean succeeded, String content) {
+        LinkedHashMap<Long, IamUserEntity> recipients = new LinkedHashMap<>();
+        users.findById(actorId).ifPresent(user -> recipients.put(user.getId(), user));
+        userRoles.findActiveUsersByPermission("admin:identity").forEach(user -> recipients.put(user.getId(), user));
+        NotificationType type = succeeded ? NotificationType.DIRECTORY_SYNC_SUCCEEDED : NotificationType.DIRECTORY_SYNC_FAILED;
+        save(recipients.values(), type, succeeded ? "飞书通讯录同步完成" : "飞书通讯录同步失败", content,
+                "FEISHU_DIRECTORY", 0L, null);
+    }
+
     /** Reserved orchestration hook; call after publish when version-update recommendation is enabled. */
     @Transactional
     public void versionUpdated(SkillVersionEntity version, VersionUpdateRecipientProvider provider) {

@@ -9,6 +9,9 @@ import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 
 public interface IamUserRepository extends JpaRepository<IamUserEntity, Long>, JpaSpecificationExecutor<IamUserEntity> {
     Optional<IamUserEntity> findByUsername(String username);
+    Optional<IamUserEntity> findByIdentityProviderAndExternalUserId(com.company.skillplatform.user.domain.IdentityProviderType provider, String externalUserId);
+    Optional<IamUserEntity> findByFeishuOpenId(String openId);
+    Optional<IamUserEntity> findByFeishuUserId(String userId);
     boolean existsByUsername(String username);
 
     @Modifying(clearAutomatically = true, flushAutomatically = true)
