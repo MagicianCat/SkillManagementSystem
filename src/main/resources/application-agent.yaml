@@ -1,0 +1,8 @@
+server:
+  port: 8090
+
+agent:
+  mcp:
+    run-ttl: PT30M
+    # Inject a dedicated secret in non-local environments.
+    signing-key: ${AGENT_MCP_SIGNING_KEY:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}
