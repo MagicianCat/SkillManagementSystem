@@ -16,7 +16,7 @@
 | `durationMs` | 耗时毫秒 |
 | `errorCode` | 稳定错误码，与 API 错误响应一致 |
 | `skillKey` / `versionId` / `version` | Skill 稳定键、版本 ID、版本号 |
-| `developmentStage` | Skill 本体开发阶段（REQUIREMENT/DESIGN/FRONTEND_CODING/BACKEND_CODING/TESTING/RELEASED/OTHER） |
+| `developmentStage` | Skill 本体开发阶段（REQUIREMENT/ARCHITECTURE_DESIGN/UI_DESIGN/FRONTEND_CODING/BACKEND_CODING/TESTING/RELEASED/OTHER） |
 | `platform` / `osType` / `adapterVersion` | 平台、操作系统、Adapter 版本 |
 | `bundleId` / `bundleKey` / `lockHash` | Bundle ID、确定性键、依赖锁哈希 |
 

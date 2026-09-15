@@ -10,6 +10,7 @@ import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRoleRepository;
 import com.company.skillplatform.version.infrastructure.entity.SkillVersionEntity;
+import com.company.skillplatform.wiki.infrastructure.entity.WikiDocumentEntity;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
@@ -80,6 +81,22 @@ public class NotificationService {
     }
 
     @Transactional
+    public void wikiReviewSubmitted(WikiDocumentEntity document, Long reviewId) {
+        save(userRoles.findActiveUsersByPermission("wiki:review"), NotificationType.REVIEW_SUBMITTED,
+                "新的 Wiki 平台推广审核", document.getTitle() + " 已提交全平台审核",
+                "WIKI_REVIEW", reviewId, null);
+    }
+
+    @Transactional
+    public void wikiReviewCompleted(WikiDocumentEntity document, Long reviewId, boolean approved, Long submitterId, String comment) {
+        users.findById(submitterId).ifPresent(submitter -> save(java.util.List.of(submitter),
+                approved ? NotificationType.REVIEW_APPROVED : NotificationType.REVIEW_REJECTED,
+                approved ? "Wiki 平台推广审核通过" : "Wiki 平台推广审核拒绝",
+                document.getTitle() + (approved ? " 已对全平台开放" : " 的平台推广申请已拒绝") + "：" + comment,
+                "WIKI_DOCUMENT", document.getId(), null));
+    }
+
+    @Transactional
     public void directorySyncCompleted(Long actorId, boolean succeeded, String content) {
         LinkedHashMap<Long, IamUserEntity> recipients = new LinkedHashMap<>();
         users.findById(actorId).ifPresent(user -> recipients.put(user.getId(), user));
@@ -100,8 +117,8 @@ public class NotificationService {
     @PreAuthorize("isAuthenticated()") @Transactional(readOnly = true)
     public Page<NotificationView> inbox(Long userId, boolean unreadOnly, Pageable pageable) {
         Page<UserNotificationEntity> page = unreadOnly
-                ? notifications.findByRecipientIdAndReadAtIsNull(userId, pageable)
-                : notifications.findByRecipientId(userId, pageable);
+                ? notifications.findUnreadInbox(userId, pageable)
+                : notifications.findInbox(userId, pageable);
         return page.map(NotificationService::view);
     }
 

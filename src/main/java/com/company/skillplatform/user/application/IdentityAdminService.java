@@ -3,7 +3,6 @@ package com.company.skillplatform.user.application;
 import com.company.skillplatform.audit.application.AuditService;
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.common.logging.LogContext;
-import com.company.skillplatform.user.domain.IdentityProviderType;
 import com.company.skillplatform.user.domain.UserStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamPermissionEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
@@ -21,7 +20,6 @@ import java.util.Map;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,13 +33,12 @@ public class IdentityAdminService {
     private final IamPermissionRepository permissions;
     private final IamUserRoleRepository userRoles;
     private final IamRolePermissionRepository rolePermissions;
-    private final PasswordEncoder encoder;
     private final AuditService audit;
     public IdentityAdminService(IamUserRepository users, IamRoleRepository roles, IamPermissionRepository permissions,
                                 IamUserRoleRepository userRoles, IamRolePermissionRepository rolePermissions,
-                                PasswordEncoder encoder, AuditService audit) {
+                                AuditService audit) {
         this.users = users; this.roles = roles; this.permissions = permissions; this.userRoles = userRoles;
-        this.rolePermissions = rolePermissions; this.encoder = encoder; this.audit = audit;
+        this.rolePermissions = rolePermissions; this.audit = audit;
     }
     @Transactional(readOnly = true) public Page<IamUserEntity> users(Pageable pageable) { return users.findAll(pageable); }
     @Transactional(readOnly = true) public List<IamRoleEntity> roles() { return roles.findAll(); }
@@ -52,17 +49,6 @@ public class IdentityAdminService {
     @Transactional(readOnly = true) public List<Long> rolePermissionIds(Long roleId) {
         if (!roles.existsById(roleId)) throw notFound("ROLE_NOT_FOUND", "Role not found");
         return rolePermissions.findAllByRoleId(roleId).stream().map(link -> link.getPermission().getId()).toList();
-    }
-    @Transactional
-    public IamUserEntity createUser(String username, String password, String displayName, String email,
-                                    Long operatorId, String requestId) {
-        if (users.existsByUsername(username)) throw new BusinessException("USERNAME_EXISTS", "Username already exists", HttpStatus.CONFLICT);
-        IamUserEntity created = users.save(new IamUserEntity(IdentityProviderType.MOCK, username, username,
-                encoder.encode(password), displayName, email));
-        audit.success("IDENTITY_USER_CREATED", user(operatorId), "IAM_USER", created.getId(), requestId,
-                null, Map.of("username", created.getUsername(), "status", created.getStatus().name()), Map.of());
-        log.info("event=identity.user.created requestId={} actorId={} targetUserId={} username={}", requestId, operatorId, created.getId(), username);
-        return created;
     }
     @Transactional
     public IamUserEntity changeStatus(Long userId, UserStatus status, int versionNo, Long operatorId, String requestId) {

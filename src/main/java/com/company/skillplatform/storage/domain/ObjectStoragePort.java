@@ -7,4 +7,5 @@ public interface ObjectStoragePort {
     void put(String objectKey, InputStream content, long size, String contentType);
     InputStream get(String objectKey);
     boolean exists(String objectKey);
+    void delete(String objectKey);
 }

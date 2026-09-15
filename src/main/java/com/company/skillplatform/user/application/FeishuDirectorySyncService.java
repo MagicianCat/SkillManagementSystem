@@ -1,84 +1,38 @@
 package com.company.skillplatform.user.application;
 
 import com.company.skillplatform.auth.infrastructure.FeishuProperties;
+import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.notification.application.NotificationService;
 import com.company.skillplatform.user.domain.IdentityProviderType;
 import com.company.skillplatform.user.domain.UserStatus;
-import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
-import com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity;
-import com.company.skillplatform.user.infrastructure.entity.OrgTeamMemberEntity;
-import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
-import com.company.skillplatform.user.infrastructure.repository.OrgTeamMemberRepository;
-import com.company.skillplatform.user.infrastructure.repository.OrgTeamRepository;
+import com.company.skillplatform.user.infrastructure.entity.*;
+import com.company.skillplatform.user.infrastructure.repository.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.*;
 import java.time.Instant;
 import java.util.*;
+import org.slf4j.*;
 import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import com.company.skillplatform.common.application.BusinessException;
-import com.company.skillplatform.notification.application.NotificationService;
 import org.springframework.scheduling.annotation.Async;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
 
-@Service
-public class FeishuDirectorySyncService {
-    private static final Logger log = LoggerFactory.getLogger(FeishuDirectorySyncService.class);
-    private final java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean();
-    private final FeishuProperties config; private final ObjectMapper json; private final OrgTeamRepository teams;
-    private final OrgTeamMemberRepository members; private final IamUserRepository users; private final NotificationService notifications;
+@Service public class FeishuDirectorySyncService {
+    private static final Logger log=LoggerFactory.getLogger(FeishuDirectorySyncService.class);
+    private final Instant now=Instant.now();
+    private final java.util.concurrent.atomic.AtomicBoolean running=new java.util.concurrent.atomic.AtomicBoolean();
+    private final FeishuProperties config;private final ObjectMapper json;private final OrgTeamRepository teams;private final OrgTeamMemberRepository members;private final IamUserRepository users;private final NotificationService notifications;private final FeishuTenantTokenProvider tokens;
     private final HttpClient http=HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(10)).build();
-    public FeishuDirectorySyncService(FeishuProperties c,ObjectMapper j,OrgTeamRepository t,OrgTeamMemberRepository m,IamUserRepository u,NotificationService n){config=c;json=j;teams=t;members=m;users=u;notifications=n;}
-
-    @Async
-    public void syncAsync(Long actorId){
-        if(!running.compareAndSet(false,true)){notifications.directorySyncCompleted(actorId,false,"已有同步任务正在执行，请稍后查看通知中心");return;}
-        try { SyncResult result=sync(); notifications.directorySyncCompleted(actorId,true,"共同步 "+result.teamCount()+" 个团队、"+result.memberCount()+" 条成员关系"); }
-        catch(Exception error){ notifications.directorySyncCompleted(actorId,false,"同步失败："+error.getMessage()); }
-        finally { running.set(false); }
-    }
-
-    public SyncResult sync(){
-        enabled(); String token=tenantToken(); Instant now=Instant.now(); int[] counts={0,0};
-        syncDepartment("0",null,token,now,counts,new HashSet<>());
-        log.info("event=feishu.directory.sync.completed teamCount={} memberCount={}",counts[0],counts[1]);
-        return new SyncResult(counts[0],counts[1],now);
-    }
-    private void syncDepartment(String externalParent,OrgTeamEntity parent,String token,Instant now,int[] counts,Set<String> visited){
-        if(!visited.add(externalParent)){log.warn("event=feishu.directory.department.cycle_skipped departmentId={}",externalParent);return;}
-        for(JsonNode response:pages("/contact/v3/departments?parent_department_id="+enc(externalParent)+"&page_size=50",token)) for(JsonNode item:response.path("data").path("items")){
-            String id=text(item,"open_department_id",text(item,"department_id","")); if(id.isBlank())continue;
-            OrgTeamEntity team=teams.findByProviderAndExternalDepartmentId("FEISHU",id).orElseGet(()->teams.save(new OrgTeamEntity("FEISHU",id,parent,text(item,"name",id))));
-            team.sync(text(item,"name",id),parent,now); teams.save(team); counts[0]++;
-            syncMembers(team,token,counts); syncDepartment(id,team,token,now,counts,visited);
-        }
-    }
-    private void syncMembers(OrgTeamEntity team,String token,int[] counts){
-        for(JsonNode response:pages("/contact/v3/users/find_by_department?department_id="+enc(team.getExternalDepartmentId())+"&department_id_type=open_department_id&user_id_type=open_id&page_size=50",token)) for(JsonNode item:response.path("data").path("items")){
-            String userId=text(item,"user_id",""); String openId=text(item,"open_id",""); String unionId=text(item,"union_id","");
-            String external=!openId.isBlank()?openId:(!userId.isBlank()?userId:unionId); if(external.isBlank())continue;
-            String email=text(item,"email",null), name=text(item,"name",external), username="feishu_"+external;
-            IamUserEntity user=( !openId.isBlank() ? users.findByFeishuOpenId(openId) : java.util.Optional.<IamUserEntity>empty())
-                    .or(() -> !userId.isBlank() ? users.findByFeishuUserId(userId) : java.util.Optional.empty())
-                    .or(() -> users.findByIdentityProviderAndExternalUserId(IdentityProviderType.FEISHU,external))
-                    .orElseGet(()->users.save(new IamUserEntity(IdentityProviderType.FEISHU,external,username,null,name,email)));
-            user.updateExternalProfile(username,name,email); user.updateFeishuIds(openId,unionId,userId); user.updateAvatar(text(item,"avatar_url",null)); user.changeStatus(UserStatus.ACTIVE); users.save(user);
-            if(!members.existsByTeamIdAndUserId(team.getId(),user.getId()))members.save(new OrgTeamMemberEntity(team,user)); counts[1]++;
-        }
-    }
-    private String tenantToken(){
-        try{String body=json.writeValueAsString(Map.of("app_id",config.appId(),"app_secret",config.appSecret()));
-            JsonNode data=json.readTree(send(config.apiBaseUrl()+"/auth/v3/tenant_access_token/internal",body,"POST",null));
-            String token=data.path("tenant_access_token").asText(data.path("data").path("tenant_access_token").asText()); if(token.isBlank())throw error("FEISHU_TOKEN_INVALID","Feishu tenant token exchange failed",HttpStatus.BAD_GATEWAY);return token;
-        }catch(BusinessException e){throw e;}catch(Exception e){throw error("FEISHU_SYNC_FAILED","Feishu directory sync failed",HttpStatus.BAD_GATEWAY);}
-    }
-    private JsonNode get(String path,String token){try{return json.readTree(send(config.apiBaseUrl()+path,null,"GET",token));}catch(Exception e){throw error("FEISHU_SYNC_FAILED","Feishu directory request failed",HttpStatus.BAD_GATEWAY);}}
-    private List<JsonNode> pages(String firstPath,String token){List<JsonNode> result=new ArrayList<>();String path=firstPath;for(int page=0;page<100;page++){JsonNode response=get(path,token);result.add(response);JsonNode data=response.path("data");if(!data.path("has_more").asBoolean(false))break;String next=data.path("page_token").asText("");if(next.isBlank())break;path=firstPath+"&page_token="+enc(next);}return result;}
-    private String send(String url,String body,String method,String token)throws Exception{var b=HttpRequest.newBuilder(URI.create(url)).timeout(java.time.Duration.ofSeconds(20));if(token!=null)b.header("Authorization","Bearer "+token);if(body!=null)b.header("Content-Type","application/json");HttpRequest r="GET".equals(method)?b.GET().build():b.method(method,HttpRequest.BodyPublishers.ofString(body)).build();var response=http.send(r,HttpResponse.BodyHandlers.ofString());if(response.statusCode()/100!=2)throw new IllegalStateException("HTTP "+response.statusCode());return response.body();}
-    private void enabled(){if(!config.enabled()||config.appId().isBlank()||config.appSecret().isBlank())throw error("FEISHU_NOT_CONFIGURED","Feishu is not configured",HttpStatus.SERVICE_UNAVAILABLE);}
-    private BusinessException error(String c,String m,HttpStatus s){return new BusinessException(c,m,s);} private String text(JsonNode n,String key,String fallback){JsonNode v=n.get(key);return v==null||v.isNull()?fallback:v.asText(fallback);} private String enc(String value){return java.net.URLEncoder.encode(value,java.nio.charset.StandardCharsets.UTF_8);}
-    public record SyncResult(int teamCount,int memberCount,Instant syncedAt){}
+    public FeishuDirectorySyncService(FeishuProperties c,ObjectMapper j,OrgTeamRepository t,OrgTeamMemberRepository m,IamUserRepository u,NotificationService n,FeishuTenantTokenProvider tokens){config=c;json=j;teams=t;members=m;users=u;notifications=n;this.tokens=tokens;}
+    @Async public void syncAsync(Long actorId){if(!running.compareAndSet(false,true)){notifications.directorySyncCompleted(actorId,false,"已有同步任务正在执行，请稍后查看通知中心");return;}try{SyncResult result=sync();notifications.directorySyncCompleted(actorId,true,"共同步 "+result.teamCount()+" 个团队、"+result.memberCount()+" 条成员关系");}catch(Exception e){log.error("event=feishu.directory.sync.failed",e);notifications.directorySyncCompleted(actorId,false,"同步失败："+e.getMessage());}finally{running.set(false);}}
+    public SyncResult sync(){enabled();Instant now=Instant.now();int[] counts={0,0};Set<String> seenDepartments=new HashSet<>();syncDepartment("0",null,now,counts,new HashSet<>(),seenDepartments);teams.findByProvider("FEISHU").stream().filter(t->!seenDepartments.contains(t.getExternalDepartmentId())&&"ACTIVE".equals(t.getStatus())).forEach(t->{t.deactivate();teams.save(t);});log.info("event=feishu.directory.sync.completed teamCount={} memberCount={}",counts[0],counts[1]);return new SyncResult(counts[0],counts[1],now);}
+    private void syncDepartment(String parentId,OrgTeamEntity parent,Instant now,int[] counts,Set<String> visited,Set<String> seen){if(!visited.add(parentId)){log.warn("event=feishu.directory.department.cycle_skipped departmentId={}",parentId);return;}for(JsonNode response:pages("/contact/v3/departments?parent_department_id="+enc(parentId)+"&page_size=50"))for(JsonNode item:response.path("data").path("items")){String id=text(item,"open_department_id",text(item,"department_id",""));if(id.isBlank())continue;seen.add(id);String name=text(item,"name",id);OrgTeamEntity team=teams.findByProviderAndExternalDepartmentId("FEISHU",id).orElseGet(()->teams.save(new OrgTeamEntity("FEISHU",id,parent,name)));if(team.syncIfChanged(name,parent,now,null))teams.save(team);counts[0]++;syncMembers(team,counts);syncDepartment(id,team,now,counts,visited,seen);}}
+    private void syncMembers(OrgTeamEntity team,int[] counts){Set<String> seen=new HashSet<>();List<OrgTeamMemberEntity> existing=members.findByTeamId(team.getId());for(JsonNode response:pages("/contact/v3/users/find_by_department?department_id="+enc(team.getExternalDepartmentId())+"&department_id_type=open_department_id&user_id_type=open_id&page_size=50"))for(JsonNode item:response.path("data").path("items")){String userId=text(item,"user_id","");String openId=text(item,"open_id","");String unionId=text(item,"union_id","");String external=!openId.isBlank()?openId:(!userId.isBlank()?userId:unionId);if(external.isBlank())continue;seen.add(external);String email=text(item,"email",null),name=text(item,"name",external),username="feishu_"+external,avatar=text(item,"avatar_url",null);IamUserEntity user=(!openId.isBlank()?users.findByFeishuOpenId(openId):Optional.<IamUserEntity>empty()).or(()->!userId.isBlank()?users.findByFeishuUserId(userId):Optional.empty()).or(()->users.findByIdentityProviderAndExternalUserId(IdentityProviderType.FEISHU,external)).orElseGet(()->users.save(new IamUserEntity(IdentityProviderType.FEISHU,external,username,null,name,email)));boolean changed=!Objects.equals(user.getUsername(),username)||!Objects.equals(user.getDisplayName(),name)||!Objects.equals(user.getEmail(),email)||!Objects.equals(user.getAvatarUrl(),avatar)||user.getStatus()!=UserStatus.ACTIVE;user.updateExternalProfile(username,name,email);user.updateFeishuIds(openId,unionId,userId);user.updateAvatar(avatar);user.changeStatus(UserStatus.ACTIVE);if(changed)users.save(user);OrgTeamMemberEntity relation=existing.stream().filter(m->m.getUser().getId().equals(user.getId())).findFirst().orElse(null);if(relation==null){relation=new OrgTeamMemberEntity(team,user);existing.add(relation);members.save(relation);}else if(!"ACTIVE".equals(relation.getStatus())){relation.sync(now,null);members.save(relation);}counts[1]++;}existing.stream().filter(m->!seen.contains(feishuExternal(m.getUser()))&&"ACTIVE".equals(m.getStatus())).forEach(m->{m.deactivate();members.save(m);});}
+    private String feishuExternal(IamUserEntity u){return u.getFeishuOpenId()!=null&&!u.getFeishuOpenId().isBlank()?u.getFeishuOpenId():u.getFeishuUserId()!=null&&!u.getFeishuUserId().isBlank()?u.getFeishuUserId():u.getExternalUserId();}
+    private JsonNode get(String path){String token=tokens.getToken();try{return json.readTree(send(config.apiBaseUrl()+path,null,"GET",token));}catch(InvalidFeishuTokenException e){tokens.invalidate(token);try{return json.readTree(send(config.apiBaseUrl()+path,null,"GET",tokens.getToken()));}catch(Exception retry){throw error("FEISHU_SYNC_FAILED","Feishu directory request failed after token refresh: "+retry.getMessage(),HttpStatus.BAD_GATEWAY);}}catch(Exception e){throw error("FEISHU_SYNC_FAILED","Feishu directory request failed: "+e.getMessage(),HttpStatus.BAD_GATEWAY);}}
+    private List<JsonNode> pages(String first){List<JsonNode> result=new ArrayList<>();String path=first;for(int page=0;page<1000;page++){JsonNode response=get(path);result.add(response);JsonNode data=response.path("data");if(!data.path("has_more").asBoolean(false))return result;String next=data.path("page_token").asText("");if(next.isBlank())throw error("FEISHU_PAGINATION_INVALID","Feishu pagination token missing",HttpStatus.BAD_GATEWAY);path=first+"&page_token="+enc(next);}throw error("FEISHU_PAGINATION_LIMIT","Feishu pagination limit exceeded",HttpStatus.BAD_GATEWAY);}
+    private String send(String url,String body,String method,String token)throws Exception{for(int attempt=1;;attempt++){try{var b=HttpRequest.newBuilder(URI.create(url)).timeout(java.time.Duration.ofSeconds(20));if(token!=null)b.header("Authorization","Bearer "+token);if(body!=null)b.header("Content-Type","application/json");HttpRequest request="GET".equals(method)?b.GET().build():b.method(method,HttpRequest.BodyPublishers.ofString(body)).build();var response=http.send(request,HttpResponse.BodyHandlers.ofString());if(response.statusCode()/100==2)return response.body();String detail=response.body().replaceAll("[\\r\\n]"," ");if(detail.contains("99991663"))throw new InvalidFeishuTokenException("HTTP "+response.statusCode()+" "+detail.substring(0,Math.min(300,detail.length())));if(attempt<4&&(response.statusCode()==429||response.statusCode()>=500)){long delay=500L<<(attempt-1);String retry=response.headers().firstValue("Retry-After").orElse("");try{if(!retry.isBlank())delay=Long.parseLong(retry)*1000;}catch(NumberFormatException ignored){}Thread.sleep(Math.min(delay,8000));continue;}throw new IllegalStateException("HTTP "+response.statusCode()+" "+detail.substring(0,Math.min(300,detail.length())));}catch(java.io.IOException e){if(attempt<4){Thread.sleep(Math.min(8000,500L<<(attempt-1)));continue;}throw e;}}}
+    private static final class InvalidFeishuTokenException extends RuntimeException{private InvalidFeishuTokenException(String message){super(message);}}
+    private void enabled(){if(!config.enabled()||config.appId().isBlank()||config.appSecret().isBlank())throw error("FEISHU_NOT_CONFIGURED","Feishu is not configured",HttpStatus.SERVICE_UNAVAILABLE);}private BusinessException error(String c,String m,HttpStatus s){return new BusinessException(c,m,s);}private String text(JsonNode n,String k,String f){JsonNode v=n.get(k);return v==null||v.isNull()?f:v.asText(f);}private String enc(String v){return java.net.URLEncoder.encode(v,java.nio.charset.StandardCharsets.UTF_8);}public record SyncResult(int teamCount,int memberCount,Instant syncedAt){}
 }

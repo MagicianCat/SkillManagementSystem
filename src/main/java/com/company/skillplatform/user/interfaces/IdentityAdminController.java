@@ -8,7 +8,6 @@ import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamPermissionEntity;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.util.List;
@@ -33,11 +32,6 @@ public class IdentityAdminController {
     @GetMapping("/users") PageResponse<UserView> users(Pageable pageable) {
         return PageResponse.from(service.users(pageable), UserView::from);
     }
-    @PostMapping("/users") UserView createUser(@Valid @RequestBody CreateUser request,
-                                                Authentication auth, HttpServletRequest servletRequest) {
-        return UserView.from(service.createUser(request.username(), request.password(), request.displayName(),
-                request.email(), (Long) auth.getPrincipal(), servletRequest.getRequestId()));
-    }
     @PatchMapping("/users/{id}/status") UserView status(@PathVariable Long id, @Valid @RequestBody StatusRequest request,
                                                         Authentication auth, HttpServletRequest servletRequest) {
         return UserView.from(service.changeStatus(id, request.status(), request.versionNo(),
@@ -60,7 +54,6 @@ public class IdentityAdminController {
                                                             Authentication auth, HttpServletRequest servletRequest) {
         service.replaceRolePermissions(id, request.ids(), request.versionNo(), (Long) auth.getPrincipal(), servletRequest.getRequestId());
     }
-    public record CreateUser(@NotBlank String username, @NotBlank String password, @NotBlank String displayName, @Email String email) {}
     public record StatusRequest(@NotNull UserStatus status, @NotNull Integer versionNo) {}
     public record CreateRole(@NotBlank String roleKey, @NotBlank String roleName, String description) {}
     public record IdsRequest(@NotNull List<@NotNull Long> ids, @NotNull Integer versionNo) {}

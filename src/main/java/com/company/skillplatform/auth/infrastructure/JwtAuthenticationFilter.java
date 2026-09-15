@@ -47,7 +47,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 var permissions = new java.util.HashSet<>(currentUser.permissions());
                 if (scopedRoles != null) scopedRoles.findByUserId(userId).forEach(a -> {
                     if (java.util.Set.of("TEAM_ADMIN","TEAM_MAINTAINER","PLATFORM_MAINTAINER").contains(a.getRoleKey())) permissions.addAll(java.util.List.of("skill:browse","skill:download","skill:upload","skill:edit"));
-                    if (java.util.Set.of("TEAM_ADMIN").contains(a.getRoleKey())) permissions.add("skill:review");
+                    if (java.util.Set.of("TEAM_ADMIN").contains(a.getRoleKey())) {
+                        permissions.add("skill:review");
+                        permissions.add("admin:telemetry");
+                    }
                 });
                 var authorities = permissions.stream()
                         .map(org.springframework.security.core.authority.SimpleGrantedAuthority::new).toList();
@@ -56,9 +59,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 log.info("event=auth.jwt.accepted requestId={} actorId={}", LogContext.requestId(), userId);
             } catch (JwtException | IllegalArgumentException | BusinessException ex) {
                 try {
+                    if (request.getRequestURI() == null || !request.getRequestURI().startsWith("/internal/mcp")) throw new IllegalStateException("agent token not valid on this route");
                     if (agentRuns == null) throw new IllegalStateException("agent token service unavailable");
                     var run = agentRuns.require(header.substring(7));
-                    var authorities = java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("skill:browse"));
+                    var authorities = java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("agent:mcp"), new org.springframework.security.core.authority.SimpleGrantedAuthority("skill:browse"));
                     SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(run.userId(), null, authorities));
                     log.info("event=auth.agent.accepted requestId={} runRef={}", LogContext.requestId(), run.runRef());
                 } catch (Exception ignored) {

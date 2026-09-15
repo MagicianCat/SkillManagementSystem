@@ -6,7 +6,8 @@ import org.springframework.data.domain.Pageable;import org.springframework.http.
 public class SkillFeedbackController{
  private final SkillFeedbackService service;public SkillFeedbackController(SkillFeedbackService s){service=s;}
  @GetMapping SkillFeedbackService.FeedbackPage list(@PathVariable String key,Pageable pageable,Authentication a){return service.list(key,(Long)a.getPrincipal(),pageable);}
- @PutMapping SkillFeedbackService.FeedbackView save(@PathVariable String key,@Valid@RequestBody Request r,Authentication a,HttpServletRequest h){return service.save(key,(Long)a.getPrincipal(),r.rating,r.comment,h.getRequestId());}
- @DeleteMapping @ResponseStatus(HttpStatus.NO_CONTENT) void delete(@PathVariable String key,Authentication a,HttpServletRequest h){service.delete(key,(Long)a.getPrincipal(),h.getRequestId());}
- public record Request(@Min(1)@Max(5)int rating,@Size(max=2000)String comment){}
+ @PutMapping("/rating") SkillFeedbackService.RatingView saveRating(@PathVariable String key,@Valid@RequestBody RatingRequest r,Authentication a,HttpServletRequest h){return service.saveRating(key,(Long)a.getPrincipal(),r.rating,h.getRequestId());}
+ @PostMapping("/comments") SkillFeedbackService.CommentView addComment(@PathVariable String key,@Valid@RequestBody CommentRequest r,Authentication a,HttpServletRequest h){return service.addComment(key,(Long)a.getPrincipal(),r.comment,h.getRequestId());}
+ @DeleteMapping("/comments/{commentId}") @ResponseStatus(HttpStatus.NO_CONTENT) void deleteComment(@PathVariable String key,@PathVariable Long commentId,Authentication a,HttpServletRequest h){service.deleteComment(key,(Long)a.getPrincipal(),commentId,h.getRequestId());}
+ public record RatingRequest(@Min(1)@Max(5)int rating){} public record CommentRequest(@NotBlank@Size(max=2000)String comment){}
 }

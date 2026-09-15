@@ -16,8 +16,8 @@ public class IamRolePermissionEntity extends BaseJpaEntity {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "permission_id", nullable = false)
     private IamPermissionEntity permission;
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "created_by", nullable = false)
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "created_by")
     private IamUserEntity createdBy;
 
     protected IamRolePermissionEntity() {}

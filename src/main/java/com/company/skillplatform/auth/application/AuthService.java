@@ -1,7 +1,6 @@
 package com.company.skillplatform.auth.application;
 
 import com.company.skillplatform.auth.domain.AuthenticatedUser;
-import com.company.skillplatform.auth.domain.IdentityProvider;
 import com.company.skillplatform.auth.infrastructure.JwtTokenService;
 import com.company.skillplatform.auth.infrastructure.entity.AuthRefreshTokenEntity;
 import com.company.skillplatform.auth.infrastructure.repository.AuthRefreshTokenRepository;
@@ -24,10 +23,6 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -36,7 +31,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class AuthService {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthService.class);
-    private final Map<String, IdentityProvider> providers;
     private final IamUserRepository users;
     private final IamUserRoleRepository userRoles;
     private final IamRoleRepository roles;
@@ -47,20 +41,14 @@ public class AuthService {
     private final SecureRandom random;
 
     @Autowired
-    public AuthService(List<IdentityProvider> providers, IamUserRepository users,
+    public AuthService(IamUserRepository users,
                        IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
                        AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt) {
-        this(providers, users, userRoles, roles, rolePermissions, refreshTokens, jwt, Clock.systemUTC(), new SecureRandom());
+        this(users, userRoles, roles, rolePermissions, refreshTokens, jwt, Clock.systemUTC(), new SecureRandom());
     }
-    AuthService(List<IdentityProvider> providers, IamUserRepository users,
-                IamUserRoleRepository userRoles, IamRolePermissionRepository rolePermissions,
-                AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt, Clock clock, SecureRandom random) {
-        this(providers,users,userRoles,null,rolePermissions,refreshTokens,jwt,clock,random);
-    }
-    AuthService(List<IdentityProvider> providers, IamUserRepository users,
+    AuthService(IamUserRepository users,
                 IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
                 AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt, Clock clock, SecureRandom random) {
-        this.providers = providers.stream().collect(Collectors.toUnmodifiableMap(IdentityProvider::providerKey, Function.identity()));
         this.users = users; this.userRoles = userRoles; this.roles=roles; this.rolePermissions = rolePermissions;
         this.refreshTokens = refreshTokens; this.jwt = jwt; this.clock = clock; this.random = random;
     }
@@ -72,12 +60,21 @@ public class AuthService {
 
     @Transactional
     public TokenResult loginFeishu(FeishuIdentity identity, String clientInfo) {
+        return issue(resolveFeishuUser(identity), clientInfo);
+    }
+
+    @Transactional
+    public AuthenticatedUser loginFeishuBrowser(FeishuIdentity identity) {
+        return loadActiveUser(resolveFeishuUser(identity).getId());
+    }
+
+    private IamUserEntity resolveFeishuUser(FeishuIdentity identity) {
         IamUserEntity user = users.findByFeishuOpenId(identity.openId())
                 .or(() -> users.findByFeishuUserId(identity.userId()))
                 .or(() -> users.findByIdentityProviderAndExternalUserId(IdentityProviderType.FEISHU, identity.externalId()))
                 .orElse(null);
         if (user == null) {
-            user = users.save(new IamUserEntity(IdentityProviderType.FEISHU, identity.externalId(), identity.username(), null,
+            user = users.save(new IamUserEntity(IdentityProviderType.FEISHU, identity.externalId(), identity.username(),
                     identity.displayName(), identity.email()));
             user.updateFeishuIds(identity.openId(), identity.unionId(), identity.userId());
             IamRoleEntity consumer = roles.findByRoleKey("CONSUMER").orElse(null);
@@ -89,31 +86,7 @@ public class AuthService {
             users.save(user);
         }
         user.recordLogin(clock.instant());
-        return issue(user, clientInfo);
-    }
-
-    @Transactional
-    public TokenResult login(String username, String password, String provider, String clientInfo) {
-        long startNanos = System.nanoTime();
-        IdentityProvider identityProvider = providers.get(provider.toUpperCase(Locale.ROOT));
-        if (identityProvider == null) {
-            log.warn("event=auth.login.failure requestId={} username={} provider={} errorCode={} durationMs={}",
-                    LogContext.requestId(), username, provider, "IDENTITY_PROVIDER_UNSUPPORTED", elapsedMs(startNanos));
-            throw new BusinessException("IDENTITY_PROVIDER_UNSUPPORTED", "Unsupported identity provider", HttpStatus.BAD_REQUEST);
-        }
-        try {
-            IdentityProvider.AuthenticationResult result = identityProvider.authenticate(username, password);
-            IamUserEntity user = activeUser(result.userId());
-            user.recordLogin(clock.instant());
-            TokenResult tokenResult = issue(user, clientInfo);
-            log.info("event=auth.login.success requestId={} actorId={} username={} provider={} durationMs={}",
-                    LogContext.requestId(), user.getId(), username, provider, elapsedMs(startNanos));
-            return tokenResult;
-        } catch (BusinessException ex) {
-            log.warn("event=auth.login.failure requestId={} username={} provider={} errorCode={} durationMs={}",
-                    LogContext.requestId(), username, provider, ex.getCode(), elapsedMs(startNanos));
-            throw ex;
-        }
+        return user;
     }
 
     @Transactional
@@ -149,6 +122,11 @@ public class AuthService {
 
     @Transactional(readOnly = true)
     public AuthenticatedUser currentUser(Long userId) { return loadActiveUser(userId); }
+
+    @Transactional
+    public TokenResult issueForUser(IamUserEntity user, String clientInfo) {
+        return issue(activeUser(user.getId()), clientInfo);
+    }
 
     private TokenResult issue(IamUserEntity user, String clientInfo) {
         AuthenticatedUser principal = loadActiveUser(user.getId());

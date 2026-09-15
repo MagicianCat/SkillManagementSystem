@@ -17,4 +17,5 @@ public class AgentMessageEntity extends BaseJpaEntity {
         this.session=session;this.run=run;this.sequenceNo=sequenceNo;this.role=role;this.content=content;this.status=status;
     }
     public long getSequenceNo(){return sequenceNo;} public String getRole(){return role;} public String getContent(){return content;} public String getStatus(){return status;}
+    public AgentRunEntity getRun(){return run;}
 }

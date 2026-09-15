@@ -40,6 +40,7 @@ class SkillFileServiceOpsTest{
     @Test void uploadRejectsInvalidZip(){MockMultipartFile file=new MockMultipartFile("f","x".getBytes());assertThatThrownBy(()->service.upload("demo",file,"c",1L,"r")).isInstanceOf(BusinessException.class);}
 
     @Test void filesListsIndexedFiles(){SkillFileIndexEntity row=new SkillFileIndexEntity(draft,0,"SKILL.md","file","text/markdown",10,true,"UPLOADED");when(indexes.findByVersionIdAndSourceRevision(20L,0)).thenReturn(List.of(row));assertThat(service.files(20L)).hasSize(1);assertThat(row.getSourceRevision()).isEqualTo(0);}
+    @Test void filesFallsBackToBaseIndexWhenExistingDraftIndexIsMissing(){SkillVersionEntity base=new SkillVersionEntity(skill,null,ChangeType.INITIAL,user);ReflectionTestUtils.setField(base,"id",50L);base.storeSource("skills/demo/revisions/1/source.zip","a".repeat(64),100,Map.of("storageStatus","READY"));ReflectionTestUtils.setField(base,"sourceRevision",1);ReflectionTestUtils.setField(draft,"baseVersion",base);draft.storeSource("skills/demo/revisions/1/source.zip","a".repeat(64),100,Map.of("storageStatus","READY"));SkillFileIndexEntity row=new SkillFileIndexEntity(base,1,"SKILL.md","file","text/markdown",10,true,"UPLOADED");when(indexes.findByVersionIdAndSourceRevision(20L,0)).thenReturn(List.of());when(indexes.findByVersionIdAndSourceRevision(50L,1)).thenReturn(List.of(row));assertThat(service.files(20L)).extracting(SkillFileService.FileView::path).containsExactly("SKILL.md");}
 
     @Test void saveContentEditsAndPersists(){
         seedWorkspace(Map.of("SKILL.md","v1"));

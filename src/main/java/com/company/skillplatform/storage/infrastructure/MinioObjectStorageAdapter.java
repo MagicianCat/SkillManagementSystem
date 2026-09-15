@@ -18,4 +18,5 @@ public class MinioObjectStorageAdapter implements ObjectStoragePort {
     }
     @Override public InputStream get(String key) { try { return client.getObject(GetObjectArgs.builder().bucket(properties.bucket()).object(key).build()); } catch (Exception ex) { log.error("event=storage.get.failed bucket={} key={} errorCode=STORAGE_READ_FAILED",properties.bucket(),key,ex); throw new BusinessException("STORAGE_READ_FAILED", "Unable to read source revision", HttpStatus.BAD_GATEWAY); } }
     @Override public boolean exists(String key) { try { client.statObject(StatObjectArgs.builder().bucket(properties.bucket()).object(key).build()); return true; } catch (Exception ex) { return false; } }
+    @Override public void delete(String key) { try { client.removeObject(RemoveObjectArgs.builder().bucket(properties.bucket()).object(key).build()); } catch (Exception ex) { log.warn("event=storage.delete.failed bucket={} key={}", properties.bucket(), key, ex); } }
 }

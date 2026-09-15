@@ -1,0 +1,2 @@
+ALTER TABLE agent_session ADD COLUMN source_channel VARCHAR(32) NOT NULL DEFAULT 'WEB';
+ALTER TABLE agent_session ADD COLUMN knowledge_scope VARCHAR(32) NOT NULL DEFAULT 'USER_VISIBLE';

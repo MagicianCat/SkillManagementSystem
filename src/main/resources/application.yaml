@@ -1,4 +1,6 @@
 spring:
+  config:
+    import: optional:file:.env[.properties]
   application:
     name: skill-management-system
 
@@ -39,6 +41,21 @@ server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
 
+auth:
+  browser:
+    cookie-secure: ${AUTH_BROWSER_COOKIE_SECURE:false}
+    cookie-max-age-seconds: ${AUTH_BROWSER_COOKIE_MAX_AGE_SECONDS:604800}
+    allowed-origins: ${AUTH_BROWSER_ALLOWED_ORIGINS:http://127.0.0.1:5173,http://localhost:5173}
+  ide:
+    verification-uri: ${IDE_AUTH_VERIFICATION_URI:http://127.0.0.1:5173/ide/authorize}
+    poll-interval-seconds: ${IDE_AUTH_POLL_INTERVAL_SECONDS:5}
+    cleanup-interval-ms: ${IDE_AUTH_CLEANUP_INTERVAL_MS:3600000}
+    rate-limit:
+      create-per-minute: ${IDE_AUTH_CREATE_PER_MINUTE:10}
+      approve-per-minute: ${IDE_AUTH_APPROVE_PER_MINUTE:10}
+      poll-per-minute: ${IDE_AUTH_POLL_PER_MINUTE:30}
+      max-entries: ${IDE_AUTH_RATE_LIMIT_MAX_ENTRIES:10000}
+
 logging:
   level:
     root: info
@@ -62,12 +79,19 @@ skill-platform:
     enabled: ${FEISHU_ENABLED:false}
     app-id: ${FEISHU_APP_ID:}
     app-secret: ${FEISHU_APP_SECRET:}
-    redirect-uri: ${FEISHU_REDIRECT_URI:}
+    redirect-uri: ${FEISHU_REDIRECT_URI:http://127.0.0.1:5173/oauth/callback}
+    mock-https-enabled: ${FEISHU_MOCK_HTTPS_ENABLED:false}
+    mock-https-base-url: ${FEISHU_MOCK_HTTPS_BASE_URL:}
     authorize-url: ${FEISHU_AUTHORIZE_URL:https://accounts.feishu.cn/open-apis/authen/v1/authorize}
     token-url: ${FEISHU_TOKEN_URL:https://open.feishu.cn/open-apis/authen/v2/oauth/token}
     user-info-url: ${FEISHU_USER_INFO_URL:https://open.feishu.cn/open-apis/authen/v1/user_info}
     api-base-url: ${FEISHU_API_BASE_URL:https://open.feishu.cn/open-apis}
+    token-encryption-key: ${FEISHU_TOKEN_ENCRYPTION_KEY:}
     event-enabled: ${FEISHU_EVENT_ENABLED:false}
+    bot-enabled: ${FEISHU_BOT_ENABLED:${FEISHU_EVENT_ENABLED:false}}
+    bot-web-base-url: ${FEISHU_BOT_WEB_BASE_URL:http://127.0.0.1:5173}
+    bot-task-interval-ms: ${FEISHU_BOT_TASK_INTERVAL_MS:2000}
+    bot-max-retries: ${FEISHU_BOT_MAX_RETRIES:3}
     oauth-state-ttl: ${FEISHU_OAUTH_STATE_TTL:5m}
   auth:
     jwt:
@@ -75,11 +99,6 @@ skill-platform:
       signing-key: ${JWT_SIGNING_KEY}
       access-ttl: ${JWT_ACCESS_TTL:30m}
       refresh-ttl: ${JWT_REFRESH_TTL:7d}
-    mock:
-      enabled: ${MOCK_AUTH_ENABLED:true}
-      admin-username: ${MOCK_ADMIN_USERNAME:admin}
-      admin-password: ${MOCK_ADMIN_PASSWORD}
-      admin-display-name: ${MOCK_ADMIN_DISPLAY_NAME:System Administrator}
   storage:
     minio:
       endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
@@ -89,3 +108,5 @@ skill-platform:
   upload:
     max-expanded-size: ${UPLOAD_MAX_EXPANDED_SIZE:200MB}
     max-file-count: ${UPLOAD_MAX_FILE_COUNT:2000}
+  telemetry:
+    encryption-key: ${SKILL_USAGE_ENCRYPTION_KEY:}

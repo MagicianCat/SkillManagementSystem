@@ -28,6 +28,17 @@ class SkillFileServiceContentTest{
         assertThat(service.content(20L,"SKILL.md")).isEqualTo("# 你好");
     }
 
+    @Test void contentFallsBackToBaseSourceForLegacyDraft() throws IOException{
+        SkillVersionEntity base=new SkillVersionEntity(version.getSkill(),null,ChangeType.INITIAL,user);
+        ReflectionTestUtils.setField(base,"id",50L);
+        base.storeSource("skills/demo/revisions/1/source.zip","a".repeat(64),100,Map.of("storageStatus","READY"));
+        ReflectionTestUtils.setField(base,"sourceRevision",1);
+        ReflectionTestUtils.setField(version,"baseVersion",base);
+        when(skills.version(20L)).thenReturn(version);
+        when(storage.get("skills/demo/revisions/1/source.zip")).thenReturn(zip(Map.of("SKILL.md","# legacy".getBytes(StandardCharsets.UTF_8))));
+        assertThat(service.content(20L,"SKILL.md")).isEqualTo("# legacy");
+    }
+
     @Test void contentReturnsNotFoundForNeverUploadedDraft(){
         when(skills.version(20L)).thenReturn(version); // sourceObjectKey 仍为 pending
         assertThatThrownBy(()->service.content(20L,"SKILL.md")).isInstanceOf(BusinessException.class).hasMessageContaining("FILE_NOT_FOUND");

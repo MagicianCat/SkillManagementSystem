@@ -13,6 +13,7 @@ import org.springframework.security.authorization.AuthorizationDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 @RestControllerAdvice
@@ -34,6 +35,12 @@ public class ApiExceptionHandler {
         log.warn("event=request.validation.failed requestId={} actorId={} method={} path={} errorCode={}",
                 LogContext.requestId(), LogContext.actorId(), request.getMethod(), request.getRequestURI(), "VALIDATION_FAILED");
         return ResponseEntity.badRequest().body(body("VALIDATION_FAILED", "Request validation failed", request, details));
+    }
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ResponseEntity<ApiErrorResponse> handleUnreadable(HttpMessageNotReadableException ex, HttpServletRequest request) {
+        log.warn("event=request.body.unreadable requestId={} actorId={} method={} path={} errorCode={}",
+                LogContext.requestId(), LogContext.actorId(), request.getMethod(), request.getRequestURI(), "INVALID_REQUEST_BODY");
+        return ResponseEntity.badRequest().body(body("INVALID_REQUEST_BODY", "Request body is invalid", request, Map.of()));
     }
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     ResponseEntity<ApiErrorResponse> handleOptimisticLock(ObjectOptimisticLockingFailureException ex,

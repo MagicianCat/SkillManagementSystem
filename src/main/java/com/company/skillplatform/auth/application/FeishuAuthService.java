@@ -1,6 +1,7 @@
 package com.company.skillplatform.auth.application;
 
 import com.company.skillplatform.auth.infrastructure.FeishuProperties;
+import com.company.skillplatform.auth.domain.AuthenticatedUser;
 import com.company.skillplatform.auth.infrastructure.JwtTokenService;
 import com.company.skillplatform.common.application.BusinessException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -25,21 +26,24 @@ public class FeishuAuthService {
     private final FeishuProperties config;
     private final AuthService auth;
     private final JwtTokenService jwt;
+    private final FeishuUserTokenService userTokens;
     private final ObjectMapper json;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final Map<String, Long> usedNonces = new ConcurrentHashMap<>();
 
-    public FeishuAuthService(FeishuProperties config, AuthService auth, JwtTokenService jwt, ObjectMapper json) {
-        this.config = config; this.auth = auth; this.jwt = jwt; this.json = json;
+    public FeishuAuthService(FeishuProperties config, AuthService auth, JwtTokenService jwt, FeishuUserTokenService userTokens, ObjectMapper json) {
+        this.config = config; this.auth = auth; this.jwt = jwt; this.userTokens = userTokens; this.json = json;
     }
-    public boolean isConfigured() { return config.enabled() && !blank(config.appId()) && !blank(config.appSecret()) && !blank(config.redirectUri()); }
+    public boolean isConfigured() { return config.enabled() && !blank(config.appId()) && !blank(config.appSecret()) && !blank(config.effectiveRedirectUri()); }
+    public String documentAccessStatus(Long userId) { return userTokens.accessStatus(userId); }
     public String authorize(String redirectPath) {
         enabled(); String safePath = safeRedirectPath(redirectPath); String nonce = UUID.randomUUID().toString();
         Duration ttl = stateTtl(); String state = jwt.createSignedState(PROVIDER, safePath, nonce, ttl);
         usedNonces.entrySet().removeIf(e -> e.getValue() < System.currentTimeMillis());
         usedNonces.put(nonce, System.currentTimeMillis() + ttl.toMillis());
-        return config.authorizeUrl() + "?app_id=" + enc(config.appId()) + "&redirect_uri=" + enc(config.redirectUri())
-                + "&response_type=code&state=" + enc(state);
+        String scope = String.join(" ", "offline_access", "drive:drive.search:readonly", "docx:document:readonly", "wiki:wiki:readonly", "docs:doc:readonly");
+        return config.authorizeUrl() + "?app_id=" + enc(config.appId()) + "&redirect_uri=" + enc(config.effectiveRedirectUri())
+                + "&response_type=code&scope=" + enc(scope) + "&state=" + enc(state);
     }
     public AuthService.TokenResult callback(String code, String state, String clientInfo) {
         enabled();
@@ -52,16 +56,21 @@ public class FeishuAuthService {
         try {
             JsonNode token = json.readTree(send(config.tokenUrl(), json.writeValueAsString(Map.of(
                     "grant_type", "authorization_code", "client_id", config.appId(), "client_secret", config.appSecret(),
-                    "code", code, "redirect_uri", config.redirectUri()))));
+                    "code", code, "redirect_uri", config.effectiveRedirectUri()))));
             ensureSuccess(token, "FEISHU_TOKEN_EXCHANGE_FAILED", "Feishu token exchange failed");
-            String access = text(token, "access_token", text(token.path("data"), "access_token", ""));
-            if (blank(access)) throw error("FEISHU_TOKEN_INVALID", "Feishu token exchange failed", HttpStatus.BAD_GATEWAY);
+            JsonNode tokenData = token.has("data") ? token.path("data") : token;
+            String access = text(tokenData, "access_token", "");
+            String refresh = text(tokenData, "refresh_token", "");
+            if (blank(access) || blank(refresh)) throw error("FEISHU_TOKEN_INVALID", "Feishu token exchange did not return a refresh token", HttpStatus.BAD_GATEWAY);
             JsonNode info = json.readTree(sendGet(config.userInfoUrl(), access)); ensureSuccess(info, "FEISHU_USER_INFO_FAILED", "Feishu user information request failed");
             JsonNode data = info.path("data"); String openId = text(data, "open_id", ""); String userId = text(data, "user_id", ""); String unionId = text(data, "union_id", "");
             String external = !blank(openId) ? openId : (!blank(userId) ? userId : unionId);
             if (blank(external)) throw error("FEISHU_USER_INVALID", "Feishu user information is incomplete", HttpStatus.BAD_GATEWAY);
             String email = text(data, "email", ""); String name = text(data, "name", external);
-            return auth.loginFeishu(new AuthService.FeishuIdentity(external, openId, userId, "feishu_" + external, name, blank(email) ? null : email, unionId), clientInfo);
+            AuthService.FeishuIdentity identity = new AuthService.FeishuIdentity(external, openId, userId, "feishu_" + external, name, blank(email) ? null : email, unionId);
+            AuthenticatedUser browserUser = auth.loginFeishuBrowser(identity);
+            userTokens.saveAuthorization(browserUser.id(), access, refresh, tokenData.path("expires_in").asLong(7200), tokenData.path("refresh_expires_in").asLong(0), text(tokenData, "scope", ""));
+            return new AuthService.TokenResult(null, null, 0, browserUser);
         } catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw error("FEISHU_UNAVAILABLE", "Feishu is unavailable", HttpStatus.BAD_GATEWAY);
         } catch (BusinessException ex) { throw ex; } catch (Exception ex) { throw error("FEISHU_LOGIN_FAILED", "Feishu login failed", HttpStatus.BAD_GATEWAY); }
     }

@@ -3,12 +3,17 @@ server:
 
 agent:
   mcp:
-    run-ttl: PT30M
+    run-ttl: PT5M
     # Inject a dedicated secret in non-local environments.
     signing-key: ${AGENT_MCP_SIGNING_KEY:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}
+  feishu:
+    max-searches: ${AGENT_FEISHU_MAX_SEARCHES:3}
+    max-read-attempts: ${AGENT_FEISHU_MAX_READ_ATTEMPTS:5}
+    max-successful-reads: ${AGENT_FEISHU_MAX_SUCCESSFUL_READS:3}
+    guard-cleanup-ms: ${AGENT_FEISHU_GUARD_CLEANUP_MS:600000}
   runtime:
     base-url: ${DSH_BASE_URL:http://127.0.0.1:3090}
     service-token: ${DSH_SERVICE_TOKEN:local-dsh-service-token}
     version: ${DSH_RUNTIME_VERSION:local}
     model-key: deepseek-v4-pro
-    timeout: PT130S
+    timeout: PT250S

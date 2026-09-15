@@ -27,8 +27,6 @@ public class IamUserEntity extends BaseJpaEntity {
     private String feishuUserId;
     @Column(nullable = false, length = 128)
     private String username;
-    @Column(name = "password_hash", length = 255)
-    private String passwordHash;
     @Column(name = "display_name", nullable = false, length = 128)
     private String displayName;
     @Column(length = 255)
@@ -46,14 +44,19 @@ public class IamUserEntity extends BaseJpaEntity {
 
     protected IamUserEntity() {}
     public IamUserEntity(IdentityProviderType provider, String externalUserId, String username,
-                         String passwordHash, String displayName, String email) {
+                         String displayName, String email) {
         this.identityProvider = provider;
         this.externalUserId = externalUserId;
         this.username = username;
-        this.passwordHash = passwordHash;
         this.displayName = displayName;
         this.email = email;
         this.status = UserStatus.ACTIVE;
+    }
+    /** Compatibility constructor for callers being migrated from the removed password-login model. */
+    @Deprecated(forRemoval = true)
+    public IamUserEntity(IdentityProviderType provider, String externalUserId, String username,
+                         String ignoredPasswordHash, String displayName, String email) {
+        this(provider, externalUserId, username, displayName, email);
     }
     public IdentityProviderType getIdentityProvider() { return identityProvider; }
     public String getExternalUserId() { return externalUserId; }
@@ -61,7 +64,6 @@ public class IamUserEntity extends BaseJpaEntity {
     public String getFeishuUnionId() { return feishuUnionId; }
     public String getFeishuUserId() { return feishuUserId; }
     public String getUsername() { return username; }
-    public String getPasswordHash() { return passwordHash; }
     public String getDisplayName() { return displayName; }
     public String getEmail() { return email; }
     public String getAvatarUrl() { return avatarUrl; }

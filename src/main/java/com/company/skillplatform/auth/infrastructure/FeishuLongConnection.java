@@ -1,6 +1,11 @@
 package com.company.skillplatform.auth.infrastructure;
 
 import com.lark.oapi.event.EventDispatcher;
+import com.lark.oapi.event.cardcallback.P2CardActionTriggerHandler;
+import com.lark.oapi.event.cardcallback.model.P2CardActionTrigger;
+import com.lark.oapi.event.cardcallback.model.P2CardActionTriggerResponse;
+import com.lark.oapi.service.im.ImService;
+import com.lark.oapi.service.im.v1.model.P2MessageReceiveV1;
 import com.lark.oapi.service.contact.ContactService;
 import com.lark.oapi.service.contact.v3.model.P2DepartmentCreatedV3;
 import com.lark.oapi.service.contact.v3.model.P2DepartmentDeletedV3;
@@ -25,11 +30,12 @@ public class FeishuLongConnection implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(FeishuLongConnection.class);
 
     private final FeishuProperties properties;
+    private final com.company.skillplatform.agent.application.FeishuBotMessageService botMessages;
     private volatile Client client;
     private volatile boolean running;
 
-    public FeishuLongConnection(FeishuProperties properties) {
-        this.properties = properties;
+    public FeishuLongConnection(FeishuProperties properties, com.company.skillplatform.agent.application.FeishuBotMessageService botMessages) {
+        this.properties = properties; this.botMessages = botMessages;
     }
 
     @Override
@@ -39,6 +45,14 @@ public class FeishuLongConnection implements SmartLifecycle {
         }
         validateConfiguration();
         EventDispatcher dispatcher = EventDispatcher.newBuilder("", "")
+                .onP2CardActionTrigger(new P2CardActionTriggerHandler() {
+                    @Override public P2CardActionTriggerResponse handle(P2CardActionTrigger event) {
+                        return botMessages.handleCardAction(event);
+                    }
+                })
+                .onP2MessageReceiveV1(new ImService.P2MessageReceiveV1Handler() {
+                    @Override public void handle(P2MessageReceiveV1 event) { botMessages.accept(event); }
+                })
                 .onP2UserCreatedV3(new ContactService.P2UserCreatedV3Handler() {
                     @Override
                     public void handle(P2UserCreatedV3 event) {

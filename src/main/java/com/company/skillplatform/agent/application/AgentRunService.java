@@ -9,8 +9,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import com.company.skillplatform.agent.infrastructure.entity.AgentRunEntity;
+import com.company.skillplatform.agent.infrastructure.repository.AgentRunRepository;
 import javax.crypto.SecretKey;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -19,13 +19,15 @@ import com.company.skillplatform.common.application.BusinessException;
 
 @Service
 public class AgentRunService {
-    private final Map<String, AgentRun> runs = new ConcurrentHashMap<>();
+    private final AgentRunRepository persistentRuns;
     private final SecretKey key;
     private final Clock clock = Clock.systemUTC();
     private final Duration ttl;
 
-    public AgentRunService(@Value("${agent.mcp.signing-key:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}") String signingKey,
-                           @Value("${agent.mcp.run-ttl:PT30M}") Duration ttl) {
+    public AgentRunService(AgentRunRepository persistentRuns,
+                           @Value("${agent.mcp.signing-key:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}") String signingKey,
+                           @Value("${agent.mcp.run-ttl:PT5M}") Duration ttl) {
+        this.persistentRuns = persistentRuns;
         this.key = Keys.hmacShaKeyFor(signingKey.getBytes(StandardCharsets.UTF_8));
         this.ttl = ttl;
     }
@@ -33,13 +35,16 @@ public class AgentRunService {
         return issue(AgentRun.create(userId, profileKey, platform, osType, clock.instant().plus(ttl)));
     }
     public IssuedRun issueForRun(String runRef, Long userId, String profileKey, String platform, String osType) {
-        return issue(AgentRun.create(runRef, userId, profileKey, platform, osType, clock.instant().plus(ttl)));
+        return issueForRun(runRef, userId, profileKey, platform, osType, "USER_VISIBLE");
+    }
+    public IssuedRun issueForRun(String runRef, Long userId, String profileKey, String platform, String osType, String knowledgeScope) {
+        return issue(new AgentRun(runRef, userId, profileKey, platform, osType, clock.instant().plus(ttl), "ACTIVE", knowledgeScope));
     }
     private IssuedRun issue(AgentRun run) {
-        runs.put(run.runRef(), run);
         String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(run.userId()))
                 .claim("runRef", run.runRef()).claim("profileKey", run.profileKey())
                 .claim("capabilities", java.util.List.of("skill.search", "skill.detail", "skill.recommendation.submit"))
+                .claim("knowledgeScope", run.knowledgeScope())
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(run.expiresAt())).signWith(key).compact();
         return new IssuedRun(run, token);
     }
@@ -47,12 +52,26 @@ public class AgentRunService {
         try {
             Claims claims = Jwts.parser().verifyWith(key).requireIssuer("skill-platform-agent")
                     .clock(() -> Date.from(clock.instant())).build().parseSignedClaims(token).getPayload();
-            AgentRun run = runs.get(claims.get("runRef", String.class));
-            if (run == null || !"ACTIVE".equals(run.status()) || run.expiresAt().isBefore(clock.instant()))
+            String runRef = claims.get("runRef", String.class);
+            Long userId = Long.valueOf(claims.getSubject());
+            String profile = claims.get("profileKey", String.class);
+            AgentRunEntity entity = persistentRuns.findByRunKey(runRef).orElse(null);
+            if (entity == null || !"RUNNING".equals(entity.getStatus())
+                    || !userId.equals(entity.getSession().getOwnerUserId())
+                    || !profile.equals(entity.getSession().getProfileKey())
+                    || !"ACTIVE".equals(entity.getSession().getStatus()))
                 throw new BusinessException("AGENT_RUN_INVALID", "Agent run is invalid or expired", HttpStatus.UNAUTHORIZED);
-            return run;
+            Instant expiresAt = claims.getExpiration().toInstant();
+            return new AgentRun(runRef, userId, profile, entity.getSession().getPlatform(), entity.getSession().getOsType(), expiresAt, "ACTIVE", entity.getSession().getKnowledgeScope());
         } catch (BusinessException e) { throw e; }
         catch (Exception e) { throw new BusinessException("AGENT_TOKEN_INVALID", "Invalid agent run token", HttpStatus.UNAUTHORIZED); }
+    }
+    public void requireCapability(AgentRun run, String capability) {
+        if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
+                "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
+                "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
+            throw new BusinessException("AGENT_CAPABILITY_DENIED", "Agent capability is not allowed", HttpStatus.FORBIDDEN);
+        }
     }
     public record IssuedRun(AgentRun run, String token) {}
 }

@@ -7,7 +7,7 @@
 - Base URL：`/api/v1`
 - 默认数据格式：`application/json`
 - 文件上传：`multipart/form-data`
-- 鉴权：除登录、刷新 Token 和健康检查外，请求需携带 `Authorization: Bearer <accessToken>`。
+- 鉴权：除登录、会话恢复、刷新 Token 和健康检查外，请求需携带 `Authorization: Bearer <accessToken>`；浏览器请求通过 HttpOnly Cookie 恢复会话。
 - 分页参数：`page` 从 0 开始，`size` 为每页数量，支持 Spring Data `sort=field,asc|desc`。
 - 乐观锁：修改请求中的 `versionNo` 必须使用最近一次查询返回的值；过期时返回 `409 OPTIMISTIC_LOCK_CONFLICT`。
 - 时间字段使用 ISO-8601 UTC 字符串。
@@ -50,36 +50,7 @@
 
 ## 3. 认证与当前用户
 
-### Mock 测试账号
-
-仅在 `skill-platform.auth.mock.enabled=true` 时自动幂等创建以下账号，密码均为 `Test@123456`：
-
-| 用户名 | 用途 | 角色 | 主要权限 |
-|---|---|---|---|
-| `test-user` | 普通用户 | `CONSUMER` | `skill:browse`、`skill:download` |
-| `test-maintainer` | Skill 管理者 | `MAINTAINER` | `skill:browse`、`skill:download`、`skill:upload`、`skill:edit` |
-| `test-admin` | 管理员 | `ADMIN` | 全部 Skill、审核、发布、下架、身份和审计权限 |
-
-管理员用户名可由 `MOCK_ADMIN_USERNAME` 覆盖；管理员密码仍必须通过 `MOCK_ADMIN_PASSWORD` 配置。测试账号只应在开发/测试环境使用。
-
-### POST `/auth/login`
-
-匿名登录。请求：
-
-```json
-{"username":"maintainer","password":"******","provider":"MOCK"}
-```
-
-字段均必填。响应：
-
-```json
-{
-  "accessToken":"...",
-  "refreshToken":"...",
-  "expiresIn":1800,
-  "user":{"id":2,"username":"maintainer","displayName":"Maintainer","roles":["MAINTAINER"],"permissions":["skill:browse","skill:download","skill:upload","skill:edit"]}
-}
-```
+平台仅支持飞书 OAuth 单点登录；用户由飞书登录或通讯录同步创建，不提供本地口令登录和手工创建用户接口。
 
 ### POST `/auth/refresh`
 
@@ -91,9 +62,21 @@
 
 响应结构与登录一致；旧 Refresh Token 随即失效。
 
+该接口继续供 CodeBuddy 等非浏览器客户端使用。浏览器不保存或提交 Refresh Token。
+
+### GET `/auth/session`
+
+匿名接口，从 HttpOnly Cookie `sms_browser_session` 恢复浏览器会话并返回：
+
+```json
+{"accessToken":"...","expiresIn":1800,"user":{"id":1,"username":"...","displayName":"...","roles":[],"permissions":[]}}
+```
+
+会话有效期默认 7 天，可通过 `AUTH_BROWSER_COOKIE_MAX_AGE_SECONDS` 配置；会话失效返回 `401`。
+
 ### POST `/auth/logout`
 
-使 Refresh Token 失效。
+浏览器请求撤销 HttpOnly Cookie 对应的浏览器会话并清除 Cookie。携带 `refreshToken` 时仍兼容撤销 CodeBuddy 等客户端的 Refresh Token。
 
 ```json
 {"refreshToken":"..."}
@@ -101,27 +84,55 @@
 
 成功返回空响应。
 
-### GET `/auth/providers`
-
-匿名接口，返回当前启用的登录方式：
-
-```json
-{"passwordLogin":true,"providers":["feishu"]}
-```
-
 ### GET `/auth/oauth/feishu/authorize`
 
 匿名接口。参数 `redirectPath` 为登录成功后的站内路径，默认 `/skills`。返回飞书授权地址，前端应使用浏览器跳转。
 
 ### POST `/auth/oauth/feishu/callback`
 
-匿名接口。请求体为 `{"code":"...","state":"..."}`，由服务端完成飞书授权码换 Token 和用户信息查询，成功响应结构与登录一致。state 有效期默认 5 分钟且只能使用一次。
+匿名接口。请求体为 `{"code":"...","state":"..."}`，由服务端完成飞书授权码换 Token 和用户信息查询，成功后设置 HttpOnly 浏览器会话 Cookie，响应不包含 Refresh Token。state 有效期默认 5 分钟且只能使用一次。
+
+授权成功后，服务端会加密保存当前用户的 Feishu `user_access_token` 和 `refresh_token`，用于按当前用户权限读取飞书云文档。需要申请 `offline_access`、`drive:drive.search:readonly`、`docx:document:readonly`、`wiki:wiki:readonly`、`docs:doc:readonly`；未完成授权的用户仍可使用平台 Skill 和团队 Wiki。
+
+### IDE 浏览器配对登录
+
+`POST /auth/ide/authorizations` 为匿名接口，请求：
+
+```json
+{"clientName":"CodeBuddy IDE","codeChallenge":"<base64url-sha256>","codeChallengeMethod":"S256"}
+```
+
+返回 `deviceCode`、短格式 `userCode`、`verificationUri`、已附带短码的 `verificationUriComplete`、`expiresIn`（固定 300 秒）和 `pollInterval`（固定 5 秒）。服务端只保存 device/user code 的 SHA-256 哈希及 PKCE challenge，不保存原始 code。
+
+用户在浏览器完成飞书登录后调用 `POST /auth/ide/authorizations/approve`，请求 `{"userCode":"ABCD-EFGH"}`。该接口要求登录态，并把当前用户绑定到配对事务。
+
+浏览器登录页通过已认证的 `GET /auth/ide/authorizations?userCode=ABCD-EFGH` 查询待确认设备，返回规范化的 `userCode`、服务端保存的 `clientName`、`status` 和 `expiresAt`。响应不包含 device code 或 PKCE challenge。
+
+IDE 使用 `POST /auth/ide/token` 匿名轮询：
+
+```json
+{"deviceCode":"...","codeVerifier":"..."}
+```
+
+待批准返回 `202 {"status":"authorization_pending"}`；批准后返回一次现有 `TokenResult`，随后相同 device code 返回 `409 IDE_AUTHORIZATION_REPLAYED`。过期返回 `410 IDE_AUTHORIZATION_EXPIRED`；拒绝返回 `403 IDE_AUTHORIZATION_DENIED`；PKCE 不匹配返回 `400 IDE_AUTHORIZATION_PKCE_MISMATCH`。仅支持 `S256`。
+
+本地默认限流：同一 IP 每分钟最多创建 10 次、查询/批准 10 次；轮询绑定 IP 与 device code，最短间隔 5 秒且每分钟最多 30 次。超限返回 429；轮询过快返回 `IDE_AUTHORIZATION_SLOW_DOWN`。限流状态最多保留 10000 项。定时清理已过期活动记录及保留超过 1 天的 `CONSUMED/DENIED` 记录。
+
+### 飞书机器人 Agent
+
+启用 `FEISHU_EVENT_ENABLED=true` 后，服务端通过飞书 SDK 长连接订阅 `im.message.receive_v1`。机器人私聊会复用该用户当前 Agent 会话；群聊按发送者和话题线程隔离，并且仅检索平台公开 Skill。消息以 `message_id` 幂等落库，Agent 运行完成后由服务端通过 tenant token 回复机器人。
+
+机器人新增配置：`FEISHU_BOT_ENABLED`、`FEISHU_BOT_WEB_BASE_URL`、`FEISHU_BOT_TASK_INTERVAL_MS`、`FEISHU_BOT_MAX_RETRIES`。未设置 `FEISHU_BOT_ENABLED` 时默认跟随 `FEISHU_EVENT_ENABLED`。机器人消息卡片会通过 `multi_url` 为 PC、iOS、Android 分发网页或移动 H5 Skill 详情页。
 
 旧版 `/auth/feishu/authorize` 和 `/auth/feishu/callback` 保留作为兼容入口。
 
 ### GET `/users/me`
 
 权限：已登录。返回当前用户的 `id`、`username`、`displayName`、`roles`、`permissions`。
+
+### GET `/auth/feishu/document-access`
+
+权限：已登录。返回当前用户的飞书云文档授权状态：`NOT_AVAILABLE`、`AUTHORIZED` 或 `REAUTH_REQUIRED`。DSH 仅在状态为 `AUTHORIZED` 且能取得有效用户令牌时挂载飞书文档 MCP。
 
 ### GET `/users/candidates`
 
@@ -205,7 +216,7 @@
 
 `platform`、`osType` 会按最新已发布版本的兼容性声明过滤，枚举值大小写不敏感。
 
-`developmentStage` 按 Skill 本体的开发阶段过滤（与版本 `lifecycleStatus` 无关），大小写不敏感，取值：`REQUIREMENT`（需求）、`DESIGN`（设计）、`FRONTEND_CODING`（前端编码）、`BACKEND_CODING`（后端编码）、`TESTING`（测试）、`RELEASED`（已发布）、`OTHER`（历史数据/未标记）。非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
+`developmentStage` 由 Skill 所属分类的根节点派生，可传逗号分隔值筛选并行阶段。取值：`REQUIREMENT`、`PRODUCT`、`ARCHITECTURE_DESIGN`、`UI_DESIGN`、`BACKEND_CODING`、`FRONTEND_CODING`、`SECURITY_REVIEW`、`TESTING`、`DEPLOYMENT`。
 
 `status` 按 Skill 有效状态过滤，大小写不敏感，取值：`ACTIVE`（有效）、`ARCHIVED`（已归档）。非法值返回 `400 INVALID_SKILL_STATUS`。Skill 市场固定传入 `status=ACTIVE`，不展示已归档 Skill。
 
@@ -214,7 +225,7 @@
 返回 `PageResponse<SkillView>`。`SkillView` 字段：
 
 ```json
-{"id":1,"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":10,"category":{"id":10,"key":"development","name":"Development","parentId":null,"sortOrder":1},"tags":[{"id":21,"key":"java","name":"Java"}],"owners":[{"userId":2,"username":"maintainer","displayName":"Maintainer","ownerType":"PRIMARY"}],"status":"ACTIVE","developmentStage":"BACKEND_CODING","versionNo":0,"latestPublishedVersion":"1.0.0","activeDraftVersionId":2}
+{"id":1,"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":510,"category":{"id":510,"key":"backend.api","name":"API 与连接器开发","parentId":5,"sortOrder":510,"stage":"BACKEND_CODING","selectable":true},"tags":[],"owners":[],"status":"ACTIVE","developmentStage":"BACKEND_CODING","versionNo":0,"sourceUrl":null}
 ```
 
 ### POST `/skills`
@@ -222,13 +233,14 @@
 权限：`skill:upload`。
 
 ```json
-{"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":10,"ownerUserIds":[],"tagIds":[21,22],"developmentStage":"REQUIREMENT"}
+{"skillKey":"springboot-tdd","displayName":"Spring Boot TDD","description":"...","categoryId":510,"ownerUserIds":[],"tagIds":[21,22],"sourceUrl":"https://github.com/example/repository"}
 ```
 
 - `skillKey` 只能使用小写字母、数字和单个连字符分段。
 - 非管理员只能把自己设为 Owner；`ownerUserIds` 为空时自动使用当前用户。
 - 管理员可以指定其他 Owner。
-- `developmentStage` 可选，缺省为 `REQUIREMENT`；非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
+- `categoryId` 必填且必须指向启用的叶子分类；开发阶段由分类树自动派生。
+- `sourceUrl` 可选，必须是长度不超过 2048 的绝对 HTTP/HTTPS 地址。
 
 返回 `SkillView`。
 
@@ -238,7 +250,7 @@
 
 ### GET `/categories`
 
-权限：`skill:browse`。返回启用的分类列表，字段：`id`、`key`、`name`、`parentId`、`sortOrder`。
+权限：`skill:browse`。返回启用的分类列表，字段：`id`、`key`、`name`、`parentId`、`sortOrder`、`stage`、`selectable`。
 
 ### GET `/tags?keyword={keyword}`
 
@@ -249,10 +261,12 @@
 权限：`skill:edit`，且要求 Skill Owner 或管理员。
 
 ```json
-{"displayName":"New name","description":"New description","categoryId":10,"tagIds":[21],"developmentStage":"TESTING","versionNo":0}
+{"displayName":"New name","description":"New description","categoryId":803,"tagIds":[21],"versionNo":0,"sourceUrl":"https://github.com/example/repository"}
 ```
 
-- `developmentStage` 可选；传 `null`/缺省表示不修改当前阶段，非法值返回 `400 INVALID_DEVELOPMENT_STAGE`。
+- `categoryId` 必填且必须指向启用的叶子分类。
+- `sourceUrl` 可选，传空字符串或 `null` 可清空来源网址。
+- 来源网址仅对该 Skill 的 Owner、团队管理员、平台管理员和超级管理员返回；普通用户和 Agent 不会获得该字段内容。
 
 返回更新后的 `SkillView`。
 
@@ -279,6 +293,16 @@
 ### POST `/skills/{skillKey}:unarchive`
 
 权限及请求体同归档接口。恢复后 Skill 状态为 `ACTIVE`，可重新维护草稿，并写入审计。
+
+### POST `/skills/{skillKey}:promote-platform`
+
+权限：`admin:identity` 或 `skill:review`。将团队级 Skill 提升为平台级，清除团队归属；仅支持管理员或审核人员操作，并要求携带当前 `versionNo`。
+
+```json
+{"versionNo":3,"reason":"best-practice-skills 平台级导入"}
+```
+
+已是平台级时操作幂等；成功返回更新后的 `SkillView`，并写入 `SKILL_PROMOTED_TO_PLATFORM` 审计记录。
 
 ### GET `/skills/{skillKey}/versions`
 
@@ -615,7 +639,7 @@ Bundle 用于把多个已发布 Skill 及其传递依赖组合为一个 ZIP。
 返回：
 
 ```json
-{"id":1,"bundleKey":"sha256...","status":"AVAILABLE","platform":"CODEBUDDY","osType":"WINDOWS","includeDependencies":true,"fileName":"bundle-....zip","sizeBytes":1024,"sha256":"...","errorCode":null,"errorMessage":null,"createdAt":"2026-09-03T01:00:00Z","items":[{"skillKey":"springboot-tdd","versionId":10,"version":"1.2.0","root":true,"depth":0,"requiredByPaths":["springboot-tdd"],"artifactId":31,"artifactOsType":"WINDOWS"}]}
+{"id":1,"bundleKey":"sha256...","status":"AVAILABLE","platform":"CODEBUDDY","osType":"WINDOWS","includeDependencies":true,"fileName":"bundle-....zip","sizeBytes":1024,"sha256":"...","errorCode":null,"errorMessage":null,"createdAt":"2026-09-03T01:00:00Z","items":[{"skillKey":"springboot-tdd","versionId":10,"version":"1.2.0","root":true,"depth":0,"requiredByPaths":["springboot-tdd"],"artifactId":31,"artifactOsType":"WINDOWS","artifactFileName":"springboot-tdd.zip","artifactSha256":"..."}]}
 ```
 
 请求约束：`platform` 非空且平台启用；`osType` 只能为 `ANY/WINDOWS/MACOS/LINUX`；`rootVersionIds` 为 1–50 个非空且不重复的 ID。只接受 `PUBLISHED/DEPRECATED` 根版本。
@@ -634,7 +658,7 @@ Artifact 选择优先使用请求的 OS，找不到时回退 `ANY`；两者均�
 
 ### GET `/bundles/{bundleId}/items`
 
-权限：`skill:download`。仅创建者可访问。返回 `BundleItemView[]`，字段：`skillKey`、`versionId`、`version`、`root`、真实 `depth`、全部 `requiredByPaths`、实际使用的 `artifactId` 和 `artifactOsType`。
+权限：`skill:download`。仅创建者可访问。返回 `BundleItemView[]`，字段：`skillKey`、`versionId`、`version`、`root`、真实 `depth`、全部 `requiredByPaths`、实际使用的 `artifactId`、`artifactOsType`、`artifactFileName` 和 `artifactSha256`。
 
 ### GET `/bundles/{bundleId}/download`
 
@@ -667,6 +691,7 @@ POST /skills
 
 ```text
 GET /reviews
+支持 `scope=ALL|PLATFORM|TEAM` 和 `teamId` 筛选；团队选择可使用 `GET /wiki/teams/search?keyword=&page=&size=` 服务端搜索。
 → POST /reviews/{id}:approve 或 :reject
 →（通过时后端自动创建并执行发布构建）
 → GET /build-tasks/{taskId}
@@ -728,27 +753,35 @@ Skill 市场的 `GET /skills` 和 Agent 会话均支持 `platform`、`osType`。
 
 ### GET `/skills/{skillKey}/feedback`
 
-权限：`skill:browse`。查询参数使用标准分页参数。返回平均评分、评分数量、下载数量、当前用户评价和其他用户评价：
+权限：`skill:browse`。查询参数使用标准分页参数（`page`、`size`）。返回平均评分、评分数量、下载数量、当前用户最新评分和分页的全部用户评论。评分与评论相互独立：
 
 ```json
-{"averageRating":4.5,"ratingCount":2,"downloadCount":18,"mine":{"rating":5,"comment":"很好用"},"items":{"content":[],"totalElements":2,"totalPages":1}}
+{"averageRating":4.5,"ratingCount":2,"downloadCount":18,"myRating":{"rating":5},"comments":{"content":[],"number":0,"totalElements":2,"totalPages":1,"last":true}}
 ```
 
-### PUT `/skills/{skillKey}/feedback`
+### PUT `/skills/{skillKey}/feedback/rating`
 
-权限：`skill:browse`。同一用户对同一 Skill 只有一条评价，重复提交会更新原评价。评分必须为 1 至 5：
+权限：`skill:browse`。评分必须为 1 至 5；同一用户对同一 Skill 可重复评分，但系统只保留并更新最新一条评分：
 
 ```json
-{"rating":5,"comment":"很好用"}
+{"rating":5}
 ```
 
-### DELETE `/skills/{skillKey}/feedback`
+### POST `/skills/{skillKey}/feedback/comments`
 
-权限：`skill:browse`。删除当前用户自己的评价。
+权限：`skill:browse`。新增一条独立评论；同一用户可以发表多条评论：
+
+```json
+{"comment":"很好用"}
+```
+
+### DELETE `/skills/{skillKey}/feedback/comments/{commentId}`
+
+权限：`skill:browse`。删除当前用户自己的指定评论；评分不支持删除，只能通过评分接口覆盖。
 
 ## 18. 飞书登录
 
-启用 `FEISHU_ENABLED=true` 并配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_REDIRECT_URI` 后，访问 `GET /auth/feishu/authorize` 跳转飞书 OAuth 授权页；飞书回调 `GET /auth/feishu/callback?code=...&state=...` 后换取平台 Token。
+启用 `FEISHU_ENABLED=true` 并配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_REDIRECT_URI` 及随机生成的 32 字节 Base64 密钥 `FEISHU_TOKEN_ENCRYPTION_KEY` 后，访问 `GET /auth/feishu/authorize` 跳转飞书 OAuth 授权页；飞书回调 `GET /auth/feishu/callback?code=...&state=...` 后换取平台 Token，并保存当前用户的文档访问令牌。飞书个人文档访问由平台后端按当前用户代理固定公共 MCP 地址 `https://mcp.feishu.cn/mcp` 完成；飞书用户令牌不会传给 DSH，也不在 DSH 环境变量中出现。
 
 飞书通讯录同步使用应用身份的 `tenant_access_token`，只同步飞书开放平台后台授予应用通讯录权限范围内的部门和成员。应用密钥只允许通过环境变量或密钥管理系统注入。
 
@@ -785,4 +818,114 @@ Skill 市场的 `GET /skills` 和 Agent 会话均支持 `platform`、`osType`。
 
 ### 18.4 下载量、评分与评论
 
-`GET /skills/{skillKey}/feedback` 返回 `downloadCount`、五分制 `averageRating`、`ratingCount`、当前用户 `mine` 和分页的全部用户评论。`PUT /skills/{skillKey}/feedback` 使用 1 至 5 分更新当前用户评价；每个用户对同一 Skill 保持一条评价。
+`GET /skills/{skillKey}/feedback` 返回 `downloadCount`、五分制 `averageRating`、`ratingCount`、当前用户 `myRating` 和分页的全部用户评论。`PUT /skills/{skillKey}/feedback/rating` 使用 1 至 5 分更新当前用户最新评分；`POST /skills/{skillKey}/feedback/comments` 新增评论；`DELETE /skills/{skillKey}/feedback/comments/{commentId}` 删除本人评论。
+
+## 19. Wiki 文档
+
+Wiki 文档只支持 UTF-8 Markdown，当前类型为 `SKILL_README` 和 `SKILL_GUIDE`。正文保存为文档修订，编辑和恢复都会生成新的修订；文档归档后不再出现在普通查询中。
+
+- `GET /wiki/teams`：返回当前用户可访问的团队。
+- `GET /wiki/teams/search?keyword=&page=&size=`：按团队名称服务端搜索当前用户可访问的团队，最多每页 50 条。
+- `GET /wiki/documents?teamId=&skillKey=&documentType=&keyword=&page=&size=`：按权限分页查询文档。
+- `GET /wiki/documents/{id}`：读取当前可见文档及其最新修订。
+- `GET /wiki/documents/{id}/revisions`：读取文档修订历史。
+- `POST /wiki/documents`：创建文档，请求字段为 `title`、`documentType`、`teamId`、`skillIds`、`markdownContent`。
+- `PUT /wiki/documents/{id}`：编辑标题和 Markdown，必须携带当前 `versionNo`。
+- `POST /wiki/documents/{id}:restore`：请求 `revisionId` 和当前 `versionNo`，从历史修订生成新的当前修订。
+- `DELETE /wiki/documents/{id}`：归档文档。
+
+平台级文档对所有已登录且拥有 `skill:browse` 的用户可见；团队文档对有效直接成员、团队管理员及超级管理员可见。团队管理员可维护本团队套组文档，Skill owner/maintainer 只能维护自己 Skill 的 README，超级管理员可维护全部文档。
+
+README 必须且只能关联一个 Skill；`SKILL_GUIDE` 套组说明才允许关联多个 Skill。
+
+团队级 `SKILL_GUIDE` 可申请推送到全平台。提交后文档锁定编辑，审核通过后保留原文档 ID、团队归属、修订历史和 Skill 关联，仅设置 `platform_visible=true`；后续团队编辑继续直接同步到全平台。
+
+- `POST /wiki/documents/{id}:submit-platform-review`：提交平台推广审核，请求 `{"versionNo":0,"comment":"..."}`；需要团队管理员或超级管理员权限。
+- `GET /wiki-reviews?status=&keyword=&teamId=&page=&size=&sort=`：查询 Wiki 平台推广审核任务，需要 `wiki:review`。
+- `GET /wiki-reviews/{id}`：读取审核详情及提交时的 Markdown 快照。
+- `POST /wiki-reviews/{id}:approve`、`POST /wiki-reviews/{id}:reject`：通过或拒绝，请求字段为必填 `comment`。
+- `POST /wiki-reviews/{id}:withdraw`：提交人或文档维护者撤回待审核申请。
+- `POST /wiki-reviews:batch-approve`、`POST /wiki-reviews:batch-reject`：批量处理，最多 50 条。
+
+`wiki:review` 默认授予超级管理员和审核员角色；团队管理员仅负责提交自己团队的 Wiki，不自动获得平台审核权限。
+
+团队 Skill 调用 `POST /skill-versions/{versionId}:push-to-company` 时，可在 `wikiDocumentIds` 中勾选套组文档；该 Skill 的 README 自动加入平台审核。平台审核通过后 Skill 转为平台级，所选 Wiki 文档设置为平台可见。文档不复制，团队后续编辑会立即同步到平台可见版本。
+
+## 20. Agent MCP Wiki 工具
+
+现有 `/internal/mcp` 提供 `get_current_user_context`、`search_wiki_documents`、`get_wiki_document`、`search_feishu_documents` 和 `get_feishu_document`。`get_current_user_context` 返回当前 Agent 用户有权访问的团队；Wiki 搜索可通过 `teamId` 限定团队。工具通过 Agent Token 的用户身份执行平台/团队 Wiki 可见性校验；飞书工具由后端代理当前用户的只读授权，DSH 不接收飞书 UAT。`get_skill_detail` 同时返回该 Skill 的可见 Wiki 文档列表。DSH 推荐 Skill 前应读取相关 README 或套组说明，最终推荐提交时再次校验 Skill 当前仍对该用户可见。
+
+`search_feishu_documents` 会为每条结果返回 `docId`、`docType`、`readable`、`readMethod` 和 `unreadableReason`。当前仅 `DOCX`（新版文档，使用飞书 MCP）和 `DOC`（旧版文档，使用 `/open-apis/doc/v2/{docId}/raw_content`）可读取。Spreadsheet、Bitable、Slides、Mindnote、Wiki及未知类型标记为 `readable=false`，不得调用读取工具。`get_feishu_document` 请求必须携带搜索结果中的 `docId` 和 `docType`，并支持 `offset`、`maxBytes` 分页参数；不可读取类型返回 `UNSUPPORTED_DOCUMENT_TYPE`，不得重试。
+
+`search_skills` 接收可选的 `platform` 和 `osType`。没有配置精确兼容项的通用平台 Skill 仍会返回。返回结果顶层包含本次查询的 `target`，每个 Skill 结果还包含 `targetPlatform`、`targetOsType` 和带查询参数的 `detailPath`；Agent 必须将这些目标字段复制到 `submit_skill_recommendation.items`。`get_skill_detail` 同样返回 `target` 和 `detailPath`。因此用户选择 `OPENCODE + WINDOWS` 时，推荐卡片链接会打开 `/skills/{skillKey}?platform=OPENCODE&osType=WINDOWS`，详情页直接使用该选择；未选择时详情页才使用默认值。
+
+## 21. Agent MCP 调用审计
+
+`GET /admin/agent/mcp-audits?page=0&size=20` 查询 DSH 实际调用过的 MCP 工具。接口需要 `admin:audit` 权限，仅超级管理员可访问。
+
+支持按 `runKey`、`sessionKey`、`toolName`、`status`、`sourceChannel`、`from` 和 `to` 筛选。记录包含工具名称、调用 ID、Agent Run、会话渠道、知识范围、开始/结束时间、耗时和失败码；参数仅保存脱敏摘要，不保存 Token、完整问题、工具结果或飞书正文。
+
+飞书云文档调用可通过 `toolName` 筛选：`search_feishu_documents`、`get_feishu_document`。
+
+## 22. Agent 会话与批量下载
+
+### 会话运行环境优先级
+
+- `POST /api/v1/agent/sessions/{sessionKey}/messages` 请求为 `{"content":"...","context":{"platform":"CODEBUDDY","osType":"MACOS"}}`；`context` 可选，存在时是该轮及会话的权威环境并跳过文本识别；缺省时继续从当前轮消息识别明确的平台和操作系统，旧行为不变。
+- 当前轮明确表述优先于已保存筛选；当前轮未提到的维度继续沿用会话值。
+- 响应除 `runKey`、`status` 外还返回最终生效的 `platform`、`osType`，页面应立即同步选择器。
+- 飞书机器人结果卡片包含平台和操作系统选择器，卡片回调通过长连接更新同一 Agent 会话，并从下一轮生效。
+
+- `PATCH /agent/sessions/{sessionKey}/context`：更新当前会话下一轮使用的平台和操作系统；运行中的会话不可修改。
+- `DELETE /agent/sessions/{sessionKey}`：软删除本人会话。会话立即从列表和详情中隐藏，后台最多保留 180 天后清理关联消息、Run、推荐和 MCP 审计。
+- 推荐结果的每个 item 由服务端补全可信的精确 `versionId`。
+- 推荐项的 `platform`、`osType` 始终取该 Agent run 的服务端会话上下文；模型提交的同名字段被忽略。平台只接受 `CODEBUDDY/OPENCODE`，操作系统只接受 `ANY/WINDOWS/MACOS/LINUX`。
+- `POST /agent/runs/{runKey}/bundle`：根据该轮已提交的推荐创建批量下载包，请求字段为 `platform`、`osType` 和可选 `skillKeys`。未传或空数组选择全部推荐；传值时必须是该 run 推荐项的子集，否则返回 `422 AGENT_BUNDLE_SKILL_NOT_RECOMMENDED`。根版本严格使用推荐时保存的 `versionId`，并自动包含必需依赖。
+- Bundle 请求的平台和操作系统必须与该 run 已保存的非空上下文一致；不一致返回 `422 AGENT_BUNDLE_CONTEXT_MISMATCH`，非法枚举返回 `422 AGENT_TARGET_INVALID`。历史网页会话某个上下文维度为空时，仍可由该请求补齐该维度。
+
+批量下载返回 `resultStatus`：`COMPLETE` 表示全部成功，`PARTIAL` 表示部分 Skill 因平台或系统不兼容失败，`FAILED` 表示没有可下载项；`failures` 返回失败 Skill 及原因，成功项通过 `id` 调用 `GET /bundles/{id}/download` 下载。
+
+### POST `/skill-updates:check`
+
+IDE 新会话用于批量检查本地平台安装 Skill 是否存在可用新版本。权限：`skill:browse`。请求示例：
+
+```json
+{"platform":"CODEBUDDY","osType":"MACOS","skillKeys":["brainstorming","yantu-hook-probe"]}
+```
+
+`skillKeys` 最多 200 个。接口只返回当前可见、ACTIVE、最新版本为 `PUBLISHED` 且存在对应平台/操作系统可下载 Artifact 的 Skill；操作系统优先匹配精确值，也接受 `ANY` Artifact。响应为 `{platform, osType, items}`，每项包含 `skillKey`、`displayName`、`latestVersionId` 和 `latestVersion`。客户端使用本地 `.yantu-platform-skill.json` 的 `skillVersionId/version` 与该结果比较，再通过 `POST /bundles` 创建更新包。
+
+## 23. 本地启动配置
+
+后端会自动加载项目根目录的 `.env`，本地启动只需：
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=agent
+```
+
+可从 `.env.example` 创建 `.env` 并填写数据库、JWT、MinIO 和飞书配置。`.env` 已加入 Git 忽略，不能提交真实密钥。默认飞书回调地址为：
+`http://127.0.0.1:5173/oauth/callback`。
+
+需要外网或飞书 H5 测试时，设置 `FEISHU_MOCK_HTTPS_ENABLED=true` 和
+`FEISHU_MOCK_HTTPS_BASE_URL=https://your-tunnel.trycloudflare.com`，系统会自动使用
+`https://your-tunnel.trycloudflare.com/oauth/callback`。Tunnel 地址变化后需同步修改飞书后台重定向 URL。
+
+## 24. Skill 调用遥测
+
+CodeBuddy Hook 仅对带 `.yantu-platform-skill.json` 来源标记的 Skill 产生调用事件。所有接口要求 IDE Bearer Token，用户身份从 Token 服务端解析，客户端不能提交飞书身份字段。
+
+- `POST /telemetry/skill-usage-events`：同步保存 Skill 调用元数据。请求字段包括 `eventId`、`skillKey`、`skillVersionId`、`installationId`、`invokedAt`、`localDirectory`、`clientSessionId`、`generationId`、`client`、`clientVersion`、`agentType` 和 `model`。必须使用 `Idempotency-Key`，重复 `eventId` 不会重复计数。
+- `PUT /telemetry/skill-usage-events/{eventId}/conversation`：上传 gzip 压缩的可见用户/助手对话快照，最大 20 MiB，返回 `202` 后由后台任务合并到 MinIO；对话正文不写入 MySQL。
+
+MySQL 的 `skill_usage_event` 保存调用统计和对话状态；`skill_usage_conversation` 仅保存按用户和 CodeBuddy session 聚合的 MinIO 对象指针、版本及离线持久化版本字段。飞书 `user_id`、`open_id` 和 MinIO 对话对象使用遥测专用 AES-GCM 密钥加密。
+
+## 25. Skill 使用管理看板
+
+看板接口需要 `admin:telemetry`。超级管理员可查询全部团队；团队管理员的权限由 `TEAM_ADMIN` scoped assignment 动态授予，并且只能看到自己管理团队的有效成员。
+
+- `GET /admin/skill-usage/access-scope`：返回当前管理员是全平台还是团队范围，以及可选团队列表。
+- `GET /admin/skill-usage/overview?from=&to=&teamId=&skillKey=&userId=`：返回调用次数、活跃成员、使用 Skill 数、对话采集成功率、时间趋势、Skill/成员排行和采集状态。
+- `GET /admin/skill-usage/events?page=0&size=20&from=&to=&teamId=&skillKey=&userId=`：分页返回调用明细，只返回元数据，不读取对话正文或暴露 MinIO 对象地址。
+- `GET /admin/skill-usage/events/{eventId}/conversation?page=0&size=100`：仅在管理员点击明细后调用，读取该用户和 CodeBuddy session 的最新合并对话；对话正文保存在 MinIO，接口最多每页返回 100 条消息。
+
+看板默认查询近 30 天，支持今天、近 7 天、近 90 天和自定义时间范围。对话查看会产生 `SKILL_USAGE_CONVERSATION_VIEWED` 审计记录。
