@@ -157,10 +157,8 @@ public class DocumentAgentSessionService {
         }
     }
 
-    @Transactional
     public JobView getJob(String jobKey, Long actorId) { DocumentAgentJobEntity job = job(jobKey, actorId); syncEvents(job); return jobView(job); }
 
-    @Transactional
     public void cancelJob(String jobKey, Long actorId) {
         DocumentAgentJobEntity job = job(jobKey, actorId);
         if (Set.of("COMPLETED", "FAILED", "CANCELLED").contains(job.getStatus())) return;
@@ -169,14 +167,12 @@ public class DocumentAgentSessionService {
         catch (RuntimeException failure) { job.fail("GATEWAY_UNAVAILABLE", "Gateway could not be cancelled", true); jobs.save(job); throw gatewayError(failure, "DOCUMENT_AGENT_GATEWAY_UNAVAILABLE"); }
     }
 
-    @Transactional
     public JobView retryJob(String jobKey, Long actorId) {
         DocumentAgentJobEntity job = job(jobKey, actorId);
         if (!"FAILED".equals(job.getStatus()) || !job.isRetryable()) throw error("DOCUMENT_AGENT_RETRY_NOT_ALLOWED", "This document job cannot be retried", HttpStatus.CONFLICT);
         job.retry(); jobs.save(job); return jobView(job);
     }
 
-    @Transactional
     public String events(String jobKey, Long actorId, long after) {
         DocumentAgentJobEntity job = job(jobKey, actorId); syncEvents(job);
         StringBuilder result = new StringBuilder();
