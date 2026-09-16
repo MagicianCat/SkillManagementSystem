@@ -53,6 +53,9 @@ public class DocumentAgentSessionController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void cancel(@PathVariable String jobKey, Authentication auth) { service.cancelJob(jobKey, actor(auth)); }
 
+    @PostMapping("/jobs/{jobKey}:retry")
+    public DocumentAgentSessionService.JobView retry(@PathVariable String jobKey, Authentication auth) { return service.retryJob(jobKey, actor(auth)); }
+
     @GetMapping(value = "/jobs/{jobKey}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<String> events(@PathVariable String jobKey, @RequestParam(defaultValue = "0") long after, Authentication auth) {
         return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM).body(service.events(jobKey, actor(auth), after));

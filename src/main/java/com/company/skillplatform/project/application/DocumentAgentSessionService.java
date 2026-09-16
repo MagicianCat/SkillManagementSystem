@@ -146,6 +146,7 @@ public class DocumentAgentSessionService {
                 body.put("job_key", job.getJobKey()); body.put("session_key", job.getSession().getSessionKey());
                 body.put("attempt_no", job.getDispatchAttempt()); body.put("profile_key", job.getSession().getProfileKey());
                 body.put("instruction", runtimeInstruction(job, job.getInstruction())); body.put("mcp_token", issued.token());
+                body.put("skill_snapshots", List.of()); body.put("context_manifest", Map.of("projectKey", job.getSession().getProject().getProjectKey(), "profileKey", job.getSession().getProfileKey()));
                 body.put("idempotency_key", job.getJobKey() + ":" + job.getDispatchAttempt());
                 Map<?, ?> result = gateway.post().uri("/internal/v1/document-jobs").header("X-SMS-Service-Token", serviceToken).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
                 Map<?, ?> runtime = result == null || !(result.get("job") instanceof Map<?, ?> value) ? Map.of() : value;
@@ -166,6 +167,13 @@ public class DocumentAgentSessionService {
         if (job.getRuntimeJobId() == null) { job.cancel(); jobs.save(job); return; }
         try { gateway.post().uri("/internal/v1/document-jobs/{id}/cancel", job.getRuntimeJobId()).header("X-SMS-Service-Token", serviceToken).retrieve().toBodilessEntity(); job.cancel(); jobs.save(job); }
         catch (RuntimeException failure) { job.fail("GATEWAY_UNAVAILABLE", "Gateway could not be cancelled", true); jobs.save(job); throw gatewayError(failure, "DOCUMENT_AGENT_GATEWAY_UNAVAILABLE"); }
+    }
+
+    @Transactional
+    public JobView retryJob(String jobKey, Long actorId) {
+        DocumentAgentJobEntity job = job(jobKey, actorId);
+        if (!"FAILED".equals(job.getStatus()) || !job.isRetryable()) throw error("DOCUMENT_AGENT_RETRY_NOT_ALLOWED", "This document job cannot be retried", HttpStatus.CONFLICT);
+        job.retry(); jobs.save(job); return jobView(job);
     }
 
     @Transactional

@@ -44,6 +44,7 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
     public void cancel() { this.status = "CANCELLED"; this.finishedAt = Instant.now(); }
     public void fail(String code, String message, boolean retryable) { this.status = "FAILED"; this.errorCode = code; this.errorMessage = message; this.retryable = retryable; this.finishedAt = Instant.now(); }
     public void artifact(Long artifactId, Long revisionId, String documentUrl) { this.artifactId = artifactId; this.revisionId = revisionId; this.documentUrl = documentUrl; }
+    public void retry() { this.status = "QUEUED"; this.runtimeJobId = null; this.errorCode = null; this.errorMessage = null; this.retryable = false; this.startedAt = null; this.finishedAt = null; this.artifactId = null; this.revisionId = null; this.documentUrl = null; }
     public String getJobKey() { return jobKey; }
     public DocumentAgentSessionEntity getSession() { return session; }
     public int getSequenceNo() { return sequenceNo; }
