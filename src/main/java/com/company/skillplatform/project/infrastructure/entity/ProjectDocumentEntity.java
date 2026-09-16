@@ -27,6 +27,7 @@ public class ProjectDocumentEntity extends BaseJpaEntity {
     public void draft(ProjectDocumentRevisionEntity revision, IamUserEntity actor, Instant now) { this.currentDraftRevision = revision; this.updatedBy = actor; this.lastDraftActivityAt = now; this.status = "DRAFT"; }
     public void publish(ProjectDocumentRevisionEntity revision, IamUserEntity actor) { this.publishedRevision = revision; this.everPublished = true; this.status = "PUBLISHED"; this.updatedBy = actor; }
     public void archive(IamUserEntity actor) { this.status = "ARCHIVED"; this.updatedBy = actor; }
+    public void expireDraft(IamUserEntity actor) { this.currentDraftRevision = null; this.status = "ARCHIVED"; this.updatedBy = actor; }
     public VirtualProjectEntity getProject() { return project; } public String getDocumentType() { return documentType; }
     public String getTitle() { return title; } public String getStatus() { return status; }
     public ProjectDocumentRevisionEntity getCurrentDraftRevision() { return currentDraftRevision; }

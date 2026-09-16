@@ -172,7 +172,7 @@ public class ProjectControlService {
     public void cleanupExpiredDrafts() {
         Instant cutoff = clock.instant().minus(Duration.ofDays(180));
         for (ProjectDocumentEntity document : documents.findByEverPublishedFalseAndStatusAndLastDraftActivityAtBefore("DRAFT", cutoff)) {
-            document.archive(document.getCreatedBy()); documents.save(document);
+            document.expireDraft(document.getCreatedBy()); documents.saveAndFlush(document); revisions.deleteByDocumentId(document.getId());
         }
     }
 

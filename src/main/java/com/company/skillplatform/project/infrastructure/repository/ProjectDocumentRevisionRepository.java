@@ -9,4 +9,5 @@ public interface ProjectDocumentRevisionRepository extends JpaRepository<Project
     List<ProjectDocumentRevisionEntity> findByDocumentIdOrderByRevisionNoDesc(Long documentId, Pageable pageable);
     long countByDocumentId(Long documentId);
     Optional<ProjectDocumentRevisionEntity> findByIdAndDocumentId(Long id, Long documentId);
+    void deleteByDocumentId(Long documentId);
 }
