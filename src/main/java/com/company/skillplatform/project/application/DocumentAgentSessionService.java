@@ -147,7 +147,20 @@ public class DocumentAgentSessionService {
                 body.put("instruction", runtimeInstruction(job, job.getInstruction())); body.put("mcp_token", issued.token());
                 body.put("skill_snapshots", List.of()); body.put("context_manifest", Map.of("projectKey", job.getSession().getProject().getProjectKey(), "profileKey", job.getSession().getProfileKey()));
                 body.put("idempotency_key", job.getJobKey() + ":" + job.getDispatchAttempt());
-                Map<?, ?> result = gateway.post().uri("/internal/v1/document-jobs").header("X-SMS-Service-Token", serviceToken).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
+                Map<?, ?> result;
+                try {
+                    result = submitJob(body);
+                } catch (RestClientResponseException missingRuntimeSession) {
+                    // Gateway state may be restored from a different persistent store after a restart.
+                    // Rebind the SMS session once when the old runtime session no longer exists.
+                    if (missingRuntimeSession.getStatusCode().value() != 404 ||
+                            !String.valueOf(missingRuntimeSession.getResponseBodyAsString()).contains("DOCUMENT_SESSION_NOT_FOUND")) throw missingRuntimeSession;
+                    job.getSession().runtimeUnbound();
+                    sessions.save(job.getSession());
+                    ensureRuntimeSession(job.getSession());
+                    body.put("session_key", job.getSession().getSessionKey());
+                    result = submitJob(body);
+                }
                 Map<?, ?> runtime = result == null || !(result.get("job") instanceof Map<?, ?> value) ? Map.of() : value;
                 job.running(text(runtime, "job_id")); jobs.save(job);
             } catch (RuntimeException failure) {
@@ -162,6 +175,11 @@ public class DocumentAgentSessionService {
                 jobs.save(job);
             }
         }
+    }
+
+    private Map<?, ?> submitJob(Map<String, Object> body) {
+        return gateway.post().uri("/internal/v1/document-jobs").header("X-SMS-Service-Token", serviceToken)
+                .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
     }
 
     private void ensureRuntimeSession(DocumentAgentSessionEntity session) {

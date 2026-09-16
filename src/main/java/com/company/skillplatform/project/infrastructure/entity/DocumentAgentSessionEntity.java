@@ -43,6 +43,10 @@ public class DocumentAgentSessionEntity extends BaseJpaEntity {
         this.runtimeSessionId = runtimeSessionId; this.conversationId = conversationId;
         this.workspaceId = workspaceId; this.status = "ACTIVE"; this.lastActivityAt = Instant.now();
     }
+    public void runtimeUnbound() {
+        this.runtimeSessionId = null; this.conversationId = null; this.workspaceId = null;
+        this.status = "ACTIVE"; this.lastActivityAt = Instant.now();
+    }
     public void activateLocally() { this.status = "ACTIVE"; this.lastActivityAt = Instant.now(); }
     public void setMcpTokenHash(String value) { this.mcpTokenHash = value; }
     public void bindDocument(ProjectDocumentEntity value) { this.document = value; }
