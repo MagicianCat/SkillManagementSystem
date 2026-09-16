@@ -229,13 +229,9 @@ public class AgentMcpConfiguration {
         String type = required(args, "artifactType").toUpperCase(Locale.ROOT), title = required(args, "title"), content = required(args, "content");
         Long artifactId = args.get("artifactId") == null ? null : Long.valueOf(String.valueOf(args.get("artifactId")));
         String profile = str(args, "profileKey");
-        ProjectControlService.DocumentView saved;
-        if (artifactId == null) saved = projectControl.createDocument(agent.projectKey(), new ProjectControlService.CreateDocument(type, title, content, args.get("skillSnapshots"), args.get("assumptions"), args.get("openQuestions"), longList(args.get("sourceArtifactIds"))), agent.userId(), "mcp:" + agent.runRef());
-        else {
-            var existing = projectControl.getDocument(agent.projectKey(), artifactId, agent.userId());
-            int version = args.get("versionNo") == null ? existing.versionNo() : Integer.parseInt(String.valueOf(args.get("versionNo")));
-            saved = projectControl.saveDraft(agent.projectKey(), artifactId, new ProjectControlService.SaveDraft(title, content, version, "AGENT", profile, agent.runRef(), str(args, "agentJobId"), args.get("skillSnapshots"), args.get("assumptions"), args.get("openQuestions"), longList(args.get("sourceArtifactIds"))), agent.userId(), "mcp:" + agent.runRef());
-        }
+        ProjectControlService.DocumentView saved = documentAgents.saveAgentDraft(agent, type, title, content, artifactId,
+                args.get("versionNo") == null ? null : Integer.parseInt(String.valueOf(args.get("versionNo"))),
+                args.get("skillSnapshots"), args.get("assumptions"), args.get("openQuestions"), longList(args.get("sourceArtifactIds")));
         return ok(Map.of("saved", true, "artifact", saved));
     }
     private McpSchema.CallToolResult validateProjectArtifact(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {

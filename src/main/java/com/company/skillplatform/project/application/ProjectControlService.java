@@ -139,6 +139,18 @@ public class ProjectControlService {
         return documentView(document);
     }
 
+    /** Creates the first revision for an OpenHands job and records its provenance. */
+    @Transactional
+    public DocumentView createAgentDocument(String key, AgentDocument command, Long actorId, String requestId) {
+        VirtualProjectEntity project = access(key, actorId);
+        IamUserEntity actor = user(actorId);
+        validateType(command.documentType());
+        ProjectDocumentEntity document = documents.save(new ProjectDocumentEntity(project, command.documentType(), validTitle(command.title()), actor, clock.instant()));
+        saveRevision(document, command.markdownContent(), "AGENT", command.profileKey(), command.agentSessionId(), command.agentJobId(), command.skillSnapshots(), command.assumptions(), command.openQuestions(), command.sourceDocumentIds(), actor);
+        audit.success("PROJECT_DOCUMENT_AGENT_CREATED", actor, "PROJECT_DOCUMENT", document.getId(), requestId, Map.of(), Map.of("projectKey", key, "agentJobId", command.agentJobId()), Map.of());
+        return documentView(document);
+    }
+
     @Transactional(readOnly = true)
     public DocumentView getDocument(String key, Long documentId, Long actorId) { return documentView(document(key, documentId, actorId)); }
 
@@ -217,6 +229,7 @@ public class ProjectControlService {
     public record CreateProject(String name, String description) {}
     public record UpdateProject(String name, String description, int versionNo) {}
     public record CreateDocument(String documentType, String title, String markdownContent, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
+    public record AgentDocument(String documentType, String title, String markdownContent, String profileKey, String agentSessionId, String agentJobId, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
     public record SaveDraft(String title, String markdownContent, int versionNo, String sourceType, String profileKey, String agentSessionId, String agentJobId, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
     public record PublishCommand(Long revisionId, int versionNo) {}
     public record ProjectView(String projectKey, String name, String description, String status, String role, int versionNo) {}

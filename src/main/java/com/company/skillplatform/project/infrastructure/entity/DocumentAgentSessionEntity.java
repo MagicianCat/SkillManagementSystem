@@ -44,6 +44,7 @@ public class DocumentAgentSessionEntity extends BaseJpaEntity {
         this.workspaceId = workspaceId; this.status = "ACTIVE"; this.lastActivityAt = Instant.now();
     }
     public void setMcpTokenHash(String value) { this.mcpTokenHash = value; }
+    public void bindDocument(ProjectDocumentEntity value) { this.document = value; }
     public void touch(Instant now, Instant expiresAt) { this.lastActivityAt = now; this.mcpTokenExpiresAt = expiresAt; }
     public void close(Instant now) { this.status = "CLOSED"; this.closedAt = now; this.lastActivityAt = now; }
     public void fail() { this.status = "FAILED"; }

@@ -42,6 +42,7 @@ public class DocumentAgentSessionService {
     private final ObjectMapper mapper;
     private final RestClient gateway;
     private final String serviceToken;
+    private final int maxDispatchAttempts;
 
     public DocumentAgentSessionService(ProjectControlService projects, ProjectDocumentRepository documents,
                                        VirtualProjectRepository virtualProjects, IamUserRepository users,
@@ -50,10 +51,11 @@ public class DocumentAgentSessionService {
                                        AgentRunService runs, FeishuDocumentMcpProxy feishu, ObjectMapper mapper,
                                        RestClient.Builder builder,
                                        @Value("${skill-platform.document-agent.gateway-url:http://127.0.0.1:8090}") String gatewayUrl,
-                                       @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String serviceToken) {
+                                       @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String serviceToken,
+                                       @Value("${skill-platform.document-agent.max-dispatch-attempts:3}") int maxDispatchAttempts) {
         this.projects = projects; this.documents = documents; this.virtualProjects = virtualProjects; this.users = users; this.sessions = sessions; this.jobs = jobs;
         this.contexts = contexts; this.events = events; this.runs = runs; this.feishu = feishu; this.mapper = mapper;
-        this.gateway = builder.baseUrl(gatewayUrl).build(); this.serviceToken = serviceToken;
+        this.gateway = builder.baseUrl(gatewayUrl).build(); this.serviceToken = serviceToken; this.maxDispatchAttempts = Math.max(1, maxDispatchAttempts);
     }
 
     @Transactional(readOnly = true)
@@ -137,7 +139,7 @@ public class DocumentAgentSessionService {
     /** Dispatches durable jobs outside the user request transaction. */
     @Scheduled(fixedDelayString = "${skill-platform.document-agent.dispatch-delay-ms:1000}")
     public void dispatchPending() {
-        for (DocumentAgentJobEntity job : jobs.findTop20ByStatusOrderByTimeCreatedAsc("QUEUED")) {
+        for (DocumentAgentJobEntity job : jobs.findDispatchable(Instant.now(), org.springframework.data.domain.PageRequest.of(0, 20))) {
             try {
                 job.claim(UUID.randomUUID().toString());
                 jobs.saveAndFlush(job);
@@ -152,7 +154,13 @@ public class DocumentAgentSessionService {
                 Map<?, ?> runtime = result == null || !(result.get("job") instanceof Map<?, ?> value) ? Map.of() : value;
                 job.running(text(runtime, "job_id")); jobs.save(job);
             } catch (RuntimeException failure) {
-                job.fail("GATEWAY_UNAVAILABLE", "Document Agent Gateway is unavailable", true); jobs.save(job);
+                if (job.getDispatchAttempt() < maxDispatchAttempts) {
+                    long delaySeconds = Math.min(300L, 1L << Math.min(job.getDispatchAttempt(), 8));
+                    job.retryWaiting("GATEWAY_UNAVAILABLE", "Document Agent Gateway is unavailable", Instant.now().plusSeconds(delaySeconds));
+                } else {
+                    job.fail("GATEWAY_UNAVAILABLE", "Document Agent Gateway is unavailable", true);
+                }
+                jobs.save(job);
             }
         }
     }
@@ -171,6 +179,34 @@ public class DocumentAgentSessionService {
         DocumentAgentJobEntity job = job(jobKey, actorId);
         if (!"FAILED".equals(job.getStatus()) || !job.isRetryable()) throw error("DOCUMENT_AGENT_RETRY_NOT_ALLOWED", "This document job cannot be retried", HttpStatus.CONFLICT);
         job.retry(); jobs.save(job); return jobView(job);
+    }
+
+    @Transactional
+    public ProjectControlService.DocumentView saveAgentDraft(com.company.skillplatform.agent.domain.AgentRun agent,
+                                                              String artifactType, String title, String content,
+                                                              Long artifactId, Integer versionNo, Object skillSnapshots,
+                                                              Object assumptions, Object openQuestions, List<Long> sourceArtifactIds) {
+        if (agent.sessionKey() == null || agent.projectKey() == null) throw error("DOCUMENT_JOB_CONTEXT_REQUIRED", "A document job token is required", HttpStatus.FORBIDDEN);
+        DocumentAgentSessionEntity session = sessions.findForMcp(agent.sessionKey()).orElseThrow(() -> error("DOCUMENT_AGENT_SESSION_NOT_FOUND", "Document agent session not found", HttpStatus.NOT_FOUND));
+        DocumentAgentJobEntity job = jobs.findByJobKey(agent.runRef()).orElseThrow(() -> error("DOCUMENT_AGENT_JOB_NOT_FOUND", "Document agent job not found", HttpStatus.NOT_FOUND));
+        if (!job.getSession().getSessionKey().equals(session.getSessionKey()) || !Set.of("RUNNING", "DISPATCHING").contains(job.getStatus())) throw error("DOCUMENT_AGENT_JOB_NOT_ACTIVE", "Document job is not active", HttpStatus.CONFLICT);
+        if (job.getArtifactId() != null) return projects.getDocument(agent.projectKey(), job.getArtifactId(), agent.userId());
+        String expectedType = DOCUMENT_TYPES.get(session.getProfileKey());
+        if (!expectedType.equalsIgnoreCase(artifactType)) throw error("DOCUMENT_AGENT_PROFILE_TARGET_MISMATCH", "Artifact type does not match the selected profile", HttpStatus.BAD_REQUEST);
+        ProjectControlService.DocumentView saved;
+        if (artifactId == null) {
+            saved = projects.createAgentDocument(agent.projectKey(), new ProjectControlService.AgentDocument(expectedType, title, content, session.getProfileKey(), session.getSessionKey(), job.getJobKey(), skillSnapshots, assumptions, openQuestions, sourceArtifactIds), agent.userId(), "mcp:" + agent.runRef());
+            session.bindDocument(documents.findById(saved.id()).orElseThrow());
+            sessions.save(session);
+        } else {
+            if (session.getDocument() == null || !session.getDocument().getId().equals(artifactId)) throw error("DOCUMENT_AGENT_TARGET_FORBIDDEN", "Artifact is not the session target", HttpStatus.FORBIDDEN);
+            int currentVersion = versionNo == null ? session.getDocument().getVersionNo() : versionNo;
+            saved = projects.saveDraft(agent.projectKey(), artifactId, new ProjectControlService.SaveDraft(title, content, currentVersion, "AGENT", session.getProfileKey(), session.getSessionKey(), job.getJobKey(), skillSnapshots, assumptions, openQuestions, sourceArtifactIds), agent.userId(), "mcp:" + agent.runRef());
+        }
+        Long revisionId = saved.draft() == null ? null : saved.draft().id();
+        job.artifact(saved.id(), revisionId, "/projects/" + saved.projectKey() + "/documents/" + saved.id());
+        jobs.save(job);
+        return saved;
     }
 
     public String events(String jobKey, Long actorId, long after) {

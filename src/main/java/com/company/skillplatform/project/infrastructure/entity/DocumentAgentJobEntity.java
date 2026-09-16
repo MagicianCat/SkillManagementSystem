@@ -26,6 +26,7 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
     @Column(name = "dispatch_attempt", nullable = false) private int dispatchAttempt;
     @Column(name = "next_attempt_at") private Instant nextAttemptAt;
     @Column(name = "dispatch_claim", length = 64) private String dispatchClaim;
+    @Column(name = "dispatch_lease_until") private Instant dispatchLeaseUntil;
     @Column(name = "artifact_id") private Long artifactId;
     @Column(name = "revision_id") private Long revisionId;
     @Column(name = "document_url", length = 1024) private String documentUrl;
@@ -38,13 +39,14 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
         this.idempotencyKey = idempotencyKey; this.instruction = instruction; this.status = "QUEUED";
     }
     public void dispatching() { this.status = "DISPATCHING"; }
-    public void claim(String claim) { this.dispatchClaim = claim; this.dispatchAttempt++; this.status = "DISPATCHING"; }
-    public void running(String runtimeJobId) { this.status = "RUNNING"; this.runtimeJobId = runtimeJobId; this.startedAt = Instant.now(); }
+    public void claim(String claim) { this.dispatchClaim = claim; this.dispatchAttempt++; this.status = "DISPATCHING"; this.dispatchLeaseUntil = Instant.now().plusSeconds(60); }
+    public void running(String runtimeJobId) { this.status = "RUNNING"; this.runtimeJobId = runtimeJobId; this.startedAt = Instant.now(); this.dispatchLeaseUntil = null; }
     public void complete() { this.status = "COMPLETED"; this.finishedAt = Instant.now(); }
     public void cancel() { this.status = "CANCELLED"; this.finishedAt = Instant.now(); }
-    public void fail(String code, String message, boolean retryable) { this.status = "FAILED"; this.errorCode = code; this.errorMessage = message; this.retryable = retryable; this.finishedAt = Instant.now(); }
+    public void fail(String code, String message, boolean retryable) { this.status = "FAILED"; this.errorCode = code; this.errorMessage = message; this.retryable = retryable; this.finishedAt = Instant.now(); this.dispatchLeaseUntil = null; }
+    public void retryWaiting(String code, String message, Instant retryAt) { this.status = "RETRY_WAIT"; this.errorCode = code; this.errorMessage = message; this.retryable = true; this.nextAttemptAt = retryAt; this.dispatchLeaseUntil = null; }
     public void artifact(Long artifactId, Long revisionId, String documentUrl) { this.artifactId = artifactId; this.revisionId = revisionId; this.documentUrl = documentUrl; }
-    public void retry() { this.status = "QUEUED"; this.runtimeJobId = null; this.errorCode = null; this.errorMessage = null; this.retryable = false; this.startedAt = null; this.finishedAt = null; this.artifactId = null; this.revisionId = null; this.documentUrl = null; }
+    public void retry() { this.status = "QUEUED"; this.runtimeJobId = null; this.errorCode = null; this.errorMessage = null; this.retryable = false; this.nextAttemptAt = null; this.dispatchLeaseUntil = null; this.startedAt = null; this.finishedAt = null; this.artifactId = null; this.revisionId = null; this.documentUrl = null; }
     public String getJobKey() { return jobKey; }
     public DocumentAgentSessionEntity getSession() { return session; }
     public int getSequenceNo() { return sequenceNo; }
@@ -61,6 +63,7 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
     public int getDispatchAttempt() { return dispatchAttempt; }
     public Instant getNextAttemptAt() { return nextAttemptAt; }
     public String getDispatchClaim() { return dispatchClaim; }
+    public Instant getDispatchLeaseUntil() { return dispatchLeaseUntil; }
     public Long getArtifactId() { return artifactId; }
     public Long getRevisionId() { return revisionId; }
     public String getDocumentUrl() { return documentUrl; }
