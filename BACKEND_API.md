@@ -958,3 +958,28 @@ OpenHands 网关启动前由服务端调用 `POST /internal/document-agent/runs`
 - `POST /projects/{projectKey}/document-agent/sessions/{sessionId}/turns`：请求 `content`，提交一轮对话。
 - `GET /projects/{projectKey}/document-agent/jobs/{jobId}`：查询任务状态。
 - `GET /projects/{projectKey}/document-agent/jobs/{jobId}/events?after=`：读取 SSE 事件。
+
+## 27. 独立文档 Agent 入口（P3）
+
+文档 Agent 会话与 DSH 完全隔离，SMS 负责权限、项目归属、会话/任务持久化，Gateway 负责 OpenHands 运行时。浏览器只调用 SMS，不直接访问 Gateway。
+
+- `GET /document-agent/sessions?projectKey=&limit=`：列出当前用户可恢复的文档会话。
+- `POST /document-agent/sessions`：创建会话。请求字段为 `projectKey`、`profileKey`、`mode`（`NEW`/`EXISTING`）、可选 `documentId` 和新文档 `title`；必须携带 `Idempotency-Key`。
+- `GET /document-agent/sessions/{sessionKey}`、`DELETE /document-agent/sessions/{sessionKey}`：查询或关闭会话。
+- `POST /document-agent/sessions/{sessionKey}/turns`：提交一轮文档指令，字段为 `instruction`、可选 `sourceArtifactIds` 和 `feishuDocuments[{docId,docType,title}]`；必须携带 `Idempotency-Key`。
+- `GET /document-agent/jobs/{jobKey}`、`POST /document-agent/jobs/{jobKey}:cancel`：查询或取消任务。
+- `GET /document-agent/jobs/{jobKey}/events?after=`：读取任务 SSE 事件。
+- `GET /document-agent/feishu-documents:search?query=`、`POST /document-agent/feishu-documents:resolve`：为本次生成搜索或解析飞书文档。SMS 只保存文档标识和标题，正文由 OpenHands 通过 MCP 分段读取。
+
+会话默认保留 30 天无活动窗口，历史任务和事件保留 180 天。每一轮任务最多选择 10 份飞书文档；MCP token 仅允许读取当前任务选中的文档，Agent 通过 `save_artifact_draft` 保存草稿，不能发布或修改成员权限。
+
+## 流程最佳实践视频
+
+### `GET /api/v1/dev-pipeline/videos/{skillKey}`
+
+按需流式读取流程最佳实践页的 Skill 演示视频。接口需要登录态，当前仅开放流程页中的 36 个 Skill；视频对象位于 MinIO 的 `dev-pipeline/videos/{skillKey}.mp4`。
+
+- 支持 `Range: bytes=start-end` 和后缀范围请求，成功返回 `206 Partial Content`，并携带 `Content-Range`、`Accept-Ranges: bytes`。
+- 不带范围时返回 `200 OK`；支持 `If-None-Match`，命中时返回 `304 Not Modified`。
+- 响应携带私有缓存策略 `Cache-Control: private, max-age=86400` 和 MinIO ETag，前端仅在用户点击播放时发起请求。
+- 未知 Skill 或未上传视频返回 `404`；不合法的范围返回 `416`。

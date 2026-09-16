@@ -14,6 +14,7 @@ import com.company.skillplatform.agent.infrastructure.entity.AgentRecommendation
 import com.company.skillplatform.agent.infrastructure.repository.AgentRunRepository;
 import com.company.skillplatform.agent.application.AgentEventHub;
 import com.company.skillplatform.project.application.ProjectControlService;
+import com.company.skillplatform.project.application.DocumentAgentSessionService;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -50,13 +51,14 @@ public class AgentMcpConfiguration {
     private final AgentFeishuCallGuard feishuGuard;
     private final String webBaseUrl;
     private final ProjectControlService projectControl;
+    private final DocumentAgentSessionService documentAgents;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
                                  AgentRunRepository persistentRuns, AgentEventHub events, WikiDocumentService wiki, FeishuDocumentMcpProxy feishu,
-                                 AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl,
+                                 AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl, DocumentAgentSessionService documentAgents,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
     }
 
     @Bean
@@ -193,6 +195,8 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult getFeishu(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "feishu.read"); requireUserKnowledge(agent); String docId = required(args, "docId"); String docType = required(args, "docType");
+        if (agent.sessionKey() != null && !documentAgents.allowsFeishu(agent.sessionKey(), docId, docType))
+            throw new BusinessException("DOCUMENT_AGENT_CONTEXT_DENIED", "The Feishu document was not selected for the active document job", org.springframework.http.HttpStatus.FORBIDDEN);
         var budget = feishuGuard.beforeRead(agent.runRef(), docId);
         if (!budget.allowed()) return ok(Map.of("status", budget.code(), "docId", docId, "message", "该文档已读取过或检索预算已用尽，请基于已有资料直接回答。"));
         try {
