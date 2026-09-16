@@ -36,6 +36,7 @@ public class SecurityConfiguration {
                                 "/api/v1/auth/feishu/authorize", "/api/v1/auth/feishu/callback",
                                 "/actuator/health").permitAll()
                         .requestMatchers("/internal/mcp", "/internal/mcp/**").hasAuthority("agent:mcp")
+                        .requestMatchers("/internal/document-agent/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint((req, res, cause) -> {

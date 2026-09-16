@@ -4,7 +4,11 @@ import java.time.Instant;
 import java.util.UUID;
 
 public record AgentRun(String runRef, Long userId, String profileKey, String platform,
-                       String osType, Instant expiresAt, String status, String knowledgeScope) {
+                       String osType, Instant expiresAt, String status, String knowledgeScope,
+                       String projectKey, Long documentId) {
+    public AgentRun(String runRef, Long userId, String profileKey, String platform, String osType, Instant expiresAt, String status, String knowledgeScope) {
+        this(runRef, userId, profileKey, platform, osType, expiresAt, status, knowledgeScope, null, null);
+    }
     public AgentRun(String runRef, Long userId, String profileKey, String platform, String osType, Instant expiresAt, String status) {
         this(runRef, userId, profileKey, platform, osType, expiresAt, status, "USER_VISIBLE");
     }

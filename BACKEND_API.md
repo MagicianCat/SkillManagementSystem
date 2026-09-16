@@ -929,3 +929,24 @@ MySQL 的 `skill_usage_event` 保存调用统计和对话状态；`skill_usage_c
 - `GET /admin/skill-usage/events/{eventId}/conversation?page=0&size=100`：仅在管理员点击明细后调用，读取该用户和 CodeBuddy session 的最新合并对话；对话正文保存在 MinIO，接口最多每页返回 100 条消息。
 
 看板默认查询近 30 天，支持今天、近 7 天、近 90 天和自定义时间范围。对话查看会产生 `SKILL_USAGE_CONVERSATION_VIEWED` 审计记录。
+
+## 26. 虚拟项目组与项目文档控制面（P2）
+
+项目组使用不可变 UUID `projectKey` 对外标识。SMS 是项目和项目文档正文的唯一权威存储；本期不绑定 Git 仓库、不保存仓库地址或凭证。
+
+项目成员角色为 `OWNER`、`MAINTAINER`、`MEMBER`：OWNER 管理项目和成员；MAINTAINER 可发布文档；MEMBER 可读取项目并创建、编辑草稿。非成员访问项目统一返回 `404`。
+
+- `POST /projects`、`GET /projects`、`GET/PATCH /projects/{projectKey}`：创建、查询和更新项目。
+- `POST /projects/{projectKey}:archive`：归档项目。
+- `GET /projects/{projectKey}/members`、`PUT/DELETE /projects/{projectKey}/members/{userId}`：管理成员。
+- `GET/POST /projects/{projectKey}/documents`：查询或创建 `REQUIREMENT`、`PRD`、`ARCHITECTURE`、`UI_DESIGN` 文档。
+- `GET /projects/{projectKey}/documents/{documentId}`：读取文档的当前草稿和正式版本。
+- `PUT /projects/{projectKey}/documents/{documentId}/draft`：保存新草稿修订。每次保存产生不可变 revision，必须携带当前 `versionNo`。
+- `GET /projects/{projectKey}/documents/{documentId}/revisions`：查询修订历史。
+- `POST /projects/{projectKey}/documents/{documentId}:publish`：由 OWNER/MAINTAINER 将指定修订发布为正式版本。
+
+Agent 只能保存草稿，不能发布项目文档或管理成员。连续多轮对话通过同一 `documentId` 追加修订。文档从未发布且最后草稿活动超过 180 天时由后台任务归档清理；已发布过的文档不会自动清理。
+
+`ProjectContext` 为后续 Git 集成预留 `externalResources` 扩展字段，P2 固定为空数组。下一期可增加 Git repository resource，不需要改动 `projectKey` 和文档会话主接口。
+
+OpenHands 网关启动前由服务端调用 `POST /internal/document-agent/runs`（请求头 `X-SMS-Service-Token`）签发短期项目 Agent Token，请求字段为 `actorId`、`projectKey`、可选 `documentId` 和 `profileKey`。该 Token 仅允许项目上下文、文档读取、草稿保存和结构校验，不允许发布文档或管理成员。

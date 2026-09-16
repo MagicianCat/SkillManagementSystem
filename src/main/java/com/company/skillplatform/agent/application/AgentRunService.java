@@ -40,6 +40,18 @@ public class AgentRunService {
     public IssuedRun issueForRun(String runRef, Long userId, String profileKey, String platform, String osType, String knowledgeScope) {
         return issue(new AgentRun(runRef, userId, profileKey, platform, osType, clock.instant().plus(ttl), "ACTIVE", knowledgeScope));
     }
+    public IssuedRun issueDocumentRun(Long userId, String projectKey, Long documentId, String profileKey) {
+        if (!java.util.Set.of("requirement-analysis/v1", "prd-authoring/v1", "architecture-design/v1", "ui-design/v1").contains(profileKey))
+            throw new BusinessException("AGENT_PROFILE_INVALID", "Unsupported document agent profile", HttpStatus.BAD_REQUEST);
+        AgentRun run = new AgentRun(java.util.UUID.randomUUID().toString(), userId, profileKey, null, null,
+                clock.instant().plus(ttl), "ACTIVE", "PROJECT_MEMBER", projectKey, documentId);
+        String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(userId))
+                .claim("runRef", run.runRef()).claim("profileKey", profileKey).claim("kind", "document")
+                .claim("projectKey", projectKey).claim("documentId", documentId)
+                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate"))
+                .issuedAt(Date.from(clock.instant())).expiration(Date.from(run.expiresAt())).signWith(key).compact();
+        return new IssuedRun(run, token);
+    }
     private IssuedRun issue(AgentRun run) {
         String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(run.userId()))
                 .claim("runRef", run.runRef()).claim("profileKey", run.profileKey())
@@ -55,6 +67,11 @@ public class AgentRunService {
             String runRef = claims.get("runRef", String.class);
             Long userId = Long.valueOf(claims.getSubject());
             String profile = claims.get("profileKey", String.class);
+            if ("document".equals(claims.get("kind", String.class))) {
+                String projectKey = claims.get("projectKey", String.class);
+                Number documentId = claims.get("documentId", Number.class);
+                return new AgentRun(runRef, userId, profile, null, null, claims.getExpiration().toInstant(), "ACTIVE", "PROJECT_MEMBER", projectKey, documentId == null ? null : documentId.longValue());
+            }
             AgentRunEntity entity = persistentRuns.findByRunKey(runRef).orElse(null);
             if (entity == null || !"RUNNING".equals(entity.getStatus())
                     || !userId.equals(entity.getSession().getOwnerUserId())
@@ -67,6 +84,7 @@ public class AgentRunService {
         catch (Exception e) { throw new BusinessException("AGENT_TOKEN_INVALID", "Invalid agent run token", HttpStatus.UNAUTHORIZED); }
     }
     public void requireCapability(AgentRun run, String capability) {
+        if (run.projectKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
                 "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {

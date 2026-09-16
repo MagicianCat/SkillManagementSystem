@@ -13,6 +13,7 @@ import com.company.skillplatform.agent.infrastructure.repository.AgentRecommenda
 import com.company.skillplatform.agent.infrastructure.entity.AgentRecommendationEntity;
 import com.company.skillplatform.agent.infrastructure.repository.AgentRunRepository;
 import com.company.skillplatform.agent.application.AgentEventHub;
+import com.company.skillplatform.project.application.ProjectControlService;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -48,13 +49,14 @@ public class AgentMcpConfiguration {
     private final FeishuDocumentMcpProxy feishu;
     private final AgentFeishuCallGuard feishuGuard;
     private final String webBaseUrl;
+    private final ProjectControlService projectControl;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
                                  AgentRunRepository persistentRuns, AgentEventHub events, WikiDocumentService wiki, FeishuDocumentMcpProxy feishu,
-                                 AgentFeishuCallGuard feishuGuard,
+                                 AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
     }
 
     @Bean
@@ -80,6 +82,16 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of("query")), this::searchFeishu),
                         tool("get_feishu_document", "Read a readable Feishu Docs document. Use docType from search results; never call this for readable=false.",
                                 schema("object", List.of("docId", "docType")), this::getFeishu),
+                        tool("get_project_context", "Read the current virtual project and its visible document context.",
+                                schema("object", List.of()), this::projectContext),
+                        tool("list_project_artifacts", "List documents available in the current virtual project.",
+                                schema("object", List.of()), this::projectArtifacts),
+                        tool("get_project_artifact", "Read one authorized project document.",
+                                schema("object", List.of("artifactId")), this::projectArtifact),
+                        tool("save_artifact_draft", "Create or update the current project document draft.",
+                                schema("object", List.of("artifactType", "title", "content")), this::saveProjectDraft),
+                        tool("validate_artifact", "Validate the minimum structure of a project document draft.",
+                                schema("object", List.of("artifactType", "content")), this::validateProjectArtifact),
                         tool("get_skill_file_content", "Get a safe, bounded segment of a published text file.",
                                 schema("object", List.of("skillKey", "path")), this::file),
                         tool("submit_skill_recommendation", "Submit the final structured skill recommendation.",
@@ -104,6 +116,15 @@ public class AgentMcpConfiguration {
         props.put("docType", Map.of("type", "string", "enum", List.of("DOCX", "DOC", "SHEET", "BITABLE", "SLIDES", "MINDNOTE", "WIKI", "UNKNOWN")));
         props.put("limit", Map.of("type", "integer", "minimum", 1, "maximum", 10));
         props.put("documentType", Map.of("type", "string", "enum", List.of("SKILL_README", "SKILL_GUIDE")));
+        props.put("artifactId", Map.of("type", "integer", "minimum", 1));
+        props.put("artifactType", Map.of("type", "string", "enum", List.of("REQUIREMENT", "PRD", "ARCHITECTURE", "UI_DESIGN")));
+        props.put("title", Map.of("type", "string", "minLength", 1, "maxLength", 255));
+        props.put("content", Map.of("type", "string", "minLength", 1, "maxLength", 1000000));
+        props.put("versionNo", Map.of("type", "integer", "minimum", 0));
+        props.put("sourceArtifactIds", Map.of("type", "array", "items", Map.of("type", "integer", "minimum", 1), "maxItems", 20));
+        props.put("profileKey", Map.of("type", "string", "maxLength", 64));
+        props.put("agentSessionId", Map.of("type", "string", "maxLength", 128));
+        props.put("agentJobId", Map.of("type", "string", "maxLength", 128));
         props.put("offset", Map.of("type", "integer", "minimum", 0)); props.put("maxBytes", Map.of("type", "integer", "minimum", 1, "maximum", MAX_BYTES));
         props.put("page", Map.of("type", "integer", "minimum", 0)); props.put("pageSize", Map.of("type", "integer", "minimum", 1, "maximum", 20));
         props.put("summary", Map.of("type", "string", "maxLength", 2000)); props.put("items", Map.of("type", "array", "maxItems", 20));
@@ -184,6 +205,43 @@ public class AgentMcpConfiguration {
             return feishuFailure("read", null, docId, failure);
         }
     }
+    private McpSchema.CallToolResult projectContext(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "project.context.read"); requireProject(agent);
+        var project = projectControl.get(agent.projectKey(), agent.userId());
+        var docs = projectControl.listDocuments(agent.projectKey(), agent.userId(), PageRequest.of(0, 50)).items();
+        return ok(Map.of("project", project, "project_id", agent.projectKey(), "documents", docs, "externalResources", List.of()));
+    }
+    private McpSchema.CallToolResult projectArtifacts(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "project.artifact.list"); requireProject(agent);
+        return ok(Map.of("project_id", agent.projectKey(), "artifacts", projectControl.listDocuments(agent.projectKey(), agent.userId(), PageRequest.of(0, 50)).items()));
+    }
+    private McpSchema.CallToolResult projectArtifact(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "project.artifact.read"); requireProject(agent);
+        long id = longRequired(args, "artifactId");
+        return ok(projectControl.getDocument(agent.projectKey(), id, agent.userId()));
+    }
+    private McpSchema.CallToolResult saveProjectDraft(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "project.artifact.write"); requireProject(agent);
+        String type = required(args, "artifactType").toUpperCase(Locale.ROOT), title = required(args, "title"), content = required(args, "content");
+        Long artifactId = args.get("artifactId") == null ? null : Long.valueOf(String.valueOf(args.get("artifactId")));
+        String profile = str(args, "profileKey");
+        ProjectControlService.DocumentView saved;
+        if (artifactId == null) saved = projectControl.createDocument(agent.projectKey(), new ProjectControlService.CreateDocument(type, title, content, args.get("skillSnapshots"), args.get("assumptions"), args.get("openQuestions"), longList(args.get("sourceArtifactIds"))), agent.userId(), "mcp:" + agent.runRef());
+        else {
+            var existing = projectControl.getDocument(agent.projectKey(), artifactId, agent.userId());
+            int version = args.get("versionNo") == null ? existing.versionNo() : Integer.parseInt(String.valueOf(args.get("versionNo")));
+            saved = projectControl.saveDraft(agent.projectKey(), artifactId, new ProjectControlService.SaveDraft(title, content, version, "AGENT", profile, agent.runRef(), str(args, "agentJobId"), args.get("skillSnapshots"), args.get("assumptions"), args.get("openQuestions"), longList(args.get("sourceArtifactIds"))), agent.userId(), "mcp:" + agent.runRef());
+        }
+        return ok(Map.of("saved", true, "artifact", saved));
+    }
+    private McpSchema.CallToolResult validateProjectArtifact(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "project.artifact.validate"); requireProject(agent); String type = required(args, "artifactType").toUpperCase(Locale.ROOT), content = required(args, "content");
+        List<String> required = switch (type) { case "REQUIREMENT" -> List.of("背景", "目标", "验收"); case "PRD" -> List.of("问题", "用户", "功能", "验收"); case "ARCHITECTURE" -> List.of("上下文", "组件", "数据", "风险"); case "UI_DESIGN" -> List.of("信息架构", "用户流程", "页面"); default -> throw new IllegalArgumentException("invalid artifact type"); };
+        List<String> missing = required.stream().filter(s -> !content.contains(s)).toList();
+        return ok(Map.of("valid", missing.isEmpty(), "artifact_type", type, "missing_sections", missing));
+    }
+    private void requireProject(com.company.skillplatform.agent.domain.AgentRun agent) { if (agent.projectKey() == null) throw new com.company.skillplatform.common.application.BusinessException("PROJECT_CONTEXT_REQUIRED", "Project agent context is required", org.springframework.http.HttpStatus.FORBIDDEN); }
+    private List<Long> longList(Object value) { if (!(value instanceof List<?> values)) return null; return values.stream().map(v -> Long.valueOf(String.valueOf(v))).toList(); }
 
     private <T> T withFeishuRetry(java.util.function.Supplier<T> operation) {
         RuntimeException last = null;
