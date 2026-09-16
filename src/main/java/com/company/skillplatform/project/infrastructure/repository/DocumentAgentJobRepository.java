@@ -7,6 +7,8 @@ import org.springframework.data.repository.query.Param;
 
 public interface DocumentAgentJobRepository extends JpaRepository<DocumentAgentJobEntity, Long> {
     @EntityGraph(attributePaths = {"session", "session.project", "session.owner", "session.document"})
+    List<DocumentAgentJobEntity> findTop20ByStatusOrderByTimeCreatedAsc(String status);
+    @EntityGraph(attributePaths = {"session", "session.project", "session.owner", "session.document"})
     Optional<DocumentAgentJobEntity> findByJobKey(String jobKey);
     Optional<DocumentAgentJobEntity> findBySessionAndIdempotencyKey(DocumentAgentSessionEntity session, String key);
     Optional<DocumentAgentJobEntity> findFirstBySessionAndStatusInOrderBySequenceNoDesc(DocumentAgentSessionEntity session, Collection<String> statuses);

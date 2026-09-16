@@ -23,6 +23,12 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
     @Column(nullable = false) private boolean retryable;
     @Column(name = "started_at") private Instant startedAt;
     @Column(name = "finished_at") private Instant finishedAt;
+    @Column(name = "dispatch_attempt", nullable = false) private int dispatchAttempt;
+    @Column(name = "next_attempt_at") private Instant nextAttemptAt;
+    @Column(name = "dispatch_claim", length = 64) private String dispatchClaim;
+    @Column(name = "artifact_id") private Long artifactId;
+    @Column(name = "revision_id") private Long revisionId;
+    @Column(name = "document_url", length = 1024) private String documentUrl;
     @Version @Column(name = "version_no", nullable = false) private int versionNo;
 
     protected DocumentAgentJobEntity() {}
@@ -32,10 +38,12 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
         this.idempotencyKey = idempotencyKey; this.instruction = instruction; this.status = "QUEUED";
     }
     public void dispatching() { this.status = "DISPATCHING"; }
+    public void claim(String claim) { this.dispatchClaim = claim; this.dispatchAttempt++; this.status = "DISPATCHING"; }
     public void running(String runtimeJobId) { this.status = "RUNNING"; this.runtimeJobId = runtimeJobId; this.startedAt = Instant.now(); }
     public void complete() { this.status = "COMPLETED"; this.finishedAt = Instant.now(); }
     public void cancel() { this.status = "CANCELLED"; this.finishedAt = Instant.now(); }
     public void fail(String code, String message, boolean retryable) { this.status = "FAILED"; this.errorCode = code; this.errorMessage = message; this.retryable = retryable; this.finishedAt = Instant.now(); }
+    public void artifact(Long artifactId, Long revisionId, String documentUrl) { this.artifactId = artifactId; this.revisionId = revisionId; this.documentUrl = documentUrl; }
     public String getJobKey() { return jobKey; }
     public DocumentAgentSessionEntity getSession() { return session; }
     public int getSequenceNo() { return sequenceNo; }
@@ -49,4 +57,10 @@ public class DocumentAgentJobEntity extends BaseJpaEntity {
     public Instant getStartedAt() { return startedAt; }
     public Instant getFinishedAt() { return finishedAt; }
     public int getVersionNo() { return versionNo; }
+    public int getDispatchAttempt() { return dispatchAttempt; }
+    public Instant getNextAttemptAt() { return nextAttemptAt; }
+    public String getDispatchClaim() { return dispatchClaim; }
+    public Long getArtifactId() { return artifactId; }
+    public Long getRevisionId() { return revisionId; }
+    public String getDocumentUrl() { return documentUrl; }
 }

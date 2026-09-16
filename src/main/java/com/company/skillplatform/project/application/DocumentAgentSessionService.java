@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
@@ -130,19 +131,28 @@ public class DocumentAgentSessionService {
         }
         for (FeishuContext value : selectedFeishu) contexts.save(DocumentAgentJobContextEntity.feishu(job, value.docId(), value.docType(), value.title(), ordinal++));
         session.touch(Instant.now(), Instant.now().plusSeconds(30L * 24 * 60 * 60)); sessions.save(session);
-        try {
-            Map<?, ?> result = gateway.post().uri("/internal/v1/document-sessions/{id}/turns", session.getSessionKey())
-                    .header("X-SMS-Service-Token", serviceToken).contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("content", runtimeInstruction(job, instruction), "idempotency_key", idempotencyKey)).retrieve().body(Map.class);
-            Map<?, ?> runtime = result == null || !(result.get("job") instanceof Map<?, ?> value) ? Map.of() : value;
-            job.running(text(runtime, "job_id"));
-            applyRuntimeStatus(job, text(runtime, "status"));
-            jobs.save(job);
-            syncEvents(job);
-            return jobView(job);
-        } catch (RuntimeException failure) {
-            job.fail("GATEWAY_UNAVAILABLE", "Document Agent Gateway is unavailable", true); jobs.save(job);
-            throw gatewayError(failure, "DOCUMENT_AGENT_GATEWAY_UNAVAILABLE");
+        return jobView(job);
+    }
+
+    /** Dispatches durable jobs outside the user request transaction. */
+    @Scheduled(fixedDelayString = "${skill-platform.document-agent.dispatch-delay-ms:1000}")
+    public void dispatchPending() {
+        for (DocumentAgentJobEntity job : jobs.findTop20ByStatusOrderByTimeCreatedAsc("QUEUED")) {
+            try {
+                job.claim(UUID.randomUUID().toString());
+                jobs.saveAndFlush(job);
+                AgentRunService.IssuedRun issued = runs.issueDocumentSessionRun(job.getSession().getOwner().getId(), job.getSession().getProject().getProjectKey(), job.getSession().getDocument() == null ? null : job.getSession().getDocument().getId(), job.getSession().getProfileKey(), job.getSession().getSessionKey());
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("job_key", job.getJobKey()); body.put("session_key", job.getSession().getSessionKey());
+                body.put("attempt_no", job.getDispatchAttempt()); body.put("profile_key", job.getSession().getProfileKey());
+                body.put("instruction", runtimeInstruction(job, job.getInstruction())); body.put("mcp_token", issued.token());
+                body.put("idempotency_key", job.getJobKey() + ":" + job.getDispatchAttempt());
+                Map<?, ?> result = gateway.post().uri("/internal/v1/document-jobs").header("X-SMS-Service-Token", serviceToken).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
+                Map<?, ?> runtime = result == null || !(result.get("job") instanceof Map<?, ?> value) ? Map.of() : value;
+                job.running(text(runtime, "job_id")); jobs.save(job);
+            } catch (RuntimeException failure) {
+                job.fail("GATEWAY_UNAVAILABLE", "Document Agent Gateway is unavailable", true); jobs.save(job);
+            }
         }
     }
 
@@ -201,7 +211,20 @@ public class DocumentAgentSessionService {
                 for (DocumentAgentJobEventEntity value : events.findByJobAndSequenceNoGreaterThanOrderBySequenceNoAsc(job, sequence - 1)) {
                     if (value.getSequenceNo() == sequence) { duplicate = true; break; }
                 }
-                if (!duplicate) events.save(new DocumentAgentJobEventEntity(job, sequence, null, eventType, data, Instant.now()));
+                if (!duplicate) {
+                    events.save(new DocumentAgentJobEventEntity(job, sequence, null, eventType, data, Instant.now()));
+                    if ("artifact.saved".equals(eventType)) {
+                        try {
+                            JsonNode node = mapper.readTree(data);
+                            JsonNode payload = node.path("data");
+                            JsonNode artifact = payload.path("artifact").isObject() ? payload.path("artifact") : payload;
+                            long artifactId = artifact.has("artifactId") ? artifact.path("artifactId").asLong(0L) : artifact.path("id").asLong(0L);
+                            long revisionId = artifact.has("revisionId") ? artifact.path("revisionId").asLong(0L) : artifact.path("currentDraftRevisionId").asLong(0L);
+                            if (revisionId == 0L) revisionId = artifact.path("draft").path("id").asLong(0L);
+                            if (artifactId > 0 && revisionId > 0) job.artifact(artifactId, revisionId, artifact.path("documentUrl").asText(null));
+                        } catch (Exception ignored) { }
+                    }
+                }
                 eventType = null; data = null;
             }
         }
@@ -209,7 +232,7 @@ public class DocumentAgentSessionService {
 
     private void applyRuntimeStatus(DocumentAgentJobEntity job, String status) {
         if (status == null) return;
-        switch (status) { case "COMPLETED" -> job.complete(); case "FAILED" -> job.fail("OPENHANDS_JOB_FAILED", "OpenHands job failed", true); case "CANCELLED" -> job.cancel(); default -> { } }
+        switch (status) { case "COMPLETED" -> { if (job.getArtifactId() != null && job.getRevisionId() != null) job.complete(); else job.fail("ARTIFACT_NOT_SAVED", "OpenHands completed without saving a document artifact", false); } case "FAILED" -> job.fail("OPENHANDS_JOB_FAILED", "OpenHands job failed", true); case "CANCELLED" -> job.cancel(); default -> { } }
     }
     private String runtimeInstruction(DocumentAgentJobEntity job, String instruction) {
         StringBuilder context = new StringBuilder();
@@ -230,12 +253,12 @@ public class DocumentAgentSessionService {
     private IamUserEntity user(Long id) { return users.findById(id).orElseThrow(() -> error("USER_NOT_FOUND", "User not found", HttpStatus.UNAUTHORIZED)); }
     private void requireProfile(String profile) { if (!PROFILES.contains(profile)) throw error("AGENT_PROFILE_INVALID", "Unsupported document agent profile", HttpStatus.BAD_REQUEST); }
     private SessionView sessionView(DocumentAgentSessionEntity value) { return new SessionView(value.getSessionKey(), value.getProject().getProjectKey(), value.getOwner().getId(), value.getProfileKey(), value.getDocument() == null ? null : value.getDocument().getId(), value.getTargetTitle(), value.getStatus(), value.getRuntimeSessionId(), value.getConversationId(), value.getWorkspaceId(), value.getLastActivityAt(), value.getClosedAt()); }
-    private JobView jobView(DocumentAgentJobEntity value) { return new JobView(value.getJobKey(), value.getSession().getSessionKey(), value.getSequenceNo(), value.getStatus(), value.getRuntimeJobId(), value.getErrorCode(), value.getErrorMessage(), value.isRetryable(), value.getStartedAt(), value.getFinishedAt()); }
+    private JobView jobView(DocumentAgentJobEntity value) { return new JobView(value.getJobKey(), value.getSession().getSessionKey(), value.getSequenceNo(), value.getStatus(), value.getRuntimeJobId(), value.getErrorCode(), value.getErrorMessage(), value.isRetryable(), value.getStartedAt(), value.getFinishedAt(), value.getArtifactId(), value.getRevisionId(), value.getDocumentUrl()); }
     private String text(Map<?, ?> map, String key) { Object value = map.get(key); return value == null ? null : String.valueOf(value); }
     private String sha256(String value) { try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); } catch (Exception e) { throw new IllegalStateException(e); } }
     private BusinessException gatewayError(RuntimeException failure, String code) { if (failure instanceof RestClientResponseException) return error(code, "Document Agent Gateway request failed", HttpStatus.BAD_GATEWAY); return error(code, "Document Agent Gateway is unavailable", HttpStatus.BAD_GATEWAY); }
     private BusinessException error(String code, String message, HttpStatus status) { return new BusinessException(code, message, status); }
     public record FeishuContext(String docId, String docType, String title) {}
     public record SessionView(String sessionKey, String projectKey, Long ownerId, String profileKey, Long documentId, String targetTitle, String status, String runtimeSessionId, String conversationId, String workspaceId, Instant lastActivityAt, Instant closedAt) {}
-    public record JobView(String jobKey, String sessionKey, int sequenceNo, String status, String runtimeJobId, String errorCode, String errorMessage, boolean retryable, Instant startedAt, Instant finishedAt) {}
+    public record JobView(String jobKey, String sessionKey, int sequenceNo, String status, String runtimeJobId, String errorCode, String errorMessage, boolean retryable, Instant startedAt, Instant finishedAt, Long artifactId, Long revisionId, String documentUrl) {}
 }

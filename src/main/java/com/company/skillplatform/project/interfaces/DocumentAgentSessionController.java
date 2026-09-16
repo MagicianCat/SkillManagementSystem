@@ -39,6 +39,7 @@ public class DocumentAgentSessionController {
     public void close(@PathVariable String sessionKey, Authentication auth) { service.close(sessionKey, actor(auth)); }
 
     @PostMapping("/sessions/{sessionKey}/turns")
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public DocumentAgentSessionService.JobView turn(@PathVariable String sessionKey, @Valid @RequestBody Turn request,
                                                     @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
                                                     HttpServletRequest http, Authentication auth) {
