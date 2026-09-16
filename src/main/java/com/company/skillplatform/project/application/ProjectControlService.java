@@ -69,6 +69,9 @@ public class ProjectControlService {
     @Transactional(readOnly = true)
     public void assertAgentAccess(String key, Long actorId) { access(key, actorId); }
 
+    @Transactional(readOnly = true)
+    public Long projectIdForAgent(String key, Long actorId) { return access(key, actorId).getId(); }
+
     @Transactional
     public ProjectView update(String key, UpdateProject command, Long actorId, String requestId) {
         VirtualProjectEntity project = access(key, actorId); requireRole(project, actorId, "OWNER");
