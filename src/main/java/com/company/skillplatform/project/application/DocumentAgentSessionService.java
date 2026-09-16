@@ -82,21 +82,9 @@ public class DocumentAgentSessionService {
         sessions.saveAndFlush(session);
         AgentRunService.IssuedRun issued = runs.issueDocumentSessionRun(actorId, projectKey, documentId, profileKey, session.getSessionKey());
         session.setMcpTokenHash(sha256(issued.token()));
+        session.activateLocally();
         sessions.saveAndFlush(session);
-        try {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("session_id", session.getSessionKey()); body.put("actor_id", String.valueOf(actorId)); body.put("project_id", projectKey);
-            body.put("profile_key", profileKey); body.put("document_id", documentId == null ? null : String.valueOf(documentId));
-            body.put("mcp_token", issued.token()); body.put("idempotency_key", idempotencyKey);
-            Map<?, ?> result = gateway.post().uri("/internal/v1/document-sessions").header("X-SMS-Service-Token", serviceToken).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
-            Map<?, ?> runtime = result == null ? Map.of() : result;
-            session.runtimeBound(text(runtime, "session_id"), text(runtime, "conversation_id"), text(runtime, "workspace_id"));
-            sessions.save(session);
-            return sessionView(session);
-        } catch (RuntimeException failure) {
-            session.fail(); sessions.save(session);
-            throw gatewayError(failure, "DOCUMENT_AGENT_GATEWAY_UNAVAILABLE");
-        }
+        return sessionView(session);
     }
 
     @Transactional
@@ -143,6 +131,7 @@ public class DocumentAgentSessionService {
             try {
                 job.claim(UUID.randomUUID().toString());
                 jobs.saveAndFlush(job);
+                ensureRuntimeSession(job.getSession());
                 AgentRunService.IssuedRun issued = runs.issueDocumentJobRun(job.getSession().getOwner().getId(), job.getSession().getProject().getProjectKey(), job.getSession().getDocument() == null ? null : job.getSession().getDocument().getId(), job.getSession().getProfileKey(), job.getSession().getSessionKey(), job.getJobKey());
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("job_key", job.getJobKey()); body.put("session_key", job.getSession().getSessionKey());
@@ -163,6 +152,19 @@ public class DocumentAgentSessionService {
                 jobs.save(job);
             }
         }
+    }
+
+    private void ensureRuntimeSession(DocumentAgentSessionEntity session) {
+        if (session.getRuntimeSessionId() != null) return;
+        AgentRunService.IssuedRun issued = runs.issueDocumentSessionRun(session.getOwner().getId(), session.getProject().getProjectKey(), session.getDocument() == null ? null : session.getDocument().getId(), session.getProfileKey(), session.getSessionKey());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("session_id", session.getSessionKey()); body.put("actor_id", String.valueOf(session.getOwner().getId())); body.put("project_id", session.getProject().getProjectKey());
+        body.put("profile_key", session.getProfileKey()); body.put("document_id", session.getDocument() == null ? null : String.valueOf(session.getDocument().getId()));
+        body.put("mcp_token", issued.token()); body.put("idempotency_key", session.getIdempotencyKey());
+        Map<?, ?> result = gateway.post().uri("/internal/v1/document-sessions").header("X-SMS-Service-Token", serviceToken).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
+        Map<?, ?> runtime = result == null ? Map.of() : result;
+        session.runtimeBound(text(runtime, "session_id"), text(runtime, "conversation_id"), text(runtime, "workspace_id"));
+        sessions.save(session);
     }
 
     public JobView getJob(String jobKey, Long actorId) { DocumentAgentJobEntity job = job(jobKey, actorId); syncEvents(job); return jobView(job); }
