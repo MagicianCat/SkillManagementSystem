@@ -950,3 +950,11 @@ Agent 只能保存草稿，不能发布项目文档或管理成员。连续多�
 `ProjectContext` 为后续 Git 集成预留 `externalResources` 扩展字段，P2 固定为空数组。下一期可增加 Git repository resource，不需要改动 `projectKey` 和文档会话主接口。
 
 OpenHands 网关启动前由服务端调用 `POST /internal/document-agent/runs`（请求头 `X-SMS-Service-Token`）签发短期项目 Agent Token，请求字段为 `actorId`、`projectKey`、可选 `documentId` 和 `profileKey`。该 Token 仅允许项目上下文、文档读取、草稿保存和结构校验，不允许发布文档或管理成员。
+
+项目 Agent 会话由 SMS 代理 Gateway，浏览器不直接调用 Gateway：
+
+- `POST /projects/{projectKey}/document-agent/sessions`：请求 `documentId`、`profileKey`，创建 OpenHands 会话。
+- `GET/DELETE /projects/{projectKey}/document-agent/sessions/{sessionId}`：查询或关闭会话。
+- `POST /projects/{projectKey}/document-agent/sessions/{sessionId}/turns`：请求 `content`，提交一轮对话。
+- `GET /projects/{projectKey}/document-agent/jobs/{jobId}`：查询任务状态。
+- `GET /projects/{projectKey}/document-agent/jobs/{jobId}/events?after=`：读取 SSE 事件。
