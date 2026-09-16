@@ -3,6 +3,8 @@ package com.company.skillplatform.project.infrastructure.entity;
 import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;
 import jakarta.persistence.*;
 import java.time.Instant;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(name = "document_agent_job_event", uniqueConstraints = @UniqueConstraint(name = "uk_document_agent_event_sequence", columnNames = {"job_id", "sequence_no"}))
@@ -11,7 +13,7 @@ public class DocumentAgentJobEventEntity extends BaseJpaEntity {
     @Column(name = "sequence_no", nullable = false) private long sequenceNo;
     @Column(name = "runtime_event_id", length = 128) private String runtimeEventId;
     @Column(name = "event_type", nullable = false, length = 64) private String eventType;
-    @Lob @Column(nullable = false, columnDefinition = "json") private String payload;
+    @JdbcTypeCode(SqlTypes.JSON) @Column(nullable = false, columnDefinition = "json") private String payload;
     @Column(name = "occurred_at", nullable = false) private Instant occurredAt;
 
     protected DocumentAgentJobEventEntity() {}

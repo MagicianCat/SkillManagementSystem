@@ -20,7 +20,7 @@ public class DocumentAgentSessionEntity extends BaseJpaEntity {
     @Column(name = "runtime_session_id", length = 128) private String runtimeSessionId;
     @Column(name = "conversation_id", length = 128) private String conversationId;
     @Column(name = "workspace_id", length = 255) private String workspaceId;
-    @Column(name = "mcp_token_hash", nullable = false, length = 64) private String mcpTokenHash;
+    @Column(name = "mcp_token_hash", nullable = false, columnDefinition = "CHAR(64)") private String mcpTokenHash;
     @Column(name = "mcp_token_expires_at", nullable = false) private Instant mcpTokenExpiresAt;
     @Column(name = "last_activity_at", nullable = false) private Instant lastActivityAt;
     @Column(name = "closed_at") private Instant closedAt;

@@ -30,7 +30,7 @@ public class AgentRunService {
     public AgentRunService(AgentRunRepository persistentRuns,
                            @Value("${agent.mcp.signing-key:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}") String signingKey,
                            @Value("${agent.mcp.run-ttl:PT5M}") Duration ttl,
-                           @Value("${agent.mcp.document-session-ttl:PT30D}") Duration documentSessionTtl,
+                           @Value("${agent.mcp.document-session-ttl:PT720H}") Duration documentSessionTtl,
                            DocumentAgentSessionRepository documentSessions) {
         this.persistentRuns = persistentRuns;
         this.key = Keys.hmacShaKeyFor(signingKey.getBytes(StandardCharsets.UTF_8));

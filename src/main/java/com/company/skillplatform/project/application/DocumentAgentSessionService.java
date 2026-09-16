@@ -21,10 +21,13 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** SMS-owned document-agent sessions. DSH sessions never enter this service. */
 @Service
 public class DocumentAgentSessionService {
+    private static final Logger log = LoggerFactory.getLogger(DocumentAgentSessionService.class);
     private static final Set<String> PROFILES = Set.of("requirement-analysis/v1", "prd-authoring/v1", "architecture-design/v1", "ui-design/v1");
     private static final Map<String, String> DOCUMENT_TYPES = Map.of(
             "requirement-analysis/v1", "REQUIREMENT", "prd-authoring/v1", "PRD",
@@ -130,7 +133,12 @@ public class DocumentAgentSessionService {
         for (DocumentAgentJobEntity job : jobs.findDispatchable(Instant.now(), org.springframework.data.domain.PageRequest.of(0, 20))) {
             try {
                 job.claim(UUID.randomUUID().toString());
-                jobs.saveAndFlush(job);
+                // findDispatchable runs without a surrounding transaction, so saveAndFlush uses merge.
+                // Continue with the managed copy carrying the incremented optimistic-lock version.
+                job = jobs.saveAndFlush(job);
+                // merge may replace the eagerly loaded session graph with a detached lazy proxy.
+                // Reload through the repository EntityGraph before building the gateway request.
+                job = jobs.findByJobKey(job.getJobKey()).orElseThrow();
                 ensureRuntimeSession(job.getSession());
                 AgentRunService.IssuedRun issued = runs.issueDocumentJobRun(job.getSession().getOwner().getId(), job.getSession().getProject().getProjectKey(), job.getSession().getDocument() == null ? null : job.getSession().getDocument().getId(), job.getSession().getProfileKey(), job.getSession().getSessionKey(), job.getJobKey());
                 Map<String, Object> body = new LinkedHashMap<>();
@@ -143,6 +151,8 @@ public class DocumentAgentSessionService {
                 Map<?, ?> runtime = result == null || !(result.get("job") instanceof Map<?, ?> value) ? Map.of() : value;
                 job.running(text(runtime, "job_id")); jobs.save(job);
             } catch (RuntimeException failure) {
+                log.warn("event=document_agent.dispatch.failed jobKey={} attempt={} failureType={} message={}",
+                        job.getJobKey(), job.getDispatchAttempt(), failure.getClass().getSimpleName(), failure.getMessage());
                 if (job.getDispatchAttempt() < maxDispatchAttempts) {
                     long delaySeconds = Math.min(300L, 1L << Math.min(job.getDispatchAttempt(), 8));
                     job.retryWaiting("GATEWAY_UNAVAILABLE", "Document Agent Gateway is unavailable", Instant.now().plusSeconds(delaySeconds));
@@ -245,7 +255,11 @@ public class DocumentAgentSessionService {
             if (stream != null) parseEvents(job, stream, after);
             Map<?, ?> runtime = gateway.get().uri("/internal/v1/document-jobs/{id}", job.getRuntimeJobId()).header("X-SMS-Service-Token", serviceToken).retrieve().body(Map.class);
             applyRuntimeStatus(job, runtime == null ? null : text(runtime, "status")); jobs.save(job);
-        } catch (RuntimeException ignored) { /* The job remains queryable and retryable. */ }
+        } catch (RuntimeException failure) {
+            log.warn("event=document_agent.events.sync_failed jobKey={} runtimeJobId={} failureType={} message={}",
+                    job.getJobKey(), job.getRuntimeJobId(), failure.getClass().getSimpleName(), failure.getMessage());
+            /* The job remains queryable and retryable. */
+        }
     }
 
     private void parseEvents(DocumentAgentJobEntity job, String stream, long after) {
