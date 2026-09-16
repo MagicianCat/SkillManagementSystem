@@ -973,6 +973,8 @@ OpenHands 网关启动前由服务端调用 `POST /internal/document-agent/runs`
 
 会话默认保留 30 天无活动窗口，历史任务和事件保留 180 天。每一轮任务最多选择 10 份飞书文档；MCP token 仅允许读取当前任务选中的文档，Agent 通过 `save_artifact_draft` 保存草稿，不能发布或修改成员权限。
 
+任务状态包括 `QUEUED`、`DISPATCHING`、`RUNNING`、`RETRY_WAIT`、`CANCEL_REQUESTED`、`COMPLETED`、`FAILED` 和 `CANCELLED`。创建会话只写入 SMS 控制面，Gateway/OpenHands runtime session 在 dispatcher 首次投递任务时幂等创建。任务完成必须同时持久化 `artifactId` 和 `revisionId`；Agent 新建草稿的 revision 固定记录 `sourceType=AGENT`、`agentJobId` 和 profile provenance。
+
 ## 流程最佳实践视频
 
 ### `GET /api/v1/dev-pipeline/videos/{skillKey}`
