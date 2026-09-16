@@ -141,7 +141,7 @@ public class DocumentAgentSessionService {
             try {
                 job.claim(UUID.randomUUID().toString());
                 jobs.saveAndFlush(job);
-                AgentRunService.IssuedRun issued = runs.issueDocumentSessionRun(job.getSession().getOwner().getId(), job.getSession().getProject().getProjectKey(), job.getSession().getDocument() == null ? null : job.getSession().getDocument().getId(), job.getSession().getProfileKey(), job.getSession().getSessionKey());
+                AgentRunService.IssuedRun issued = runs.issueDocumentJobRun(job.getSession().getOwner().getId(), job.getSession().getProject().getProjectKey(), job.getSession().getDocument() == null ? null : job.getSession().getDocument().getId(), job.getSession().getProfileKey(), job.getSession().getSessionKey(), job.getJobKey());
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("job_key", job.getJobKey()); body.put("session_key", job.getSession().getSessionKey());
                 body.put("attempt_no", job.getDispatchAttempt()); body.put("profile_key", job.getSession().getProfileKey());

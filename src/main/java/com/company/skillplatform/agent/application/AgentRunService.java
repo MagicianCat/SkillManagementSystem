@@ -72,6 +72,20 @@ public class AgentRunService {
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
         return new IssuedRun(run, token);
     }
+    /** Short-lived token scoped to one durable document job dispatch. */
+    public IssuedRun issueDocumentJobRun(Long userId, String projectKey, Long documentId, String profileKey, String sessionKey, String jobKey) {
+        if (!java.util.Set.of("requirement-analysis/v1", "prd-authoring/v1", "architecture-design/v1", "ui-design/v1").contains(profileKey))
+            throw new BusinessException("AGENT_PROFILE_INVALID", "Unsupported document agent profile", HttpStatus.BAD_REQUEST);
+        Instant expires = clock.instant().plus(Duration.ofMinutes(15));
+        AgentRun run = new AgentRun(jobKey, userId, profileKey, null, null, expires, "ACTIVE", "PROJECT_MEMBER", projectKey, documentId, sessionKey);
+        String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(userId))
+                .claim("runRef", run.runRef()).claim("profileKey", profileKey).claim("kind", "document_job")
+                .claim("projectKey", projectKey).claim("documentId", documentId).claim("sessionKey", sessionKey)
+                .claim("jobKey", jobKey)
+                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read"))
+                .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
+        return new IssuedRun(run, token);
+    }
     private IssuedRun issue(AgentRun run) {
         String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(run.userId()))
                 .claim("runRef", run.runRef()).claim("profileKey", run.profileKey())
@@ -87,7 +101,7 @@ public class AgentRunService {
             String runRef = claims.get("runRef", String.class);
             Long userId = Long.valueOf(claims.getSubject());
             String profile = claims.get("profileKey", String.class);
-            if ("document".equals(claims.get("kind", String.class))) {
+            if ("document".equals(claims.get("kind", String.class)) || "document_job".equals(claims.get("kind", String.class))) {
                 String projectKey = claims.get("projectKey", String.class);
                 Number documentId = claims.get("documentId", Number.class);
                 String sessionKey = claims.get("sessionKey", String.class);
