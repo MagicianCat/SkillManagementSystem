@@ -167,6 +167,12 @@ public class DocumentAgentSessionService {
 
     public JobView getJob(String jobKey, Long actorId) { DocumentAgentJobEntity job = job(jobKey, actorId); syncEvents(job); return jobView(job); }
 
+    /** Pulls runtime events independently of browser polling so terminal state converges after a reload. */
+    @Scheduled(fixedDelayString = "${skill-platform.document-agent.event-collector-delay-ms:1000}")
+    public void collectRuntimeEvents() {
+        for (DocumentAgentJobEntity job : jobs.findTop20ByStatusOrderByTimeCreatedAsc("RUNNING")) syncEvents(job);
+    }
+
     public void cancelJob(String jobKey, Long actorId) {
         DocumentAgentJobEntity job = job(jobKey, actorId);
         if (Set.of("COMPLETED", "FAILED", "CANCELLED").contains(job.getStatus())) return;
