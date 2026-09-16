@@ -93,7 +93,7 @@ public class DocumentAgentSessionService {
     public void close(String sessionKey, Long actorId) {
         DocumentAgentSessionEntity session = access(sessionKey, actorId);
         if ("CLOSED".equals(session.getStatus()) || "EXPIRED".equals(session.getStatus())) return;
-        DocumentAgentJobEntity active = jobs.findFirstBySessionAndStatusInOrderBySequenceNoDesc(session, List.of("QUEUED", "DISPATCHING", "RUNNING")).orElse(null);
+        DocumentAgentJobEntity active = jobs.findFirstBySessionAndStatusInOrderBySequenceNoDesc(session, List.of("QUEUED", "DISPATCHING", "RUNNING", "RETRY_WAIT", "CANCEL_REQUESTED")).orElse(null);
         if (active != null && active.getRuntimeJobId() != null) {
             try { gateway.post().uri("/internal/v1/document-jobs/{id}/cancel", active.getRuntimeJobId()).header("X-SMS-Service-Token", serviceToken).retrieve().toBodilessEntity(); } catch (RuntimeException ignored) { active.fail("GATEWAY_UNAVAILABLE", "Gateway could not be cancelled", true); jobs.save(active); }
         }
@@ -108,7 +108,7 @@ public class DocumentAgentSessionService {
         if (!"ACTIVE".equals(session.getStatus())) throw error("DOCUMENT_AGENT_SESSION_CLOSED", "Document agent session is not active", HttpStatus.CONFLICT);
         DocumentAgentJobEntity existing = jobs.findBySessionAndIdempotencyKey(session, idempotencyKey).orElse(null);
         if (existing != null) return jobView(existing);
-        jobs.findFirstBySessionAndStatusInOrderBySequenceNoDesc(session, List.of("QUEUED", "DISPATCHING", "RUNNING")).ifPresent(value -> { throw error("DOCUMENT_AGENT_JOB_ACTIVE", "A document job is already active", HttpStatus.CONFLICT); });
+        jobs.findFirstBySessionAndStatusInOrderBySequenceNoDesc(session, List.of("QUEUED", "DISPATCHING", "RUNNING", "RETRY_WAIT", "CANCEL_REQUESTED")).ifPresent(value -> { throw error("DOCUMENT_AGENT_JOB_ACTIVE", "A document job is already active", HttpStatus.CONFLICT); });
         List<FeishuContext> selectedFeishu = feishuDocuments == null ? List.of() : feishuDocuments.stream().filter(Objects::nonNull).distinct().toList();
         if (selectedFeishu.size() > 10) throw error("DOCUMENT_AGENT_CONTEXT_LIMIT", "At most 10 Feishu documents may be selected", HttpStatus.BAD_REQUEST);
         int next = jobs.findTopBySessionOrderBySequenceNoDesc(session).map(value -> value.getSequenceNo() + 1).orElse(1);
