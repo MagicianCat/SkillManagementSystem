@@ -37,6 +37,7 @@ public class SecurityConfiguration {
                                 "/actuator/health").permitAll()
                         .requestMatchers("/internal/mcp", "/internal/mcp/**").hasAuthority("agent:mcp")
                         .requestMatchers("/internal/document-agent/**").permitAll()
+                        .requestMatchers("/internal/v1/workflow-runs/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint((req, res, cause) -> {
@@ -56,7 +57,7 @@ public class SecurityConfiguration {
     }
     @Bean CorsConfigurationSource corsConfigurationSource(@Value("${auth.browser.allowed-origins:http://127.0.0.1:5173,http://localhost:5173}") String origins) {
         CorsConfiguration config = new CorsConfiguration(); config.setAllowedOrigins(Arrays.stream(origins.split(",")).map(String::trim).filter(s -> !s.isBlank()).toList());
-        config.setAllowedMethods(java.util.List.of("GET","POST","PUT","PATCH","DELETE","OPTIONS")); config.setAllowedHeaders(java.util.List.of("Authorization","Content-Type","Accept","X-Request-Id")); config.setAllowCredentials(true); config.setMaxAge(3600L);
+        config.setAllowedMethods(java.util.List.of("GET","POST","PUT","PATCH","DELETE","OPTIONS")); config.setAllowedHeaders(java.util.List.of("Authorization","Content-Type","Accept","X-Request-Id","Last-Event-ID")); config.setAllowCredentials(true); config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource(); source.registerCorsConfiguration("/api/**", config); return source;
     }
 }
