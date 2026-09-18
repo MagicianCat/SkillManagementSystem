@@ -331,6 +331,19 @@ public class DocumentAgentSessionService {
                                                               String artifactType, String title, String content,
                                                               Long artifactId, Integer versionNo, Object skillSnapshots,
                                                               Object assumptions, Object openQuestions, List<Long> sourceArtifactIds) {
+        if (agent.sessionKey() == null && agent.runRef().startsWith("workflow-")) {
+            if (agent.projectKey() == null) throw error("PROJECT_CONTEXT_REQUIRED", "Workflow project context is required", HttpStatus.FORBIDDEN);
+            if (artifactId == null) {
+                return projects.createAgentDocument(agent.projectKey(), new ProjectControlService.AgentDocument(
+                        artifactType, title, content, agent.profileKey(), agent.runRef(), agent.runRef(),
+                        skillSnapshots, assumptions, openQuestions, sourceArtifactIds), agent.userId(), "mcp:" + agent.runRef());
+            }
+            ProjectDocumentEntity target = documents.findById(artifactId).orElseThrow(() -> error("PROJECT_DOCUMENT_NOT_FOUND", "Project document not found", HttpStatus.NOT_FOUND));
+            int currentVersion = versionNo == null ? target.getVersionNo() : versionNo;
+            return projects.saveDraft(agent.projectKey(), artifactId, new ProjectControlService.SaveDraft(
+                    title, content, currentVersion, "AGENT", agent.profileKey(), agent.runRef(), agent.runRef(),
+                    skillSnapshots, assumptions, openQuestions, sourceArtifactIds), agent.userId(), "mcp:" + agent.runRef());
+        }
         if (agent.sessionKey() == null || agent.projectKey() == null) throw error("DOCUMENT_JOB_CONTEXT_REQUIRED", "A document job token is required", HttpStatus.FORBIDDEN);
         DocumentAgentSessionEntity session = sessions.findForMcp(agent.sessionKey()).orElseThrow(() -> error("DOCUMENT_AGENT_SESSION_NOT_FOUND", "Document agent session not found", HttpStatus.NOT_FOUND));
         DocumentAgentJobEntity job = jobs.findByJobKey(agent.runRef()).orElseThrow(() -> error("DOCUMENT_AGENT_JOB_NOT_FOUND", "Document agent job not found", HttpStatus.NOT_FOUND));

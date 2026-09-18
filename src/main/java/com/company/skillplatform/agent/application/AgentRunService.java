@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import com.company.skillplatform.common.application.BusinessException;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 @Service
 public class AgentRunService {
@@ -26,17 +27,25 @@ public class AgentRunService {
     private final Duration ttl;
     private final Duration documentSessionTtl;
     private final DocumentAgentSessionRepository documentSessions;
+    private final JdbcTemplate jdbc;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public AgentRunService(AgentRunRepository persistentRuns,
                            @Value("${agent.mcp.signing-key:${JWT_SIGNING_KEY:SkillManagementJwtSigningKey-2026-AtLeast32Bytes}}") String signingKey,
                            @Value("${agent.mcp.run-ttl:PT5M}") Duration ttl,
                            @Value("${agent.mcp.document-session-ttl:PT720H}") Duration documentSessionTtl,
-                           DocumentAgentSessionRepository documentSessions) {
+                           DocumentAgentSessionRepository documentSessions,
+                           JdbcTemplate jdbc) {
         this.persistentRuns = persistentRuns;
         this.key = Keys.hmacShaKeyFor(signingKey.getBytes(StandardCharsets.UTF_8));
         this.ttl = ttl;
         this.documentSessionTtl = documentSessionTtl;
         this.documentSessions = documentSessions;
+        this.jdbc = jdbc;
+    }
+    public AgentRunService(AgentRunRepository persistentRuns, String signingKey, Duration ttl,
+                           Duration documentSessionTtl, DocumentAgentSessionRepository documentSessions) {
+        this(persistentRuns, signingKey, ttl, documentSessionTtl, documentSessions, null);
     }
     public IssuedRun issue(Long userId, String profileKey, String platform, String osType) {
         return issue(AgentRun.create(userId, profileKey, platform, osType, clock.instant().plus(ttl)));
@@ -86,6 +95,21 @@ public class AgentRunService {
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
         return new IssuedRun(run, token);
     }
+    public IssuedRun issueWorkflowRun(Long userId, String projectKey, String profileKey,
+                                      Long workflowRunId, Long stageRunId, Long agentRunId) {
+        Instant expires = clock.instant().plus(Duration.ofMinutes(30));
+        String runRef = "workflow-" + workflowRunId + "-agent-" + agentRunId;
+        AgentRun run = new AgentRun(runRef, userId, profileKey, null, null, expires,
+                "ACTIVE", "PROJECT_MEMBER", projectKey, null, null);
+        String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(userId))
+                .claim("runRef", runRef).claim("profileKey", profileKey).claim("kind", "workflow")
+                .claim("projectKey", projectKey).claim("workflowRunId", workflowRunId)
+                .claim("stageRunId", stageRunId).claim("agentRunId", agentRunId)
+                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list",
+                        "project.artifact.read", "project.artifact.write", "project.artifact.validate"))
+                .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
+        return new IssuedRun(run, token);
+    }
     private IssuedRun issue(AgentRun run) {
         String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(run.userId()))
                 .claim("runRef", run.runRef()).claim("profileKey", run.profileKey())
@@ -101,6 +125,18 @@ public class AgentRunService {
             String runRef = claims.get("runRef", String.class);
             Long userId = Long.valueOf(claims.getSubject());
             String profile = claims.get("profileKey", String.class);
+            if ("workflow".equals(claims.get("kind", String.class))) {
+                if (jdbc == null) throw new BusinessException("AGENT_RUN_INVALID", "Workflow validation unavailable", HttpStatus.UNAUTHORIZED);
+                Number agentRunId = claims.get("agentRunId", Number.class);
+                Number workflowRunId = claims.get("workflowRunId", Number.class);
+                String projectKey = claims.get("projectKey", String.class);
+                Number stageRunId = claims.get("stageRunId", Number.class);
+                Integer active = jdbc.queryForObject("select count(*) from agent_workflow_run ar join stage_run sr on sr.id=ar.stage_run_id join workflow_run wr on wr.id=sr.workflow_run_id join virtual_project p on p.id=wr.project_id where ar.id=? and sr.id=? and wr.id=? and p.project_key=? and sr.status in ('RUNNING','PROVISIONING','PAUSED','HUMAN_REQUIRED') and wr.status not in ('COMPLETED','CANCELLED','FAILED')", Integer.class,
+                        agentRunId.longValue(), stageRunId.longValue(), workflowRunId.longValue(), projectKey);
+                if (active == null || active == 0) throw new BusinessException("AGENT_RUN_INVALID", "Workflow agent run is inactive", HttpStatus.UNAUTHORIZED);
+                return new AgentRun(runRef, userId, profile, null, null, claims.getExpiration().toInstant(),
+                        "ACTIVE", "PROJECT_MEMBER", projectKey, null, null);
+            }
             if ("document".equals(claims.get("kind", String.class)) || "document_job".equals(claims.get("kind", String.class))) {
                 String projectKey = claims.get("projectKey", String.class);
                 Number documentId = claims.get("documentId", Number.class);
