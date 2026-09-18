@@ -39,6 +39,7 @@ CREATE TABLE workflow_run (
  CONSTRAINT fk_workflow_run_project FOREIGN KEY(project_id) REFERENCES virtual_project(id),
  CONSTRAINT fk_workflow_run_user FOREIGN KEY(started_by) REFERENCES iam_user(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+ALTER TABLE workflow_run ADD COLUMN initial_request MEDIUMTEXT NULL, ADD COLUMN context_snapshot_json JSON NULL;
 CREATE TABLE stage_run (
  id BIGINT NOT NULL AUTO_INCREMENT, time_created DATETIME(3) NOT NULL, time_updated DATETIME(3) NOT NULL,
  workflow_run_id BIGINT NOT NULL, stage_key VARCHAR(100) NOT NULL, run_no INT NOT NULL DEFAULT 1,
@@ -123,6 +124,14 @@ CREATE TABLE workflow_final_acceptance (
  workflow_run_id BIGINT NOT NULL, accepted_by BIGINT NOT NULL, decision VARCHAR(30) NOT NULL, comment VARCHAR(2000),
  PRIMARY KEY(id), UNIQUE KEY uk_final_acceptance_workflow(workflow_run_id), CONSTRAINT fk_acceptance_workflow FOREIGN KEY(workflow_run_id) REFERENCES workflow_run(id), CONSTRAINT fk_acceptance_user FOREIGN KEY(accepted_by) REFERENCES iam_user(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE workflow_artifact_binding (
+ id BIGINT NOT NULL AUTO_INCREMENT, time_created DATETIME(3) NOT NULL, workflow_run_id BIGINT NOT NULL, stage_run_id BIGINT, agent_run_id BIGINT, artifact_kind VARCHAR(50) NOT NULL, project_document_id BIGINT NOT NULL, project_document_revision_id BIGINT NOT NULL, relation_type VARCHAR(30) NOT NULL, PRIMARY KEY(id), UNIQUE KEY uk_workflow_artifact_binding(agent_run_id,project_document_revision_id,relation_type), INDEX idx_workflow_artifact_latest(workflow_run_id,artifact_kind,relation_type), CONSTRAINT fk_binding_workflow FOREIGN KEY(workflow_run_id) REFERENCES workflow_run(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE workflow_runtime_event (
+ id BIGINT NOT NULL AUTO_INCREMENT, event_id VARCHAR(160) NOT NULL, workflow_run_id BIGINT NOT NULL, stage_run_id BIGINT, agent_session_id BIGINT, agent_run_id BIGINT, event_seq BIGINT NOT NULL DEFAULT 0, event_type VARCHAR(80) NOT NULL, payload_json JSON NOT NULL, time_created DATETIME(3) NOT NULL, PRIMARY KEY(id), UNIQUE KEY uk_workflow_runtime_event(event_id), INDEX idx_workflow_runtime_event_cursor(workflow_run_id,event_seq), CONSTRAINT fk_runtime_event_workflow FOREIGN KEY(workflow_run_id) REFERENCES workflow_run(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+ALTER TABLE runtime_command ADD COLUMN lease_until DATETIME(3) NULL, ADD COLUMN target_runtime_id VARCHAR(200) NULL, ADD COLUMN target_conversation_id VARCHAR(200) NULL, ADD COLUMN target_run_id BIGINT NULL;
+ALTER TABLE human_intervention ADD COLUMN runtime_command_id BIGINT NULL, ADD COLUMN agent_session_id BIGINT NULL;
 
 -- Versioned, DB-owned Requirement DAG seed. Profiles are deliberately seeded as
 -- published defaults; later edits create new versions and never mutate these rows.
