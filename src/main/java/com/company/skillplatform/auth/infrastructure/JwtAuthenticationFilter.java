@@ -47,6 +47,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 var permissions = new java.util.HashSet<>(currentUser.permissions());
                 if (scopedRoles != null) scopedRoles.findByUserId(userId).forEach(a -> {
                     if (java.util.Set.of("TEAM_ADMIN","TEAM_MAINTAINER","PLATFORM_MAINTAINER").contains(a.getRoleKey())) permissions.addAll(java.util.List.of("skill:browse","skill:download","skill:upload","skill:edit"));
+                    if ("PROJECT_MANAGER".equals(a.getRoleKey())) permissions.add("project:create");
                     if (java.util.Set.of("TEAM_ADMIN").contains(a.getRoleKey())) {
                         permissions.add("skill:review");
                         permissions.add("admin:telemetry");

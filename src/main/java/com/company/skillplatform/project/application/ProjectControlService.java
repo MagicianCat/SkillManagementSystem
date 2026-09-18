@@ -7,6 +7,7 @@ import com.company.skillplatform.project.infrastructure.entity.*;
 import com.company.skillplatform.project.infrastructure.repository.*;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
+import com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
@@ -33,20 +34,27 @@ public class ProjectControlService {
     private final IamUserRepository users;
     private final AuditService audit;
     private final ObjectMapper mapper;
+    private final ScopedRoleAssignmentRepository scopedRoles;
+    private final ProjectWorkflowService workflow;
     private final Clock clock = Clock.systemUTC();
 
     public ProjectControlService(VirtualProjectRepository projects, VirtualProjectMemberRepository members,
                                  ProjectDocumentRepository documents, ProjectDocumentRevisionRepository revisions, ProjectDocumentSourceRepository sources,
-                                 IamUserRepository users, AuditService audit, ObjectMapper mapper) {
+                                 IamUserRepository users, AuditService audit, ObjectMapper mapper,
+                                 ScopedRoleAssignmentRepository scopedRoles, ProjectWorkflowService workflow) {
         this.projects = projects; this.members = members; this.documents = documents; this.revisions = revisions; this.sources = sources;
         this.users = users; this.audit = audit; this.mapper = mapper;
+        this.scopedRoles = scopedRoles; this.workflow = workflow;
     }
 
     @Transactional
     public ProjectView create(CreateProject command, Long actorId, String requestId) {
+        if (!isAdmin() && !scopedRoles.existsByUserIdAndRoleKeyAndScopeType(actorId, "PROJECT_MANAGER", "TEAM"))
+            throw error("PROJECT_CREATE_FORBIDDEN", "Project manager role required", HttpStatus.FORBIDDEN);
         IamUserEntity actor = user(actorId);
         VirtualProjectEntity project = projects.save(new VirtualProjectEntity(validName(command.name()), trim(command.description(), 2000), actor));
         members.save(new VirtualProjectMemberEntity(project, actor, "OWNER", actor));
+        workflow.initialize(project.getId(), command.enabledStages());
         audit.success("PROJECT_CREATED", actor, "VIRTUAL_PROJECT", project.getId(), requestId, Map.of(), Map.of("projectKey", project.getProjectKey()), Map.of());
         return projectView(project, actorId);
     }
@@ -226,7 +234,9 @@ public class ProjectControlService {
     private BusinessException conflict() { return error("OPTIMISTIC_LOCK_CONFLICT", "Resource version is stale", HttpStatus.CONFLICT); }
     private BusinessException error(String code, String message, HttpStatus status) { return new BusinessException(code, message, status); }
 
-    public record CreateProject(String name, String description) {}
+    public record CreateProject(String name, String description, List<String> enabledStages) {
+        public CreateProject(String name, String description) { this(name, description, null); }
+    }
     public record UpdateProject(String name, String description, int versionNo) {}
     public record CreateDocument(String documentType, String title, String markdownContent, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
     public record AgentDocument(String documentType, String title, String markdownContent, String profileKey, String agentSessionId, String agentJobId, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}

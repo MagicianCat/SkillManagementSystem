@@ -18,7 +18,7 @@ public class ProjectController {
     public ProjectController(ProjectControlService service) { this.service = service; }
 
     @PostMapping @ResponseStatus(HttpStatus.CREATED)
-    public ProjectControlService.ProjectView create(@Valid @RequestBody CreateProject request, Authentication auth, HttpServletRequest http) { return service.create(new ProjectControlService.CreateProject(request.name(), request.description()), actor(auth), http.getRequestId()); }
+    public ProjectControlService.ProjectView create(@Valid @RequestBody CreateProject request, Authentication auth, HttpServletRequest http) { return service.create(new ProjectControlService.CreateProject(request.name(), request.description(), request.enabledStages()), actor(auth), http.getRequestId()); }
     @GetMapping public PageResponse<ProjectControlService.ProjectView> list(Pageable pageable, Authentication auth) { return service.list(actor(auth), pageable); }
     @GetMapping("/{projectKey}") public ProjectControlService.ProjectView get(@PathVariable String projectKey, Authentication auth) { return service.get(projectKey, actor(auth)); }
     @PatchMapping("/{projectKey}") public ProjectControlService.ProjectView update(@PathVariable String projectKey, @Valid @RequestBody UpdateProject request, Authentication auth, HttpServletRequest http) { return service.update(projectKey, new ProjectControlService.UpdateProject(request.name(), request.description(), request.versionNo()), actor(auth), http.getRequestId()); }
@@ -37,7 +37,7 @@ public class ProjectController {
     @PostMapping("/{projectKey}/documents/{documentId}:publish") public ProjectControlService.DocumentView publish(@PathVariable String projectKey, @PathVariable Long documentId, @Valid @RequestBody PublishRequest request, Authentication auth, HttpServletRequest http) { return service.publish(projectKey, documentId, new ProjectControlService.PublishCommand(request.revisionId(), request.versionNo()), actor(auth), http.getRequestId()); }
 
     private Long actor(Authentication auth) { return (Long) auth.getPrincipal(); }
-    public record CreateProject(@NotBlank @Size(max = 255) String name, @Size(max = 2000) String description) {}
+    public record CreateProject(@NotBlank @Size(max = 255) String name, @Size(max = 2000) String description, List<String> enabledStages) {}
     public record UpdateProject(@NotBlank @Size(max = 255) String name, @Size(max = 2000) String description, int versionNo) {}
     public record MemberRequest(@NotBlank String role) {}
     public record CreateDocument(@NotBlank String documentType, @NotBlank @Size(max = 255) String title, @NotBlank String markdownContent, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}

@@ -96,6 +96,24 @@ public class WikiDocumentService {
     @Transactional(readOnly = true)
     public DocumentView get(Long id, Long userId) { return view(visibleDocument(id, userId)); }
 
+    /** Validates that the actor may explicitly share this Wiki with a project stage. */
+    @Transactional(readOnly = true)
+    public WikiDocumentEntity selectableForDocumentAgent(Long id, Long userId) {
+        WikiDocumentEntity document = visibleDocument(id, userId);
+        if (document.getCurrentRevision() == null) throw error("WIKI_REVISION_REQUIRED", "Selected Wiki document has no revision", HttpStatus.BAD_REQUEST);
+        return document;
+    }
+
+    /** Reads the latest revision after the document-agent job whitelist has been checked by its control plane. */
+    @Transactional(readOnly = true)
+    public AgentDocumentView readProjectSharedForDocumentAgent(Long id) {
+        WikiDocumentEntity document = documents.findById(id).filter(d -> "ACTIVE".equals(d.getStatus()))
+                .orElseThrow(() -> error("WIKI_DOCUMENT_NOT_FOUND", "Wiki document not found", HttpStatus.NOT_FOUND));
+        WikiDocumentRevisionEntity revision = document.getCurrentRevision();
+        if (revision == null) throw error("WIKI_REVISION_REQUIRED", "Wiki document has no revision", HttpStatus.NOT_FOUND);
+        return new AgentDocumentView(document.getId(), document.getTitle(), document.getDocumentType(), revision.getRevisionNo(), revision.getMarkdownContent());
+    }
+
     @Transactional(readOnly = true)
     public List<RevisionView> revisions(Long id, Long userId) {
         WikiDocumentEntity document = visibleDocument(id, userId);
@@ -223,4 +241,5 @@ public class WikiDocumentService {
     public record DocumentView(Long id, String title, String documentType, Long teamId, boolean platformVisible, String markdownContent, int revisionNo, int versionNo, List<SkillLinkView> skills, boolean canEdit, boolean active, Long pendingPlatformReviewId, String pendingPlatformReviewStatus) {}
     public record RevisionView(Long id, int revisionNo, String markdownContent, Long createdBy, String createdByName, java.time.Instant createdAt) {}
     public record PromotionDocument(WikiDocumentEntity document, WikiDocumentRevisionEntity revision) {}
+    public record AgentDocumentView(Long id, String title, String documentType, int revisionNo, String markdownContent) {}
 }

@@ -68,7 +68,7 @@ public class AgentRunService {
         String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(userId))
                 .claim("runRef", run.runRef()).claim("profileKey", profileKey).claim("kind", "document")
                 .claim("projectKey", projectKey).claim("documentId", documentId).claim("sessionKey", sessionKey)
-                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read"))
+                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read"))
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
         return new IssuedRun(run, token);
     }
@@ -82,7 +82,7 @@ public class AgentRunService {
                 .claim("runRef", run.runRef()).claim("profileKey", profileKey).claim("kind", "document_job")
                 .claim("projectKey", projectKey).claim("documentId", documentId).claim("sessionKey", sessionKey)
                 .claim("jobKey", jobKey)
-                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read"))
+                .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read"))
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
         return new IssuedRun(run, token);
     }
@@ -125,7 +125,7 @@ public class AgentRunService {
         catch (Exception e) { throw new BusinessException("AGENT_TOKEN_INVALID", "Invalid agent run token", HttpStatus.UNAUTHORIZED); }
     }
     public void requireCapability(AgentRun run, String capability) {
-        if (run.sessionKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read").contains(capability)) return;
+        if (run.sessionKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read").contains(capability)) return;
         if (run.projectKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",

@@ -966,10 +966,14 @@ OpenHands 网关启动前由服务端调用 `POST /internal/document-agent/runs`
 - `GET /document-agent/sessions?projectKey=&limit=`：列出当前用户可恢复的文档会话。
 - `POST /document-agent/sessions`：创建会话。请求字段为 `projectKey`、`profileKey`、`mode`（`NEW`/`EXISTING`）、可选 `documentId` 和新文档 `title`；必须携带 `Idempotency-Key`。
 - `GET /document-agent/sessions/{sessionKey}`、`DELETE /document-agent/sessions/{sessionKey}`：查询或关闭会话。
+- `GET /document-agent/sessions/{sessionKey}/wiki-contexts`：查询阶段共享的平台 Wiki 白名单，返回 `items[{documentId,title,documentType,latestRevisionNo}]` 与独立上限 `limit=10`。
+- `PUT /document-agent/sessions/{sessionKey}/wiki-contexts`：以 `{documentIds:[...]}` 整体替换阶段共享的平台 Wiki 白名单。仅阶段执行角色可在 `IN_PROGRESS`/`REWORK` 修改；添加人必须对 Wiki 可见。此操作表示向项目阶段显式共享并记入审计。
 - `POST /document-agent/sessions/{sessionKey}/turns`：提交一轮文档指令，字段为 `instruction`、可选 `sourceArtifactIds` 和 `feishuDocuments[{docId,docType,title}]`；必须携带 `Idempotency-Key`。
 - `GET /document-agent/jobs/{jobKey}`、`POST /document-agent/jobs/{jobKey}:cancel`：查询或取消任务。
 - `GET /document-agent/jobs/{jobKey}/events?after=`：读取任务 SSE 事件。
 - `GET /document-agent/feishu-documents:search?query=`、`POST /document-agent/feishu-documents:resolve`：为本次生成搜索或解析飞书文档。SMS 只保存文档标识和标题，正文由 OpenHands 通过 MCP 分段读取。
+
+平台 Wiki 不随请求注入正文。任务创建时会将会话白名单快照到该任务；OpenHands 只能用 `search_wiki_documents` 查看快照元数据，并在确有需要时用 `get_wiki_document` 分段读取所选文档的最新修订。未选择的文档统一返回 `DOCUMENT_AGENT_CONTEXT_DENIED`。非文档 Agent（DSH）仍沿用当前用户自身的 Wiki 可见范围。
 
 会话默认保留 30 天无活动窗口，历史任务和事件保留 180 天。每一轮任务最多选择 10 份飞书文档；MCP token 仅允许读取当前任务选中的文档，Agent 通过 `save_artifact_draft` 保存草稿，不能发布或修改成员权限。
 

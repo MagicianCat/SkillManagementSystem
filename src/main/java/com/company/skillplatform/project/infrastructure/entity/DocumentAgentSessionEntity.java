@@ -12,6 +12,7 @@ public class DocumentAgentSessionEntity extends BaseJpaEntity {
     @Column(name = "session_key", nullable = false, unique = true, columnDefinition = "char(36)") private String sessionKey;
     @Column(name = "idempotency_key", nullable = false, length = 255) private String idempotencyKey;
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "project_id", nullable = false) private VirtualProjectEntity project;
+    @Column(name = "stage_id") private Long stageId;
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "owner_user_id", nullable = false) private IamUserEntity owner;
     @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "document_id") private ProjectDocumentEntity document;
     @Column(name = "profile_key", nullable = false, length = 64) private String profileKey;
@@ -50,6 +51,7 @@ public class DocumentAgentSessionEntity extends BaseJpaEntity {
     public void activateLocally() { this.status = "ACTIVE"; this.lastActivityAt = Instant.now(); }
     public void setMcpTokenHash(String value) { this.mcpTokenHash = value; }
     public void bindDocument(ProjectDocumentEntity value) { this.document = value; }
+    public void bindStage(Long value) { this.stageId = value; }
     public void touch(Instant now, Instant expiresAt) { this.lastActivityAt = now; this.mcpTokenExpiresAt = expiresAt; }
     public void close(Instant now) { this.status = "CLOSED"; this.closedAt = now; this.lastActivityAt = now; }
     public void fail() { this.status = "FAILED"; }
@@ -57,6 +59,7 @@ public class DocumentAgentSessionEntity extends BaseJpaEntity {
     public String getSessionKey() { return sessionKey; }
     public String getIdempotencyKey() { return idempotencyKey; }
     public VirtualProjectEntity getProject() { return project; }
+    public Long getStageId() { return stageId; }
     public IamUserEntity getOwner() { return owner; }
     public ProjectDocumentEntity getDocument() { return document; }
     public String getProfileKey() { return profileKey; }

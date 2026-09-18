@@ -78,6 +78,31 @@ class FeishuDocumentMcpProxyTest {
     }
 
     @Test
+    void resolvesWikiNodeBeforeReadingUnderlyingLegacyDocument() {
+        server.createContext("/open-apis/wiki/v2/spaces/get_node", exchange -> {
+            assertThat(exchange.getRequestURI().getQuery()).isEqualTo("token=TcimwIdVviNq6YkgNYycs8v3nge");
+            byte[] response = "{\"code\":0,\"data\":{\"node\":{\"obj_token\":\"legacy-token\",\"obj_type\":\"doc\",\"title\":\"需求说明\"}}}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length); exchange.getResponseBody().write(response); exchange.close();
+        });
+        server.createContext("/open-apis/doc/v2/legacy-token/raw_content", exchange -> {
+            byte[] response = "{\"code\":0,\"data\":{\"content\":\"wiki-content\"}}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length); exchange.getResponseBody().write(response); exchange.close();
+        });
+        server.start();
+        when(tokens.accessTokenFor(7L)).thenReturn("user-token");
+        String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/open-apis";
+        FeishuDocumentMcpProxy proxy = new FeishuDocumentMcpProxy(tokens, new ObjectMapper(), "http://127.0.0.1:1/mcp", base);
+
+        JsonNode result = proxy.fetch(7L, "TcimwIdVviNq6YkgNYycs8v3nge", "WIKI", 0, 1024);
+        assertThat(result.path("status").asText()).isEqualTo("OK");
+        assertThat(result.path("docId").asText()).isEqualTo("TcimwIdVviNq6YkgNYycs8v3nge");
+        assertThat(result.path("docType").asText()).isEqualTo("WIKI");
+        assertThat(result.path("resolvedDocId").asText()).isEqualTo("legacy-token");
+        assertThat(result.path("title").asText()).isEqualTo("需求说明");
+        assertThat(result.path("content").asText()).isEqualTo("wiki-content");
+    }
+
+    @Test
     void unsupportedDocumentTypesDoNotCallUpstream() {
         when(tokens.accessTokenFor(7L)).thenReturn("user-token");
         FeishuDocumentMcpProxy proxy = new FeishuDocumentMcpProxy(tokens, new ObjectMapper(), "http://127.0.0.1:1/mcp", "http://127.0.0.1:1/open-apis");

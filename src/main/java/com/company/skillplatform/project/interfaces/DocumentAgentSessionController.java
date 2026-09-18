@@ -28,7 +28,7 @@ public class DocumentAgentSessionController {
     public DocumentAgentSessionService.SessionView create(@Valid @RequestBody CreateSession request,
                                                            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
                                                            HttpServletRequest http, Authentication auth) {
-        return service.create(request.projectKey(), actor(auth), request.profileKey(), request.mode(), request.documentId(), request.title(), key(idempotencyKey, http));
+        return service.create(request.projectKey(), actor(auth), request.profileKey(), request.mode(), request.documentId(), request.title(), key(idempotencyKey, http), request.stageKey());
     }
 
     @GetMapping("/sessions/{sessionKey}")
@@ -43,7 +43,23 @@ public class DocumentAgentSessionController {
     public DocumentAgentSessionService.JobView turn(@PathVariable String sessionKey, @Valid @RequestBody Turn request,
                                                     @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
                                                     HttpServletRequest http, Authentication auth) {
-        return service.turn(sessionKey, actor(auth), request.instruction(), key(idempotencyKey, http), request.sourceArtifactIds(), request.feishuDocuments());
+        return service.turn(sessionKey, actor(auth), request.instruction(), key(idempotencyKey, http), request.sourceArtifactIds(), request.feishuDocuments(), request.turnMode(), request.targetDocumentId(), request.targetTitle());
+    }
+
+    @GetMapping("/sessions/{sessionKey}/messages")
+    public List<DocumentAgentSessionService.MessageView> messages(@PathVariable String sessionKey, Authentication auth) {
+        return service.messages(sessionKey, actor(auth));
+    }
+
+    @GetMapping("/sessions/{sessionKey}/wiki-contexts")
+    public DocumentAgentSessionService.WikiContextList wikiContexts(@PathVariable String sessionKey, Authentication auth) {
+        return service.wikiContexts(sessionKey, actor(auth));
+    }
+
+    @PutMapping("/sessions/{sessionKey}/wiki-contexts")
+    public DocumentAgentSessionService.WikiContextList replaceWikiContexts(@PathVariable String sessionKey,
+            @Valid @RequestBody ReplaceWikiContexts request, HttpServletRequest http, Authentication auth) {
+        return service.replaceWikiContexts(sessionKey, actor(auth), request.documentIds(), http.getRequestId());
     }
 
     @GetMapping("/jobs/{jobKey}")
@@ -74,7 +90,9 @@ public class DocumentAgentSessionController {
 
     private Long actor(Authentication auth) { return (Long) auth.getPrincipal(); }
     private String key(String supplied, HttpServletRequest http) { return supplied == null || supplied.isBlank() ? http.getRequestId() : supplied; }
-    public record CreateSession(@NotBlank String projectKey, @NotBlank String profileKey, String mode, Long documentId, @Size(max = 255) String title) {}
-    public record Turn(@NotBlank @Size(max = 10000) String instruction, List<Long> sourceArtifactIds, List<DocumentAgentSessionService.FeishuContext> feishuDocuments) {}
+    public record CreateSession(@NotBlank String projectKey, String profileKey, String stageKey, String mode, Long documentId, @Size(max = 255) String title) {}
+    public record Turn(@NotBlank @Size(max = 10000) String instruction, List<Long> sourceArtifactIds, List<DocumentAgentSessionService.FeishuContext> feishuDocuments,
+                       String turnMode, Long targetDocumentId, @Size(max = 255) String targetTitle) {}
     public record ResolveFeishu(@NotBlank String docId, @NotBlank String docType) {}
+    public record ReplaceWikiContexts(@Size(max = 10) List<Long> documentIds) {}
 }

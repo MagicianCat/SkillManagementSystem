@@ -7,5 +7,6 @@ public interface ScopedRoleAssignmentRepository extends JpaRepository<ScopedRole
  List<ScopedRoleAssignmentEntity> findByUserIdIn(Collection<Long> userIds);
  List<ScopedRoleAssignmentEntity> findByTeamId(Long teamId);
  Optional<ScopedRoleAssignmentEntity> findByUserIdAndRoleKeyAndScopeTypeAndTeamId(Long userId,String roleKey,String scopeType,Long teamId);
+ boolean existsByUserIdAndRoleKeyAndScopeType(Long userId,String roleKey,String scopeType);
  void deleteByUserIdAndRoleKeyAndScopeTypeAndTeamId(Long userId,String roleKey,String scopeType,Long teamId);
 }

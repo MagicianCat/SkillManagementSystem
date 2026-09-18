@@ -76,7 +76,7 @@ public class AgentMcpConfiguration {
                         schema("object", List.of()), this::search),
                         tool("get_skill_detail", "Get metadata and a segment of the root skill.md.",
                                 schema("object", List.of("skillKey")), this::detail),
-                        tool("search_wiki_documents", "Search Wiki documents visible to the current user.",
+                        tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run.",
                                 schema("object", List.of()), this::searchWiki),
                         tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document.",
                                 schema("object", List.of("documentId")), this::wikiDocument),
@@ -174,11 +174,15 @@ public class AgentMcpConfiguration {
         return ok(Map.of("skill", view, "target", target(platform, osType), "detailPath", detailPath(key, platform, osType), "file", "skill.md", "content", content, "offset", integer(args,"offset",0), "hasMore", content.length() >= bounded(args), "wikiDocuments", docs));
     }
     private McpSchema.CallToolResult searchWiki(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
-        var agent = run(ex, "wiki.search"); requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"documentType"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
+        var agent = run(ex, "wiki.search");
+        if (agent.sessionKey() != null) return ok(Map.of("items", documentAgents.searchSelectedWiki(agent.sessionKey(), agent.runRef(), str(args,"keyword")), "page", 0, "size", 10));
+        requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"documentType"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
         return ok(Map.of("items", result.items(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
     }
     private McpSchema.CallToolResult wikiDocument(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
-        var agent = run(ex, "wiki.read"); requireUserKnowledge(agent); long id = longRequired(args,"documentId"); var document = wiki.get(id, agent.userId()); int offset = integer(args,"offset",0); int max = bounded(args); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
+        var agent = run(ex, "wiki.read"); long id = longRequired(args,"documentId"); int offset = integer(args,"offset",0); int max = bounded(args);
+        if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
+        requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         return ok(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
     }
     private McpSchema.CallToolResult searchFeishu(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {

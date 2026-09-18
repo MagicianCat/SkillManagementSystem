@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.*;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Value;
@@ -72,6 +74,7 @@ public class FeishuDocumentMcpProxy {
         String normalizedType = normalizeType(docType);
         int safeOffset = Math.max(offset, 0), safeMax = Math.min(Math.max(maxBytes, 1), MAX_BYTES);
         if ("DOC".equals(normalizedType)) return fetchLegacy(userId, docId, safeOffset, safeMax);
+        if ("WIKI".equals(normalizedType)) return fetchWiki(userId, docId, safeOffset, safeMax);
         if (!"DOCX".equals(normalizedType)) return unsupported(docId, normalizedType);
         return call(userId, "fetch-doc", Map.of("doc_id", docId, "offset", safeOffset, "limit", safeMax));
     }
@@ -82,6 +85,17 @@ public class FeishuDocumentMcpProxy {
         if (!data.isObject()) return data;
         ObjectNode normalized = data.deepCopy();
         JsonNode files = normalized.path("files");
+        if (!files.isArray()) {
+            // Feishu has returned both `items` and `docs` for otherwise equivalent
+            // search responses. Keep one stable contract for the frontend/MCP.
+            for (String alternate : List.of("items", "docs", "documents")) {
+                if (normalized.path(alternate).isArray()) {
+                    files = normalized.path(alternate);
+                    normalized.set("files", files);
+                    break;
+                }
+            }
+        }
         if (files.isArray()) {
             ArrayNode items = (ArrayNode) files;
             for (JsonNode item : items) {
@@ -92,7 +106,7 @@ public class FeishuDocumentMcpProxy {
                 String normalizedType = normalizeType(type);
                 if (!token.isBlank()) object.put("docId", token);
                 object.put("docType", normalizedType);
-                boolean readable = Set.of("DOCX", "DOC").contains(normalizedType);
+                boolean readable = Set.of("DOCX", "DOC", "WIKI").contains(normalizedType);
                 object.put("readable", readable);
                 object.put("readMethod", readable ? ("DOC".equals(normalizedType) ? "LEGACY_DOC_API" : "FEISHU_MCP") : "UNSUPPORTED");
                 if (!readable) object.put("unreadableReason", "当前版本暂不支持读取该类型的飞书文档");
@@ -124,6 +138,7 @@ public class FeishuDocumentMcpProxy {
             case "slide", "slides" -> "SLIDES";
             case "mindnote", "mindnotes" -> "MINDNOTE";
             case "wiki" -> "WIKI";
+            case "file" -> "FILE";
             default -> "UNKNOWN";
         };
     }
@@ -152,6 +167,55 @@ public class FeishuDocumentMcpProxy {
         catch (Exception e) { throw new BusinessException("FEISHU_LEGACY_DOC_READ_FAILED", "Legacy Feishu document service is unavailable", HttpStatus.BAD_GATEWAY); }
     }
 
+    /**
+     * A Wiki URL contains a Wiki node token, not the underlying document token.
+     * Resolve the node first, then use the same read path as a normal docx/doc.
+     */
+    private JsonNode fetchWiki(Long userId, String wikiToken, int offset, int maxBytes) {
+        if (wikiToken == null || !wikiToken.matches("[A-Za-z0-9_-]{1,512}"))
+            throw new BusinessException("FEISHU_WIKI_READ_FAILED", "Feishu Wiki token is invalid", HttpStatus.BAD_REQUEST);
+        String uat = userToken(userId);
+        try {
+            String encoded = URLEncoder.encode(wikiToken, StandardCharsets.UTF_8);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(apiBaseUrl.replaceAll("/$", "") + "/wiki/v2/spaces/get_node?token=" + encoded))
+                    .timeout(Duration.ofSeconds(30)).header("Authorization", "Bearer " + uat).GET().build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            JsonNode result = json.readTree(response.body());
+            if (response.statusCode() == 401 || response.statusCode() == 403)
+                throw new BusinessException("FEISHU_AUTH_REQUIRED", "Feishu authorization is invalid", HttpStatus.FORBIDDEN);
+            if (response.statusCode() / 100 != 2 || result.path("code").asInt(0) != 0) {
+                log.warn("event=feishu.wiki.node.failed status={} code={} message={}", response.statusCode(), result.path("code").asInt(-1), result.path("msg").asText(""));
+                throw new BusinessException("FEISHU_WIKI_READ_FAILED", "Feishu Wiki node lookup failed", HttpStatus.BAD_GATEWAY);
+            }
+            JsonNode data = result.path("data");
+            JsonNode node = data.path("node").isObject() ? data.path("node") : data;
+            String objectToken = firstText(node, "obj_token", "objToken", "object_token", "token");
+            String objectType = normalizeType(firstText(node, "obj_type", "objType", "object_type", "type"));
+            String title = firstText(node, "title", "node_title", "name");
+            if (objectToken.isBlank() || objectType.isBlank() || "UNKNOWN".equals(objectType)) {
+                log.warn("event=feishu.wiki.node.unreadable tokenPrefix={} objectTokenPresent={} objectType={} nodeFields={}",
+                        wikiToken.substring(0, Math.min(6, wikiToken.length())), !objectToken.isBlank(), objectType, node.fieldNames());
+                throw new BusinessException("FEISHU_WIKI_READ_FAILED", "Feishu Wiki node has no readable document", HttpStatus.BAD_GATEWAY);
+            }
+            JsonNode resolved = "DOC".equals(objectType)
+                    ? fetchLegacy(userId, objectToken, offset, maxBytes)
+                    : "DOCX".equals(objectType)
+                        ? call(userId, "fetch-doc", Map.of("doc_id", objectToken, "offset", offset, "limit", maxBytes))
+                        : unsupported(objectToken, objectType);
+            if (resolved.isObject()) {
+                ObjectNode resultNode = (ObjectNode) resolved.deepCopy();
+                resultNode.put("docId", wikiToken).put("docType", "WIKI").put("resolvedDocId", objectToken).put("resolvedDocType", objectType);
+                resultNode.put("readable", Set.of("DOC", "DOCX").contains(objectType));
+                if (!title.isBlank()) resultNode.put("title", title);
+                resultNode.put("sourceUrl", "https://www.feishu.cn/wiki/" + wikiToken);
+                return resultNode;
+            }
+            return resolved;
+        } catch (BusinessException e) { throw e; }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new BusinessException("FEISHU_WIKI_READ_FAILED", "Feishu Wiki lookup was interrupted", HttpStatus.BAD_GATEWAY); }
+        catch (Exception e) { throw new BusinessException("FEISHU_WIKI_READ_FAILED", "Feishu Wiki service is unavailable", HttpStatus.BAD_GATEWAY); }
+    }
+
     private JsonNode unsupported(String docId, String docType) {
         ObjectNode result = json.createObjectNode()
                 .put("status", "UNSUPPORTED_DOCUMENT_TYPE")
@@ -164,7 +228,7 @@ public class FeishuDocumentMcpProxy {
         return result;
     }
 
-    private String firstText(ObjectNode node, String... names) {
+    private String firstText(JsonNode node, String... names) {
         for (String name : names) {
             String value = node.path(name).asText("").trim();
             if (!value.isBlank()) return value;

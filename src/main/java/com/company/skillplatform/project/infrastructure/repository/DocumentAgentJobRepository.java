@@ -17,6 +17,8 @@ public interface DocumentAgentJobRepository extends JpaRepository<DocumentAgentJ
     Optional<DocumentAgentJobEntity> findBySessionAndIdempotencyKey(DocumentAgentSessionEntity session, String key);
     Optional<DocumentAgentJobEntity> findFirstBySessionAndStatusInOrderBySequenceNoDesc(DocumentAgentSessionEntity session, Collection<String> statuses);
     Optional<DocumentAgentJobEntity> findTopBySessionOrderBySequenceNoDesc(DocumentAgentSessionEntity session);
+    @EntityGraph(attributePaths = {"requestedBy"})
+    List<DocumentAgentJobEntity> findBySessionOrderBySequenceNoAsc(DocumentAgentSessionEntity session);
     @Query("select j from DocumentAgentJobEntity j join fetch j.session s join fetch s.project where j.runtimeJobId = :runtimeJobId")
     Optional<DocumentAgentJobEntity> findByRuntimeJobId(@Param("runtimeJobId") String runtimeJobId);
 }

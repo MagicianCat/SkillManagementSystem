@@ -8,7 +8,7 @@ import java.util.UUID;
 @Entity
 @Table(name = "virtual_project")
 public class VirtualProjectEntity extends BaseJpaEntity {
-    @Column(name = "project_key", nullable = false, unique = true, length = 36)
+    @Column(name = "project_key", nullable = false, unique = true, length = 36, columnDefinition = "char(36)")
     private String projectKey;
     @Column(name = "project_name", nullable = false, length = 255)
     private String projectName;

@@ -1,6 +1,7 @@
 package com.company.skillplatform.project.infrastructure.entity;
 
 import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;
+import com.company.skillplatform.wiki.infrastructure.entity.WikiDocumentEntity;
 import jakarta.persistence.*;
 
 @Entity
@@ -13,6 +14,7 @@ public class DocumentAgentJobContextEntity extends BaseJpaEntity {
     @Column(name = "feishu_doc_id", length = 512) private String feishuDocId;
     @Column(name = "feishu_doc_type", length = 32) private String feishuDocType;
     @Column(name = "feishu_title", length = 255) private String feishuTitle;
+    @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "wiki_document_id") private WikiDocumentEntity wikiDocument;
     @Column(name = "ordinal_no", nullable = false) private int ordinalNo;
 
     protected DocumentAgentJobContextEntity() {}
@@ -22,6 +24,9 @@ public class DocumentAgentJobContextEntity extends BaseJpaEntity {
     public static DocumentAgentJobContextEntity feishu(DocumentAgentJobEntity job, String docId, String docType, String title, int ordinal) {
         DocumentAgentJobContextEntity value = new DocumentAgentJobContextEntity(); value.job = job; value.contextKind = "FEISHU_DOCUMENT"; value.feishuDocId = docId; value.feishuDocType = docType; value.feishuTitle = title; value.ordinalNo = ordinal; return value;
     }
+    public static DocumentAgentJobContextEntity wiki(DocumentAgentJobEntity job, WikiDocumentEntity document, int ordinal) {
+        DocumentAgentJobContextEntity value = new DocumentAgentJobContextEntity(); value.job = job; value.contextKind = "WIKI_DOCUMENT"; value.wikiDocument = document; value.ordinalNo = ordinal; return value;
+    }
     public DocumentAgentJobEntity getJob() { return job; }
     public String getContextKind() { return contextKind; }
     public ProjectDocumentEntity getArtifact() { return artifact; }
@@ -29,5 +34,6 @@ public class DocumentAgentJobContextEntity extends BaseJpaEntity {
     public String getFeishuDocId() { return feishuDocId; }
     public String getFeishuDocType() { return feishuDocType; }
     public String getFeishuTitle() { return feishuTitle; }
+    public WikiDocumentEntity getWikiDocument() { return wikiDocument; }
     public int getOrdinalNo() { return ordinalNo; }
 }

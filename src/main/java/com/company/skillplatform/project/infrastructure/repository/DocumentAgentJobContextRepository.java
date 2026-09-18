@@ -5,7 +5,8 @@ import java.util.*;
 import org.springframework.data.jpa.repository.*;
 
 public interface DocumentAgentJobContextRepository extends JpaRepository<DocumentAgentJobContextEntity, Long> {
-    @EntityGraph(attributePaths = {"job", "artifact", "artifactRevision"})
+    @EntityGraph(attributePaths = {"job", "artifact", "artifactRevision", "wikiDocument", "wikiDocument.currentRevision"})
     List<DocumentAgentJobContextEntity> findByJobOrderByOrdinalNoAsc(DocumentAgentJobEntity job);
     boolean existsByJobAndContextKindAndFeishuDocIdAndFeishuDocType(DocumentAgentJobEntity job, String kind, String docId, String docType);
+    boolean existsByJobAndContextKindAndWikiDocumentId(DocumentAgentJobEntity job, String kind, Long wikiDocumentId);
 }

@@ -43,7 +43,12 @@ public class FeishuUserTokenService {
         else { credential.update(cipher.encrypt(accessToken), cipher.encrypt(refreshToken), now.plusSeconds(expiresIn), refreshExpiresIn > 0 ? now.plusSeconds(refreshExpiresIn) : null, scopes); credentials.save(credential); }
     }
 
-    @Transactional
+    /**
+     * Token lookup may refresh and persist the credential.  Keep it in its own
+     * writable transaction because document search/resolve endpoints are
+     * intentionally read-only transactions at the service boundary.
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
     public String accessTokenFor(Long userId) {
         FeishuUserDocumentCredentialEntity credential = credentials.findByUserIdForUpdate(userId).orElse(null);
         if (credential == null || !credential.isAuthorized()) return null;

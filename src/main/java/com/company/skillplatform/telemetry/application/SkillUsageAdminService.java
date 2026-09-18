@@ -103,10 +103,59 @@ public class SkillUsageAdminService {
                         statusParts.where() + " GROUP BY e.conversation_status ORDER BY status",
                 statusParts.params(), (rs, row) -> new ConversationStatusCount(rs.getString("status"), rs.getLong("count")));
 
+        QueryParts categoryParts = queryParts(actorId, globalAdmin, effective);
+        List<DimensionUsage> categories = jdbc.query(
+                "SELECT CAST(c.id AS CHAR) dimension_key, c.category_name dimension_name, COUNT(*) calls, " +
+                        "COUNT(DISTINCT e.user_id) users, COUNT(DISTINCT e.skill_id) skills " +
+                        "FROM skill_usage_event e JOIN iam_user u ON u.id=e.user_id JOIN skill s ON s.id=e.skill_id " +
+                        "JOIN skill_category c ON c.id=s.category_id " + categoryParts.where() +
+                        " GROUP BY c.id,c.category_name ORDER BY calls DESC,dimension_name LIMIT 20",
+                categoryParts.params(), this::dimensionUsage);
+
+        QueryParts teamParts = queryParts(actorId, globalAdmin, effective);
+        List<DimensionUsage> teamUsage = jdbc.query(
+                "SELECT CAST(t.id AS CHAR) dimension_key, t.team_name dimension_name, COUNT(DISTINCT e.id) calls, " +
+                        "COUNT(DISTINCT e.user_id) users, COUNT(DISTINCT e.skill_id) skills " +
+                        "FROM skill_usage_event e JOIN iam_user u ON u.id=e.user_id JOIN skill s ON s.id=e.skill_id " +
+                        "JOIN org_team_member tm ON tm.user_id=e.user_id AND tm.status='ACTIVE' " +
+                        "JOIN org_team t ON t.id=tm.team_id AND t.status='ACTIVE' " + teamParts.where() +
+                        " GROUP BY t.id,t.team_name ORDER BY calls DESC,dimension_name LIMIT 20",
+                teamParts.params(), this::dimensionUsage);
+
+        QueryParts projectParts = queryParts(actorId, globalAdmin, effective);
+        List<DimensionUsage> projects = jdbc.query(
+                "SELECT e.local_directory dimension_key, e.local_directory dimension_name, COUNT(*) calls, " +
+                        "COUNT(DISTINCT e.user_id) users, COUNT(DISTINCT e.skill_id) skills " +
+                        "FROM skill_usage_event e JOIN iam_user u ON u.id=e.user_id JOIN skill s ON s.id=e.skill_id " +
+                        projectParts.where() + " GROUP BY e.local_directory ORDER BY calls DESC,dimension_name LIMIT 20",
+                projectParts.params(), this::dimensionUsage);
+
+        QueryParts clientParts = queryParts(actorId, globalAdmin, effective);
+        List<DimensionUsage> clients = jdbc.query(
+                "SELECT e.client dimension_key, e.client dimension_name, COUNT(*) calls, " +
+                        "COUNT(DISTINCT e.user_id) users, COUNT(DISTINCT e.skill_id) skills " +
+                        "FROM skill_usage_event e JOIN iam_user u ON u.id=e.user_id JOIN skill s ON s.id=e.skill_id " +
+                        clientParts.where() + " GROUP BY e.client ORDER BY calls DESC,dimension_name LIMIT 20",
+                clientParts.params(), this::dimensionUsage);
+
+        QueryParts timeParts = queryParts(actorId, globalAdmin, effective);
+        List<TimeBandUsage> timeBands = jdbc.query(
+                "SELECT CASE " +
+                        "WHEN HOUR(DATE_ADD(e.invoked_at, INTERVAL 8 HOUR)) BETWEEN 6 AND 8 THEN '06-09' " +
+                        "WHEN HOUR(DATE_ADD(e.invoked_at, INTERVAL 8 HOUR)) BETWEEN 9 AND 11 THEN '09-12' " +
+                        "WHEN HOUR(DATE_ADD(e.invoked_at, INTERVAL 8 HOUR)) BETWEEN 12 AND 13 THEN '12-14' " +
+                        "WHEN HOUR(DATE_ADD(e.invoked_at, INTERVAL 8 HOUR)) BETWEEN 14 AND 17 THEN '14-18' " +
+                        "WHEN HOUR(DATE_ADD(e.invoked_at, INTERVAL 8 HOUR)) BETWEEN 18 AND 21 THEN '18-22' " +
+                        "ELSE '22-06' END time_band, COUNT(*) calls, COUNT(DISTINCT e.user_id) users " +
+                        "FROM skill_usage_event e JOIN iam_user u ON u.id=e.user_id JOIN skill s ON s.id=e.skill_id " +
+                        timeParts.where() + " GROUP BY time_band ORDER BY FIELD(time_band,'06-09','09-12','12-14','14-18','18-22','22-06')",
+                timeParts.params(), (rs, row) -> new TimeBandUsage(rs.getString("time_band"), rs.getLong("calls"), rs.getLong("users")));
+
         long calls = number(summary.get("calls"));
         long merged = number(summary.get("merged_conversations"));
         return new Overview(new Summary(calls, number(summary.get("active_users")), number(summary.get("skills")),
                 merged, calls == 0 ? 0 : (double) merged / calls), trend, skillRanking, memberRanking, statuses,
+                categories, teamUsage, projects, clients, timeBands,
                 effective.from(), effective.to());
     }
 
@@ -175,6 +224,11 @@ public class SkillUsageAdminService {
                 rs.getInt("conversation_available") == 1);
     }
 
+    private DimensionUsage dimensionUsage(ResultSet rs, int row) throws SQLException {
+        return new DimensionUsage(rs.getString("dimension_key"), rs.getString("dimension_name"),
+                rs.getLong("calls"), rs.getLong("users"), rs.getLong("skills"));
+    }
+
     private QueryParts queryParts(Long actorId, boolean globalAdmin, Filters filters) {
         Instant now = clock.instant();
         Instant from = filters.from() == null ? now.minus(Duration.ofDays(30)) : filters.from();
@@ -241,11 +295,16 @@ public class SkillUsageAdminService {
     public record Summary(long calls, long activeUsers, long skills, long mergedConversations, double conversationSuccessRate) {}
     public record Overview(Summary summary, List<TrendPoint> trend, List<SkillRanking> skills,
                            List<MemberRanking> members, List<ConversationStatusCount> conversationStatuses,
+                           List<DimensionUsage> categories, List<DimensionUsage> teams,
+                           List<DimensionUsage> projects, List<DimensionUsage> clients,
+                           List<TimeBandUsage> timeBands,
                            Instant from, Instant to) {}
     public record TrendPoint(String bucket, long calls, long activeUsers) {}
     public record SkillRanking(String skillKey, String displayName, long calls, long users, Instant lastInvokedAt) {}
     public record MemberRanking(Long userId, String displayName, String username, long calls, long skills, Instant lastInvokedAt) {}
     public record ConversationStatusCount(String status, long count) {}
+    public record DimensionUsage(String key, String name, long calls, long users, long skills) {}
+    public record TimeBandUsage(String band, long calls, long users) {}
     public record EventPage(List<EventView> items, int page, int size, long totalElements, int totalPages) {}
     public record EventView(String eventId, Instant invokedAt, Long userId, String displayName, String username,
                             String skillKey, Long skillVersionId, String version, String skillDisplayName,

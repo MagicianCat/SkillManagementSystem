@@ -14,6 +14,8 @@ public interface DocumentAgentSessionRepository extends JpaRepository<DocumentAg
     Optional<DocumentAgentSessionEntity> findBySessionKeyAndOwnerId(String sessionKey, Long ownerId);
     Optional<DocumentAgentSessionEntity> findByOwnerIdAndProjectProjectKeyAndIdempotencyKey(Long ownerId, String projectKey, String idempotencyKey);
     @EntityGraph(attributePaths = {"project", "owner", "document"})
+    Optional<DocumentAgentSessionEntity> findFirstByProjectProjectKeyAndStageIdAndStatusOrderByTimeCreatedDesc(String projectKey, Long stageId, String status);
+    @EntityGraph(attributePaths = {"project", "owner", "document"})
     List<DocumentAgentSessionEntity> findByProjectProjectKeyAndOwnerIdOrderByLastActivityAtDesc(String projectKey, Long ownerId, Pageable pageable);
     @EntityGraph(attributePaths = {"project", "owner", "document"})
     List<DocumentAgentSessionEntity> findByOwnerIdOrderByLastActivityAtDesc(Long ownerId, Pageable pageable);
