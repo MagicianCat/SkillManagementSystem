@@ -20,6 +20,7 @@ public class SkillUsageEventEntity extends BaseJpaEntity {
     @Column(name = "local_directory", nullable = false, length = 2048) private String localDirectory;
     @Column(name = "client_session_id", nullable = false, length = 256) private String clientSessionId;
     @Column(name = "generation_id", length = 256) private String generationId;
+    @Column(name = "ai_generation_id") private Long aiGenerationId;
     @Column(nullable = false, length = 64) private String client;
     @Column(name = "client_version", length = 64) private String clientVersion;
     @Column(name = "agent_type", length = 64) private String agentType;
@@ -53,6 +54,8 @@ public class SkillUsageEventEntity extends BaseJpaEntity {
     public Long getUserId() { return user.getId(); }
     public IamUserEntity getUser() { return user; }
     public String getClientSessionId() { return clientSessionId; }
+    public Long getAiGenerationId() { return aiGenerationId; }
+    public void linkGeneration(Long aiGenerationId) { this.aiGenerationId = aiGenerationId; }
     public Instant getInvokedAt() { return invokedAt; }
     public void markConversationStatus(String status, String errorCode) { conversationStatus = status; conversationErrorCode = errorCode; }
     public void stageConversation(String objectKey) { conversationChunkObjectKey = objectKey; conversationStatus = "STAGED"; }
