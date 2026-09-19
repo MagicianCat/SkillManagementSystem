@@ -1,4 +1,5 @@
 ALTER TABLE agent_profile ADD COLUMN source_type VARCHAR(20) NOT NULL DEFAULT 'USER', ADD COLUMN owner_user_id BIGINT NULL, ADD COLUMN is_system_locked BOOLEAN NOT NULL DEFAULT FALSE, ADD COLUMN derived_from_profile_version_id BIGINT NULL;
+UPDATE agent_profile SET source_type='SYSTEM',is_system_locked=TRUE,owner_user_id=NULL WHERE code IN ('requirement-clarifier','requirement-writer','requirement-reviewer');
 CREATE INDEX idx_agent_profile_owner ON agent_profile(owner_user_id,source_type,status);
 CREATE TABLE agent_team_preset (
  id BIGINT NOT NULL AUTO_INCREMENT, time_created DATETIME(3) NOT NULL, time_updated DATETIME(3) NOT NULL,
@@ -26,6 +27,16 @@ CREATE TABLE project_agent_configuration_node (
  PRIMARY KEY(id), UNIQUE KEY uk_project_agent_config_node(configuration_id,stage_key,node_key), CONSTRAINT fk_project_agent_config_node_config FOREIGN KEY(configuration_id) REFERENCES project_agent_configuration(id), CONSTRAINT fk_project_agent_config_node_profile FOREIGN KEY(agent_profile_version_id) REFERENCES agent_profile_version(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ALTER TABLE workflow_run ADD COLUMN project_agent_configuration_id BIGINT NULL, ADD COLUMN config_snapshot_json JSON NULL, ADD COLUMN config_hash CHAR(64) NULL;
+CREATE TABLE workflow_run_skill_snapshot (
+ id BIGINT NOT NULL AUTO_INCREMENT, time_created DATETIME(3) NOT NULL,
+ workflow_run_id BIGINT NOT NULL, agent_profile_version_id BIGINT NOT NULL, skill_id BIGINT NOT NULL, skill_version_id BIGINT NOT NULL,
+ required BOOLEAN NOT NULL DEFAULT TRUE, sort_order INT NOT NULL DEFAULT 0,
+ PRIMARY KEY(id), UNIQUE KEY uk_run_profile_skill(workflow_run_id,agent_profile_version_id,skill_id),
+ CONSTRAINT fk_run_skill_snapshot_run FOREIGN KEY(workflow_run_id) REFERENCES workflow_run(id),
+ CONSTRAINT fk_run_skill_snapshot_profile FOREIGN KEY(agent_profile_version_id) REFERENCES agent_profile_version(id),
+ CONSTRAINT fk_run_skill_snapshot_skill FOREIGN KEY(skill_id) REFERENCES skill(id),
+ CONSTRAINT fk_run_skill_snapshot_version FOREIGN KEY(skill_version_id) REFERENCES skill_version(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO agent_team_preset(time_created,time_updated,code,name,description,source_type,status,is_default) VALUES(NOW(3),NOW(3),'standard-design-team','Standard Design Team','Default Requirement design agents','SYSTEM','ACTIVE',TRUE) ON DUPLICATE KEY UPDATE time_updated=VALUES(time_updated);
 INSERT INTO agent_team_preset_version(time_created,time_updated,preset_id,version_no,workflow_template_version_id,status,published_by,published_at)

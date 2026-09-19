@@ -93,7 +93,7 @@ public class RuntimeCommandDispatcher {
     private void send(Long commandRowId) {
         Map<String, Object> context = jdbc.queryForMap("select c.command_id,ar.id agent_run_id,ar.node_key,"
                 + "ar.profile_version_id,ar.session_id,s.id stage_run_id,w.id workflow_run_id,w.project_id,p.project_key,w.started_by,w.initial_request,w.context_snapshot_json,"
-                + "v.system_prompt,v.model_code,v.temperature,v.max_iteration_per_run,v.timeout_seconds,v.output_schema_json,ap.code profile_code "
+                + "v.system_prompt,v.model_code,v.temperature,v.max_iteration_per_run,v.timeout_seconds,v.output_schema_json,v.runtime_config_json,ap.code profile_code "
                 + "from runtime_command c join agent_workflow_run ar on ar.id=c.aggregate_id "
                 + "join stage_run s on s.id=ar.stage_run_id join workflow_run w on w.id=s.workflow_run_id "
                 + "join virtual_project p on p.id=w.project_id join agent_profile_version v on v.id=ar.profile_version_id join agent_profile ap on ap.id=v.agent_profile_id where c.id=?", commandRowId);
@@ -142,16 +142,18 @@ public class RuntimeCommandDispatcher {
         List<Map<String, Object>> tools = jdbc.queryForList("select tool_code toolCode,enabled,"
                 + "permission_mode permissionMode,config_json config from agent_profile_version_tool "
                 + "where agent_profile_version_id=? order by tool_code", context.get("profile_version_id"));
-        List<Map<String, Object>> resolvedSkills = skills.resolve(number(context,"profile_version_id"));
+        List<Map<String, Object>> resolvedSkills = skills.resolve(number(context,"profile_version_id"),number(context,"workflow_run_id"));
         String mcpToken=agentRuns.issueWorkflowRun(number(context,"started_by"),String.valueOf(context.get("project_key")),String.valueOf(context.get("profile_code")),number(context,"workflow_run_id"),number(context,"stage_run_id"),number(context,"agent_run_id")).token();
         Map<String, Object> agent = new LinkedHashMap<>();
         agent.put("name", context.get("node_key"));
         agent.put("systemPrompt", context.get("system_prompt"));
+        agent.put("platformBaseInstructions", "Respect SMS project authorization and MCP boundaries. Never access context, tools, tokens, or secrets outside the current workflow run.");
         agent.put("model", context.get("model_code"));
         agent.put("temperature", context.get("temperature"));
         agent.put("maxIterationPerRun", context.get("max_iteration_per_run"));
         agent.put("timeoutSeconds", context.get("timeout_seconds"));
-        agent.put("outputSchema", context.get("output_schema_json"));
+        agent.put("outputSchema", readJson(String.valueOf(context.get("output_schema_json"))));
+        agent.put("runtimeConfig", readJson(String.valueOf(context.get("runtime_config_json"))));
         agent.put("tools", tools);
         agent.put("skills", resolvedSkills);
         agent.put("mcp",Map.of("url",mcpUrl,"smsToken",mcpToken));
