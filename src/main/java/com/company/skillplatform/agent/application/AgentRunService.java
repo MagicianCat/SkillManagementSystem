@@ -163,7 +163,7 @@ public class AgentRunService {
     public void requireCapability(AgentRun run, String capability) {
         if (run.sessionKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read").contains(capability)) return;
         if (run.projectKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate").contains(capability)) return;
-        if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of("wiki.search", "wiki.read", "feishu.read").contains(capability)) return;
+        if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of("wiki.search", "wiki.read", "feishu.read", "workflow.human_input.request").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
                 "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {

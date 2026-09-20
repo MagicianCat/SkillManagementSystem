@@ -42,10 +42,10 @@ public class RuntimeEventCollector {
     @Scheduled(fixedDelayString = "${skill-platform.agent-runtime.event-delay-ms:1000}")
     public void collect() {
         List<Map<String, Object>> active = jdbc.queryForList("select ar.id agent_run_id,ar.node_key,ar.session_id,ar.stage_run_id,"
-                + "ar.runtime_event_sequence,s.runtime_conversation_id,sr.workflow_run_id "
+                + "ar.runtime_event_sequence,ar.runtime_conversation_id,sr.workflow_run_id "
                 + "from agent_workflow_run ar join agent_workflow_session s on s.id=ar.session_id "
                 + "join stage_run sr on sr.id=ar.stage_run_id where ar.status in ('STARTING','RUNNING') "
-                + "and ar.runtime_run_id is not null and s.runtime_conversation_id is not null");
+                + "and ar.runtime_run_id is not null and ar.runtime_conversation_id is not null");
         for (Map<String, Object> run : active) {
             try {
                 collectRun(run);
@@ -107,6 +107,7 @@ public class RuntimeEventCollector {
             case "ARTIFACT_REVISION_CREATED", "ARTIFACT_CANDIDATE" -> "artifact.revision.created";
             case "AGENT_PAUSED" -> "agent.paused";
             case "AGENT_RESUMED" -> "agent.resumed";
+            case "AGENT_PROTOCOL_RETRY_REQUESTED" -> "agent.protocol.retry.requested";
             default -> "agent.status.changed";
         };
     }

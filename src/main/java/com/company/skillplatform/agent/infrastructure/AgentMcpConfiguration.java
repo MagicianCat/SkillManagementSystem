@@ -55,14 +55,17 @@ public class AgentMcpConfiguration {
     private final ProjectControlService projectControl;
     private final DocumentAgentSessionService documentAgents;
     private final JdbcTemplate jdbc;
+    private final com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents;
+    private final com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
                                  AgentRunRepository persistentRuns, AgentEventHub events, WikiDocumentService wiki, FeishuDocumentMcpProxy feishu,
                                  AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl, DocumentAgentSessionService documentAgents,
-                                 JdbcTemplate jdbc,
+                                 JdbcTemplate jdbc, com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents,
+                                 com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
     }
 
     @Bean
@@ -98,6 +101,8 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of("artifactType", "title", "content")), this::saveProjectDraft),
                         tool("validate_artifact", "Validate the minimum structure of a project document draft.",
                                 schema("object", List.of("artifactType", "content")), this::validateProjectArtifact),
+                        tool("workflow_request_human_input", "Pause the current workflow Agent and ask the human one explicit question. Ask only one question at a time.",
+                                schema("object", List.of("question")), this::requestHumanInput),
                         tool("get_skill_file_content", "Get a safe, bounded segment of a published text file.",
                                 schema("object", List.of("skillKey", "path")), this::file),
                         tool("submit_skill_recommendation", "Submit the final structured skill recommendation.",
@@ -134,6 +139,8 @@ public class AgentMcpConfiguration {
         props.put("offset", Map.of("type", "integer", "minimum", 0)); props.put("maxBytes", Map.of("type", "integer", "minimum", 1, "maximum", MAX_BYTES));
         props.put("page", Map.of("type", "integer", "minimum", 0)); props.put("pageSize", Map.of("type", "integer", "minimum", 1, "maximum", 20));
         props.put("summary", Map.of("type", "string", "maxLength", 2000)); props.put("items", Map.of("type", "array", "maxItems", 20));
+        props.put("question", Map.of("type", "string", "minLength", 1, "maxLength", 4000));
+        props.put("choices", Map.of("type", "array", "items", Map.of("type", "string", "minLength", 1, "maxLength", 500), "maxItems", 10));
         return new McpSchema.JsonSchema(type, props, required, false, Map.of(), Map.of());
     }
     private McpSchema.JsonSchema recommendationSchema() {
@@ -230,6 +237,24 @@ public class AgentMcpConfiguration {
     private McpSchema.CallToolResult workflowWikiSearch(long runId,String keyword) { String q=keyword==null?"":keyword; List<Map<String,Object>> items=jdbc.query("select s.wiki_document_id,d.title,d.document_type,s.wiki_revision_no from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and (?='' or d.title like concat('%',?,'%')) order by d.title",(r,n)->Map.of("documentId",r.getLong(1),"title",r.getString(2),"documentType",r.getString(3),"revisionNo",r.getObject(4)),runId,q,q); return ok(Map.of("items",items,"page",0,"size",items.size(),"totalElements",items.size())); }
     private McpSchema.CallToolResult workflowWikiRead(long runId,long documentId,int offset,int max) { Map<String,Object> row=jdbc.queryForMap("select s.wiki_revision_no,d.title,d.document_type,r.markdown_content from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id join wiki_document_revision r on r.document_id=d.id and r.revision_no=s.wiki_revision_no where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and s.wiki_document_id=?",runId,documentId); String text=String.valueOf(row.get("markdown_content"));String content=offset>=text.length()?"":text.substring(offset,Math.min(text.length(),offset+max));return ok(Map.of("documentId",documentId,"title",row.get("title"),"documentType",row.get("document_type"),"revisionNo",row.get("wiki_revision_no"),"content",content,"offset",offset,"hasMore",offset+content.length()<text.length())); }
     private McpSchema.CallToolResult workflowFeishuSearch(long runId,String query) { List<Map<String,Object>> items=jdbc.query("select feishu_doc_id,feishu_doc_type,title from workflow_run_context_snapshot where workflow_run_id=? and context_kind='FEISHU' and (?='' or title like concat('%',?,'%')) order by title",(r,n)->Map.of("docId",r.getString(1),"docType",r.getString(2),"title",r.getString(3),"readable",true),runId,query==null?"":query,query==null?"":query);return ok(Map.of("query",query,"result",Map.of("items",items))); }
+    private McpSchema.CallToolResult requestHumanInput(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent=run(ex,"workflow.human_input.request"); Long workflowId=workflowRunId(agent); Long agentRunId=workflowAgentRunId(agent);
+        if(workflowId==null||agentRunId==null)throw new BusinessException("WORKFLOW_CONTEXT_REQUIRED","Workflow context is required",org.springframework.http.HttpStatus.FORBIDDEN);
+        String question=required(args,"question").trim(); Object choices=args.get("choices"); String choicesJson=choices==null?null:write(choices);
+        List<Map<String,Object>> pending=jdbc.queryForList("select id,question_text,choices_json from workflow_human_question where workflow_run_id=? and status in ('PENDING','ANSWER_SUBMITTED') order by id desc limit 1",workflowId);
+        if(!pending.isEmpty())return ok(Map.of("questionId",pending.get(0).get("id"),"status","WAITING_HUMAN","question",pending.get(0).get("question_text"),"instruction","Wait for the human answer and do not continue this turn."));
+        Map<String,Object> ids=jdbc.queryForMap("select ar.session_id,ar.stage_run_id from agent_workflow_run ar join stage_run sr on sr.id=ar.stage_run_id where ar.id=? and sr.workflow_run_id=?",agentRunId,workflowId);
+        jdbc.update("insert into workflow_human_question(time_created,time_updated,workflow_run_id,stage_run_id,agent_session_id,agent_run_id,question_text,choices_json,status) values(now(3),now(3),?,?,?,?,?,?,'PENDING')",workflowId,ids.get("stage_run_id"),ids.get("session_id"),agentRunId,question,choicesJson);
+        Long questionId=jdbc.queryForObject("select id from workflow_human_question where agent_run_id=? order by id desc limit 1",Long.class,agentRunId);
+        jdbc.update("update agent_workflow_run set status='WAITING_HUMAN',time_updated=now(3) where id=?",agentRunId);
+        jdbc.update("update agent_workflow_session set status='WAITING_HUMAN',time_updated=now(3) where id=?",ids.get("session_id"));
+        jdbc.update("update stage_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=?",ids.get("stage_run_id"));
+        jdbc.update("update workflow_run set status='WAITING_HUMAN',time_updated=now(3) where id=?",workflowId);
+        Map<String,Object> data=new LinkedHashMap<>();data.put("questionId",questionId);data.put("question",question);data.put("choices",choices==null?List.of():choices);data.put("stageId",ids.get("stage_run_id"));data.put("agentSessionId",ids.get("session_id"));data.put("agentRunId",agentRunId);data.put("agentNodeKey",jdbc.queryForObject("select node_key from agent_workflow_run where id=?",String.class,agentRunId));
+        var stored=workflowEvents.append("human-question-"+questionId,workflowId,((Number)ids.get("stage_run_id")).longValue(),((Number)ids.get("session_id")).longValue(),agentRunId,"human.question.created",data);workflowSse.publish(workflowId,stored);
+        return ok(Map.of("questionId",questionId,"status","WAITING_HUMAN","question",question,"instruction","Wait for the human answer and do not continue this turn."));
+    }
+    private Long workflowAgentRunId(AgentRun agent) { if(agent.runRef()==null)return null;try{return Long.valueOf(agent.runRef().substring(agent.runRef().indexOf("-agent-")+7));}catch(Exception ignored){return null;} }
     private McpSchema.CallToolResult projectContext(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "project.context.read"); requireProject(agent);
         var project = projectControl.get(agent.projectKey(), agent.userId());
