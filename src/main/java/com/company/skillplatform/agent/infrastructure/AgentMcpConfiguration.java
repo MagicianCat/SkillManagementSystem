@@ -1,6 +1,7 @@
 package com.company.skillplatform.agent.infrastructure;
 
 import com.company.skillplatform.agent.application.AgentRunService;
+import com.company.skillplatform.agent.domain.AgentRun;
 import com.company.skillplatform.agent.application.AgentFeishuCallGuard;
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.skill.application.SkillService;
@@ -34,6 +35,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 @Configuration
 public class AgentMcpConfiguration {
@@ -52,13 +54,15 @@ public class AgentMcpConfiguration {
     private final String webBaseUrl;
     private final ProjectControlService projectControl;
     private final DocumentAgentSessionService documentAgents;
+    private final JdbcTemplate jdbc;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
                                  AgentRunRepository persistentRuns, AgentEventHub events, WikiDocumentService wiki, FeishuDocumentMcpProxy feishu,
                                  AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl, DocumentAgentSessionService documentAgents,
+                                 JdbcTemplate jdbc,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
     }
 
     @Bean
@@ -175,18 +179,24 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult searchWiki(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.search");
+        Long workflowId = workflowRunId(agent);
+        if (workflowId != null) return workflowWikiSearch(workflowId, str(args, "keyword"));
         if (agent.sessionKey() != null) return ok(Map.of("items", documentAgents.searchSelectedWiki(agent.sessionKey(), agent.runRef(), str(args,"keyword")), "page", 0, "size", 10));
         requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"documentType"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
         return ok(Map.of("items", result.items(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
     }
     private McpSchema.CallToolResult wikiDocument(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read"); long id = longRequired(args,"documentId"); int offset = integer(args,"offset",0); int max = bounded(args);
+        Long workflowId = workflowRunId(agent);
+        if (workflowId != null) return workflowWikiRead(workflowId, id, offset, max);
         if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
         requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         return ok(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
     }
     private McpSchema.CallToolResult searchFeishu(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "feishu.search"); requireUserKnowledge(agent); String query = required(args, "query");
+        Long workflowId = workflowRunId(agent);
+        if (workflowId != null) return workflowFeishuSearch(workflowId, query);
         var budget = feishuGuard.beforeSearch(agent.runRef());
         if (!budget.allowed()) return ok(Map.of("status", budget.code(), "query", query, "message", "检索预算已用尽，请基于已获得的资料直接回答。"));
         int limit = Math.min(integer(args, "limit", 10), 10), offset = Math.min(integer(args, "offset", 0), 10_000);
@@ -199,6 +209,8 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult getFeishu(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "feishu.read"); requireUserKnowledge(agent); String docId = required(args, "docId"); String docType = required(args, "docType");
+        Long workflowId = workflowRunId(agent);
+        if (workflowId != null && !workflowContextAllows(workflowId, "FEISHU", null, docId, docType)) throw new BusinessException("WORKFLOW_CONTEXT_DENIED", "The Feishu document was not selected for this workflow run", org.springframework.http.HttpStatus.FORBIDDEN);
         if (agent.sessionKey() != null && !documentAgents.allowsFeishu(agent.sessionKey(), docId, docType))
             throw new BusinessException("DOCUMENT_AGENT_CONTEXT_DENIED", "The Feishu document was not selected for the active document job", org.springframework.http.HttpStatus.FORBIDDEN);
         var budget = feishuGuard.beforeRead(agent.runRef(), docId);
@@ -213,6 +225,11 @@ public class AgentMcpConfiguration {
             return feishuFailure("read", null, docId, failure);
         }
     }
+    private Long workflowRunId(AgentRun agent) { if (agent.runRef()==null || !agent.runRef().startsWith("workflow-")) return null; try { return Long.valueOf(agent.runRef().substring("workflow-".length(), agent.runRef().indexOf("-agent-"))); } catch (Exception ignored) { return null; } }
+    private boolean workflowContextAllows(long runId,String kind,Long wikiId,String docId,String docType) { Integer n=jdbc.queryForObject("select count(*) from workflow_run_context_snapshot where workflow_run_id=? and context_kind=? and ((? is not null and wiki_document_id=?) or (? is not null and feishu_doc_id=? and feishu_doc_type=?))",Integer.class,runId,kind,wikiId,wikiId,docId,docId,docType); return n!=null&&n>0; }
+    private McpSchema.CallToolResult workflowWikiSearch(long runId,String keyword) { String q=keyword==null?"":keyword; List<Map<String,Object>> items=jdbc.query("select s.wiki_document_id,d.title,d.document_type,s.wiki_revision_no from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and (?='' or d.title like concat('%',?,'%')) order by d.title",(r,n)->Map.of("documentId",r.getLong(1),"title",r.getString(2),"documentType",r.getString(3),"revisionNo",r.getObject(4)),runId,q,q); return ok(Map.of("items",items,"page",0,"size",items.size(),"totalElements",items.size())); }
+    private McpSchema.CallToolResult workflowWikiRead(long runId,long documentId,int offset,int max) { Map<String,Object> row=jdbc.queryForMap("select s.wiki_revision_no,d.title,d.document_type,r.markdown_content from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id join wiki_document_revision r on r.document_id=d.id and r.revision_no=s.wiki_revision_no where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and s.wiki_document_id=?",runId,documentId); String text=String.valueOf(row.get("markdown_content"));String content=offset>=text.length()?"":text.substring(offset,Math.min(text.length(),offset+max));return ok(Map.of("documentId",documentId,"title",row.get("title"),"documentType",row.get("document_type"),"revisionNo",row.get("wiki_revision_no"),"content",content,"offset",offset,"hasMore",offset+content.length()<text.length())); }
+    private McpSchema.CallToolResult workflowFeishuSearch(long runId,String query) { List<Map<String,Object>> items=jdbc.query("select feishu_doc_id,feishu_doc_type,title from workflow_run_context_snapshot where workflow_run_id=? and context_kind='FEISHU' and (?='' or title like concat('%',?,'%')) order by title",(r,n)->Map.of("docId",r.getString(1),"docType",r.getString(2),"title",r.getString(3),"readable",true),runId,query==null?"":query,query==null?"":query);return ok(Map.of("query",query,"result",Map.of("items",items))); }
     private McpSchema.CallToolResult projectContext(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "project.context.read"); requireProject(agent);
         var project = projectControl.get(agent.projectKey(), agent.userId());
