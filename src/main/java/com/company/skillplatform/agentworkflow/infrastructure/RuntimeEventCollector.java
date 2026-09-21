@@ -60,11 +60,17 @@ public class RuntimeEventCollector {
 
     private void collectRun(Map<String, Object> run) {
         long cursor = ((Number) run.get("runtime_event_sequence")).longValue();
+        collectEvents(run, cursor);
+        reconcileTerminal(run);
+    }
+
+    private int collectEvents(Map<String, Object> run, long cursor) {
         long after = cursor;
         List<?> events = client.get().uri(uri -> uri.path("/internal/v1/conversations/{id}/events")
                         .queryParam("after", after).build(run.get("runtime_conversation_id")))
                 .header("X-SMS-Service-Token", token).retrieve().body(List.class);
-        if (events == null) return;
+        if (events == null) return 0;
+        int processed = 0;
         for (Object item : events) {
             if (!(item instanceof Map<?, ?> event)
                     || !String.valueOf(run.get("agent_run_id")).equals(String.valueOf(event.get("agentRunId")))) continue;
@@ -83,7 +89,6 @@ public class RuntimeEventCollector {
             WorkflowRuntimeEventService.StoredEvent stored = eventStore.append(String.valueOf(event.get("eventId")),
                     ((Number) run.get("workflow_run_id")).longValue(), ((Number) run.get("stage_run_id")).longValue(),
                     ((Number) run.get("session_id")).longValue(), ((Number) run.get("agent_run_id")).longValue(), storedType, eventData);
-            sse.publish(((Number) run.get("workflow_run_id")).longValue(), stored);
             if ("AGENT_RUN_COMPLETED".equals(type) || "AGENT_RUN_FAILED".equals(type)) {
                 String executionStatus = "AGENT_RUN_COMPLETED".equals(type)
                         ? text(payload, "executionStatus", "SUCCESS") : "FAILED";
@@ -103,8 +108,16 @@ public class RuntimeEventCollector {
             cursor = sequence;
             jdbc.update("update agent_workflow_run set runtime_event_sequence=?,time_updated=now(3) where id=?",
                     cursor, run.get("agent_run_id"));
+            // Runtime persistence and state transitions are authoritative. SSE is only
+            // a best-effort live view and must never block the collector.
+            sse.publish(((Number) run.get("workflow_run_id")).longValue(), stored);
+            processed++;
         }
-        reconcileTerminal(run);
+        if (processed > 0) {
+            log.debug("event=agent.workflow.runtime.events_processed agentRunId={} count={} cursor={}",
+                    run.get("agent_run_id"), processed, cursor);
+        }
+        return processed;
     }
 
     private void reconcileTerminal(Map<String,Object> run) {
@@ -119,8 +132,15 @@ public class RuntimeEventCollector {
                     .header("X-SMS-Service-Token", token).retrieve().body(Map.class);
             String status = runtime == null ? "" : String.valueOf(runtime.get("status"));
             if (List.of("FAILED", "CANCELLED").contains(status)) {
+                collectEvents(run, currentCursor(run));
+                if (!isActive(run)) return;
                 forceFailure(run, "RUNTIME_"+status, "Gateway run reached "+status+" without a consumed terminal event");
             } else if ("COMPLETED".equals(status)) {
+                // The Gateway status can become terminal just before its last event is
+                // visible to the polling request. Make one final authoritative fetch
+                // before declaring the terminal event missing.
+                collectEvents(run, currentCursor(run));
+                if (!isActive(run)) return;
                 forceFailure(run, "RUNTIME_TERMINAL_EVENT_MISSING", "Gateway run completed without a consumable completion event");
             }
         } catch (HttpClientErrorException.NotFound missing) {
@@ -130,12 +150,25 @@ public class RuntimeEventCollector {
         }
     }
 
+    private long currentCursor(Map<String, Object> run) {
+        Long cursor = jdbc.queryForObject("select runtime_event_sequence from agent_workflow_run where id=?",
+                Long.class, run.get("agent_run_id"));
+        return cursor == null ? 0L : cursor;
+    }
+
+    private boolean isActive(Map<String, Object> run) {
+        String status = jdbc.queryForObject("select status from agent_workflow_run where id=?",
+                String.class, run.get("agent_run_id"));
+        return List.of("STARTING", "RUNNING").contains(status);
+    }
+
     private void forceFailure(Map<String,Object> run,String code,String message) {
         String safe = message == null ? code : message.substring(0,Math.min(message.length(),2000));
         int changed=jdbc.update("update agent_workflow_run set status='FAILED',result_code=?,error_code=?,error_message=?,completed_at=coalesce(completed_at,now(3)),time_updated=now(3) where id=? and status in ('STARTING','RUNNING')",code,code,safe,run.get("agent_run_id"));
         if(changed==0)return;
         jdbc.update("update agent_workflow_session set status='FAILED',time_updated=now(3) where id=?",run.get("session_id"));
         jdbc.update("update stage_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=? and status in ('RUNNING','PROVISIONING')",run.get("stage_run_id"));
+        jdbc.update("update workflow_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=? and status not in ('COMPLETED','CANCELLED','FAILED')",run.get("workflow_run_id"));
     }
 
     private String frontendType(String type) {

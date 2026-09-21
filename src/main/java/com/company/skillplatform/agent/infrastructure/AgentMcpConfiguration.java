@@ -35,7 +35,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.client.RestClient;
 
 @Configuration
 public class AgentMcpConfiguration {
@@ -57,6 +59,8 @@ public class AgentMcpConfiguration {
     private final JdbcTemplate jdbc;
     private final com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents;
     private final com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse;
+    private final RestClient workflowGateway;
+    private final String workflowServiceToken;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
@@ -64,8 +68,11 @@ public class AgentMcpConfiguration {
                                  AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl, DocumentAgentSessionService documentAgents,
                                  JdbcTemplate jdbc, com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents,
                                  com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse,
+                                 RestClient.Builder restClientBuilder,
+                                 @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:18080}") String gatewayUrl,
+                                 @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String workflowServiceToken,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
     }
 
     @Bean
@@ -241,18 +248,29 @@ public class AgentMcpConfiguration {
         var agent=run(ex,"workflow.human_input.request"); Long workflowId=workflowRunId(agent); Long agentRunId=workflowAgentRunId(agent);
         if(workflowId==null||agentRunId==null)throw new BusinessException("WORKFLOW_CONTEXT_REQUIRED","Workflow context is required",org.springframework.http.HttpStatus.FORBIDDEN);
         String question=required(args,"question").trim(); Object choices=args.get("choices"); String choicesJson=choices==null?null:write(choices);
+        Map<String,Object> ids=jdbc.queryForMap("select ar.session_id,ar.stage_run_id,ar.status,ar.runtime_conversation_id from agent_workflow_run ar join stage_run sr on sr.id=ar.stage_run_id where ar.id=? and sr.workflow_run_id=?",agentRunId,workflowId);
+        String agentStatus=String.valueOf(ids.get("status"));
+        if(!Set.of("STARTING","RUNNING","WAITING_HUMAN").contains(agentStatus))throw new BusinessException("WORKFLOW_AGENT_NOT_ACTIVE","The workflow Agent is no longer active",org.springframework.http.HttpStatus.CONFLICT);
         List<Map<String,Object>> pending=jdbc.queryForList("select id,question_text,choices_json from workflow_human_question where workflow_run_id=? and status in ('PENDING','ANSWER_SUBMITTED') order by id desc limit 1",workflowId);
+        signalGatewayWaiting(agentRunId,ids.get("runtime_conversation_id"));
         if(!pending.isEmpty())return ok(Map.of("questionId",pending.get(0).get("id"),"status","WAITING_HUMAN","question",pending.get(0).get("question_text"),"instruction","Wait for the human answer and do not continue this turn."));
-        Map<String,Object> ids=jdbc.queryForMap("select ar.session_id,ar.stage_run_id from agent_workflow_run ar join stage_run sr on sr.id=ar.stage_run_id where ar.id=? and sr.workflow_run_id=?",agentRunId,workflowId);
         jdbc.update("insert into workflow_human_question(time_created,time_updated,workflow_run_id,stage_run_id,agent_session_id,agent_run_id,question_text,choices_json,status) values(now(3),now(3),?,?,?,?,?,?,'PENDING')",workflowId,ids.get("stage_run_id"),ids.get("session_id"),agentRunId,question,choicesJson);
         Long questionId=jdbc.queryForObject("select id from workflow_human_question where agent_run_id=? order by id desc limit 1",Long.class,agentRunId);
-        jdbc.update("update agent_workflow_run set status='WAITING_HUMAN',time_updated=now(3) where id=?",agentRunId);
+        int changed=jdbc.update("update agent_workflow_run set status='WAITING_HUMAN',time_updated=now(3) where id=? and status in ('STARTING','RUNNING','WAITING_HUMAN')",agentRunId);
+        if(changed!=1)throw new BusinessException("WORKFLOW_AGENT_NOT_ACTIVE","The workflow Agent stopped before the human question was recorded",org.springframework.http.HttpStatus.CONFLICT);
         jdbc.update("update agent_workflow_session set status='WAITING_HUMAN',time_updated=now(3) where id=?",ids.get("session_id"));
         jdbc.update("update stage_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=?",ids.get("stage_run_id"));
         jdbc.update("update workflow_run set status='WAITING_HUMAN',time_updated=now(3) where id=?",workflowId);
         Map<String,Object> data=new LinkedHashMap<>();data.put("questionId",questionId);data.put("question",question);data.put("choices",choices==null?List.of():choices);data.put("stageId",ids.get("stage_run_id"));data.put("agentSessionId",ids.get("session_id"));data.put("agentRunId",agentRunId);data.put("agentNodeKey",jdbc.queryForObject("select node_key from agent_workflow_run where id=?",String.class,agentRunId));
         var stored=workflowEvents.append("human-question-"+questionId,workflowId,((Number)ids.get("stage_run_id")).longValue(),((Number)ids.get("session_id")).longValue(),agentRunId,"human.question.created",data);workflowSse.publish(workflowId,stored);
         return ok(Map.of("questionId",questionId,"status","WAITING_HUMAN","question",question,"instruction","Wait for the human answer and do not continue this turn."));
+    }
+    private void signalGatewayWaiting(Long agentRunId,Object conversationId) {
+        String conversation=conversationId==null?"":String.valueOf(conversationId).trim();
+        if(conversation.isEmpty()||"null".equalsIgnoreCase(conversation))throw new BusinessException("WORKFLOW_RUNTIME_NOT_READY","The workflow runtime conversation is not ready",org.springframework.http.HttpStatus.CONFLICT);
+        workflowGateway.post().uri("/internal/v1/conversations/{conversationId}/wait-human",conversation)
+                .header("X-SMS-Service-Token",workflowServiceToken).contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("requestId","human-wait-"+agentRunId+"-"+UUID.randomUUID())).retrieve().toBodilessEntity();
     }
     private Long workflowAgentRunId(AgentRun agent) { if(agent.runRef()==null)return null;try{return Long.valueOf(agent.runRef().substring(agent.runRef().indexOf("-agent-")+7));}catch(Exception ignored){return null;} }
     private McpSchema.CallToolResult projectContext(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {

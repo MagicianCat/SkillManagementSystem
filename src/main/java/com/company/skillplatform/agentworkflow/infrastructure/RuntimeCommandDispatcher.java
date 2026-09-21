@@ -20,6 +20,11 @@ import java.util.UUID;
 
 @Component
 public class RuntimeCommandDispatcher {
+    private static final String HUMAN_RESUME_PROTOCOL = "After a human answer is received, resume the interrupted workflow immediately. "
+            + "Treat the answer as authoritative context for the current task. Do not only acknowledge the answer, "
+            + "do not say that you are still waiting, and do not call workflow_request_human_input again unless a new "
+            + "unresolved blocking question is discovered. Continue the analysis and, when complete, call finish with "
+            + "the exact structured completion envelope required by the workflow protocol.";
     private final JdbcTemplate jdbc;
     private final RestClient client;
     private final String token;
@@ -95,7 +100,12 @@ public class RuntimeCommandDispatcher {
         body.put("requestId", command.get("command_id"));
         if (Set.of("ASK_AGENT", "SEND_MESSAGE", "ANSWER_HUMAN_QUESTION").contains(type)) {
             Object content = payload.get("content");
-            body.put("message", content == null ? "" : String.valueOf(content));
+            String message = content == null ? "" : String.valueOf(content);
+            if ("ANSWER_HUMAN_QUESTION".equals(type)) {
+                message = "Human answer to the workflow question:\n" + message
+                        + "\n\nWorkflow resume instruction: " + HUMAN_RESUME_PROTOCOL;
+            }
+            body.put("message", message);
         }
         client.post().uri(path, conversation)
                 .header("X-SMS-Service-Token", token)
@@ -106,11 +116,17 @@ public class RuntimeCommandDispatcher {
     private void completeHumanAnswer(Long commandId) {
         List<Map<String,Object>> rows=jdbc.queryForList("select id,workflow_run_id,stage_run_id,agent_session_id,agent_run_id from workflow_human_question where runtime_command_id=? and status='ANSWER_SUBMITTED'",commandId);
         if(rows.isEmpty())return;Map<String,Object> q=rows.get(0);
+        int resumed=jdbc.update("update agent_workflow_run set status='RUNNING',time_updated=now(3) where id=? and status='WAITING_HUMAN'",q.get("agent_run_id"));
+        if(resumed!=1){
+            String error="Agent run is no longer waiting for human input";
+            jdbc.update("update workflow_human_question set status='CANCELLED',last_error=?,time_updated=now(3) where id=? and status='ANSWER_SUBMITTED'",error,q.get("id"));
+            publishHumanQuestion(q,"human.question.answer_failed",error);
+            return;
+        }
         jdbc.update("update workflow_human_question set status='ANSWERED',answered_at=now(3),time_updated=now(3) where id=?",q.get("id"));
-        jdbc.update("update agent_workflow_run set status='RUNNING',time_updated=now(3) where id=?",q.get("agent_run_id"));
-        jdbc.update("update agent_workflow_session set status='ACTIVE',time_updated=now(3) where id=?",q.get("agent_session_id"));
-        jdbc.update("update stage_run set status='RUNNING',time_updated=now(3) where id=?",q.get("stage_run_id"));
-        jdbc.update("update workflow_run set status='RUNNING',time_updated=now(3) where id=?",q.get("workflow_run_id"));
+        jdbc.update("update agent_workflow_session set status='ACTIVE',time_updated=now(3) where id=? and status='WAITING_HUMAN'",q.get("agent_session_id"));
+        jdbc.update("update stage_run set status='RUNNING',time_updated=now(3) where id=? and status in ('HUMAN_REQUIRED','WAITING_HUMAN')",q.get("stage_run_id"));
+        jdbc.update("update workflow_run set status='RUNNING',time_updated=now(3) where id=? and status='WAITING_HUMAN'",q.get("workflow_run_id"));
         publishHumanQuestion(q, "human.question.answered", null);
     }
 
@@ -130,7 +146,7 @@ public class RuntimeCommandDispatcher {
         String error=message.substring(0,Math.min(message.length(),2000));
         jdbc.update("update agent_workflow_run set status='FAILED',error_code='AGENT_START_DISPATCH_FAILED',error_message=?,completed_at=now(3),time_updated=now(3) where id=? and status in ('QUEUED','STARTING')",error,run.get("id"));
         Integer latest=jdbc.queryForObject("select count(*) from agent_workflow_run x where x.session_id=? and x.id>? and x.status in ('QUEUED','STARTING','RUNNING','WAITING_HUMAN','PAUSED')",Integer.class,run.get("session_id"),run.get("id"));
-        if(latest==null||latest==0){jdbc.update("update stage_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=? and status='RUNNING'",run.get("stage_run_id"));Map<String,Object> data=new LinkedHashMap<>();data.put("stageId",run.get("stage_run_id"));data.put("agentRunId",run.get("id"));data.put("errorCode","AGENT_START_DISPATCH_FAILED");data.put("errorMessage",error);var event=runtimeEvents.append("agent-start-failed-"+commandId,number(run,"workflow_run_id"),number(run,"stage_run_id"),number(run,"session_id"),number(run,"id"),"agent.status.changed",data);sse.publish(number(run,"workflow_run_id"),event);}
+        if(latest==null||latest==0){jdbc.update("update stage_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=? and status='RUNNING'",run.get("stage_run_id"));jdbc.update("update workflow_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=? and status not in ('COMPLETED','CANCELLED','FAILED')",run.get("workflow_run_id"));Map<String,Object> data=new LinkedHashMap<>();data.put("stageId",run.get("stage_run_id"));data.put("agentRunId",run.get("id"));data.put("errorCode","AGENT_START_DISPATCH_FAILED");data.put("errorMessage",error);var event=runtimeEvents.append("agent-start-failed-"+commandId,number(run,"workflow_run_id"),number(run,"stage_run_id"),number(run,"session_id"),number(run,"id"),"agent.status.changed",data);sse.publish(number(run,"workflow_run_id"),event);}
     }
 
     private void publishHumanQuestion(Map<String,Object> question, String type, String error) {
@@ -217,7 +233,7 @@ public class RuntimeCommandDispatcher {
         Map<String, Object> agent = new LinkedHashMap<>();
         agent.put("name", context.get("node_key"));
         agent.put("systemPrompt", context.get("system_prompt"));
-        agent.put("platformBaseInstructions", "Respect SMS project authorization and MCP boundaries. Never access context, tools, tokens, or secrets outside the current workflow run. When human input is required, call workflow_request_human_input with exactly one question, then stop the current turn and wait for the answer; never simulate waiting with plain text.");
+        agent.put("platformBaseInstructions", "Respect SMS project authorization and MCP boundaries. Never access context, tools, tokens, or secrets outside the current workflow run. When human input is required, call workflow_request_human_input with exactly one question, then stop the current turn and wait for the answer; never simulate waiting with plain text. " + HUMAN_RESUME_PROTOCOL);
         agent.put("model", context.get("model_code"));
         agent.put("temperature", context.get("temperature"));
         agent.put("maxIterationPerRun", context.get("max_iteration_per_run"));
@@ -225,7 +241,8 @@ public class RuntimeCommandDispatcher {
         Object workflowSchema = context.get("workflow_output_schema_json");
         agent.put("outputSchema", workflowSchema == null ? readJson(String.valueOf(context.get("output_schema_json"))) : readJson(String.valueOf(workflowSchema)));
         agent.put("runtimeConfig", readJson(String.valueOf(context.get("runtime_config_json"))));
-        agent.put("workflowProtocolPrompt", String.valueOf(context.getOrDefault("workflow_protocol_prompt", "")));
+        agent.put("workflowProtocolPrompt", String.valueOf(context.getOrDefault("workflow_protocol_prompt", ""))
+                + "\n\n" + HUMAN_RESUME_PROTOCOL);
         agent.put("workflowRole", context.get("workflow_role"));
         agent.put("artifactType", context.get("artifact_type"));
         if ("REVIEWER".equalsIgnoreCase(String.valueOf(context.get("workflow_role")))) {
