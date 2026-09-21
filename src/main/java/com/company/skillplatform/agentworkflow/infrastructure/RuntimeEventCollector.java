@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 
 @Component
@@ -42,7 +43,7 @@ public class RuntimeEventCollector {
     @Scheduled(fixedDelayString = "${skill-platform.agent-runtime.event-delay-ms:1000}")
     public void collect() {
         List<Map<String, Object>> active = jdbc.queryForList("select ar.id agent_run_id,ar.node_key,ar.session_id,ar.stage_run_id,"
-                + "ar.runtime_event_sequence,ar.runtime_conversation_id,sr.workflow_run_id "
+                + "ar.runtime_event_sequence,ar.runtime_conversation_id,ar.runtime_run_id,sr.workflow_run_id "
                 + "from agent_workflow_run ar join agent_workflow_session s on s.id=ar.session_id "
                 + "join stage_run sr on sr.id=ar.stage_run_id where ar.status in ('STARTING','RUNNING') "
                 + "and ar.runtime_run_id is not null and ar.runtime_conversation_id is not null");
@@ -52,6 +53,7 @@ public class RuntimeEventCollector {
             } catch (RuntimeException failure) {
                 log.warn("event=agent.workflow.runtime.collect_failed agentRunId={} error={}",
                         run.get("agent_run_id"), failure.getMessage());
+                reconcileTerminal(run);
             }
         }
     }
@@ -87,14 +89,53 @@ public class RuntimeEventCollector {
                         ? text(payload, "executionStatus", "SUCCESS") : "FAILED";
                 String resultCode = text(payload, "resultCode",
                         "AGENT_RUN_COMPLETED".equals(type) ? "COMPLETED" : "RUNTIME_FAILED");
-                workflows.ingestEventInternal(((Number) run.get("workflow_run_id")).longValue(),
-                        String.valueOf(event.get("eventId")), String.valueOf(run.get("node_key")), executionStatus,
-                        resultCode, json(payload));
+                try {
+                    workflows.ingestEventInternal(((Number) run.get("workflow_run_id")).longValue(),
+                            ((Number)run.get("stage_run_id")).longValue(),((Number)run.get("agent_run_id")).longValue(),
+                            String.valueOf(event.get("eventId")), String.valueOf(run.get("node_key")), executionStatus,
+                            resultCode, json(payload));
+                } catch (RuntimeException terminalFailure) {
+                    forceFailure(run, "RUNTIME_TERMINAL_INGEST_FAILED", terminalFailure.getMessage());
+                    log.error("event=agent.workflow.runtime.terminal_ingest_failed agentRunId={} runtimeRunId={} error={}",
+                            run.get("agent_run_id"), run.get("runtime_run_id"), terminalFailure.getMessage());
+                }
             }
             cursor = sequence;
             jdbc.update("update agent_workflow_run set runtime_event_sequence=?,time_updated=now(3) where id=?",
                     cursor, run.get("agent_run_id"));
         }
+        reconcileTerminal(run);
+    }
+
+    private void reconcileTerminal(Map<String,Object> run) {
+        try {
+            Long quietSeconds=jdbc.queryForObject("select timestampdiff(second,time_updated,now(3)) from agent_workflow_run where id=?",Long.class,run.get("agent_run_id"));
+            // Gateway persists the terminal event immediately before its terminal run status.
+            // Give the normal event collector a quiet window so a status read cannot race
+            // the event becoming visible and falsely fail an otherwise successful run.
+            if(quietSeconds==null||quietSeconds<5)return;
+            Map<?,?> runtime = client.get().uri("/internal/v1/conversations/{conversationId}/runs/{runId}",
+                            run.get("runtime_conversation_id"), run.get("runtime_run_id"))
+                    .header("X-SMS-Service-Token", token).retrieve().body(Map.class);
+            String status = runtime == null ? "" : String.valueOf(runtime.get("status"));
+            if (List.of("FAILED", "CANCELLED").contains(status)) {
+                forceFailure(run, "RUNTIME_"+status, "Gateway run reached "+status+" without a consumed terminal event");
+            } else if ("COMPLETED".equals(status)) {
+                forceFailure(run, "RUNTIME_TERMINAL_EVENT_MISSING", "Gateway run completed without a consumable completion event");
+            }
+        } catch (HttpClientErrorException.NotFound missing) {
+            forceFailure(run,"RUNTIME_RUN_NOT_FOUND","Gateway no longer has this runtime run");
+        } catch (RuntimeException failure) {
+            log.warn("event=agent.workflow.runtime.reconcile_failed agentRunId={} error={}",run.get("agent_run_id"),failure.getMessage());
+        }
+    }
+
+    private void forceFailure(Map<String,Object> run,String code,String message) {
+        String safe = message == null ? code : message.substring(0,Math.min(message.length(),2000));
+        int changed=jdbc.update("update agent_workflow_run set status='FAILED',result_code=?,error_code=?,error_message=?,completed_at=coalesce(completed_at,now(3)),time_updated=now(3) where id=? and status in ('STARTING','RUNNING')",code,code,safe,run.get("agent_run_id"));
+        if(changed==0)return;
+        jdbc.update("update agent_workflow_session set status='FAILED',time_updated=now(3) where id=?",run.get("session_id"));
+        jdbc.update("update stage_run set status='HUMAN_REQUIRED',time_updated=now(3) where id=? and status in ('RUNNING','PROVISIONING')",run.get("stage_run_id"));
     }
 
     private String frontendType(String type) {

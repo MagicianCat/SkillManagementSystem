@@ -9,6 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import com.company.skillplatform.agentworkflow.application.ResolvedSkillService;
 import com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService;
@@ -147,8 +148,10 @@ public class RuntimeCommandDispatcher {
 
     private void send(Long commandRowId) {
         Map<String, Object> context = jdbc.queryForMap("select c.command_id,ar.id agent_run_id,ar.node_key,"
-                + "ar.profile_version_id,ar.session_id,s.id stage_run_id,w.id workflow_run_id,w.project_id,p.project_key,w.started_by,w.initial_request,w.context_snapshot_json,"
+                + "ar.profile_version_id,ar.session_id,s.id stage_run_id,s.stage_key,s.input_snapshot_json,w.id workflow_run_id,w.project_id,p.project_key,w.started_by,w.initial_request,w.context_snapshot_json,"
                 + "v.system_prompt,v.model_code,v.temperature,v.max_iteration_per_run,v.timeout_seconds,v.output_schema_json,v.runtime_config_json,ap.code profile_code,"
+                + "(select nd.workflow_role from stage_agent_node_def nd join workflow_stage_def sd on sd.id=nd.stage_def_id join workflow_template_version tv on tv.id=sd.workflow_version_id join workflow_template wt on wt.id=tv.workflow_template_id where wt.code=w.workflow_code and tv.version_no=w.workflow_version and sd.stage_key=s.stage_key and nd.node_key=ar.node_key limit 1) workflow_role,"
+                + "(select sd.artifact_type from workflow_stage_def sd join workflow_template_version tv on tv.id=sd.workflow_version_id join workflow_template wt on wt.id=tv.workflow_template_id where wt.code=w.workflow_code and tv.version_no=w.workflow_version and sd.stage_key=s.stage_key limit 1) artifact_type,"
                 + "(select nd.protocol_prompt from stage_agent_node_def nd join workflow_stage_def sd on sd.id=nd.stage_def_id join workflow_template_version tv on tv.id=sd.workflow_version_id join workflow_template wt on wt.id=tv.workflow_template_id where wt.code=w.workflow_code and tv.version_no=w.workflow_version and sd.stage_key=s.stage_key and nd.node_key=ar.node_key limit 1) workflow_protocol_prompt,"
                 + "(select nd.output_schema_json from stage_agent_node_def nd join workflow_stage_def sd on sd.id=nd.stage_def_id join workflow_template_version tv on tv.id=sd.workflow_version_id join workflow_template wt on wt.id=tv.workflow_template_id where wt.code=w.workflow_code and tv.version_no=w.workflow_version and sd.stage_key=s.stage_key and nd.node_key=ar.node_key limit 1) workflow_output_schema_json "
                 + "from runtime_command c join agent_workflow_run ar on ar.id=c.aggregate_id "
@@ -160,15 +163,24 @@ public class RuntimeCommandDispatcher {
         long sessionId = number(context, "session_id");
         long agentRunId = number(context, "agent_run_id");
         Map<String, Object> workspace = ensureRuntime(commandId, projectId, stageRunId);
-        String conversationId = ensureConversation(commandId, sessionId, agentRunId, workspace, context);
+        String conversationId;
+        try {
+            conversationId = ensureConversation(commandId, sessionId, agentRunId, workspace, context);
+        } catch (HttpClientErrorException.NotFound staleRuntime) {
+            workspace = recreateRuntime(commandId, projectId, stageRunId);
+            conversationId = ensureConversation(commandId, sessionId, agentRunId, workspace, context);
+        }
         String runMcpToken = agentRuns.issueWorkflowRun(number(context,"started_by"), String.valueOf(context.get("project_key")),
                 String.valueOf(context.get("profile_code")), number(context,"workflow_run_id"), stageRunId, agentRunId).token();
+        Map<String,Object> manifest = new LinkedHashMap<>();
+        manifest.put("projectId", projectId);
+        manifest.put("workflowRunId", number(context, "workflow_run_id"));
+        manifest.put("stageRunId", stageRunId);
+        manifest.put("inputArtifacts", readList(String.valueOf(context.get("input_snapshot_json"))));
         Map<?, ?> run = client.post().uri("/internal/v1/conversations/{id}/runs", conversationId)
                 .header("X-SMS-Service-Token", token).contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("requestId", commandId + ":run", "agentRunId", agentRunId,
-                        "message", instruction(context), "contextManifest",
-                        Map.of("projectId", projectId, "workflowRunId", number(context, "workflow_run_id"),
-                        "stageRunId", stageRunId), "mcpToken", runMcpToken))
+                        "message", instruction(context), "contextManifest", manifest, "mcpToken", runMcpToken))
                 .retrieve().body(Map.class);
         jdbc.update("update agent_workflow_run set runtime_run_id=?,runtime_conversation_id=?,status='RUNNING',"
                         + "started_at=coalesce(started_at,now(3)),time_updated=now(3) where id=?",
@@ -179,14 +191,18 @@ public class RuntimeCommandDispatcher {
         List<Map<String, Object>> existing = jdbc.queryForList(
                 "select runtime_id,workspace_id from runtime_workspace_binding where stage_run_id=?", stageRunId);
         if (!existing.isEmpty()) return existing.get(0);
+        return recreateRuntime(commandId,projectId,stageRunId);
+    }
+
+    private Map<String,Object> recreateRuntime(String commandId,long projectId,long stageRunId) {
         Map<?, ?> created = client.post().uri("/internal/v1/runtimes")
                 .header("X-SMS-Service-Token", token).contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("requestId", commandId + ":runtime", "projectId", String.valueOf(projectId),
+                .body(Map.of("requestId", commandId + ":runtime:"+UUID.randomUUID(), "projectId", String.valueOf(projectId),
                         "stageRunId", String.valueOf(stageRunId), "source", Map.of("type", "EMPTY"), "resource", Map.of()))
                 .retrieve().body(Map.class);
         String runtimeId = String.valueOf(created == null ? null : created.get("runtimeId"));
         jdbc.update("insert into runtime_workspace_binding(time_created,time_updated,stage_run_id,status,runtime_id) "
-                + "values(now(3),now(3),?,'ACTIVE',?)", stageRunId, runtimeId);
+                + "values(now(3),now(3),?,'ACTIVE',?) on duplicate key update runtime_id=values(runtime_id),workspace_id=null,status='ACTIVE',time_updated=now(3)", stageRunId, runtimeId);
         return jdbc.queryForMap("select runtime_id,workspace_id from runtime_workspace_binding where stage_run_id=?",
                 stageRunId);
     }
@@ -210,6 +226,12 @@ public class RuntimeCommandDispatcher {
         agent.put("outputSchema", workflowSchema == null ? readJson(String.valueOf(context.get("output_schema_json"))) : readJson(String.valueOf(workflowSchema)));
         agent.put("runtimeConfig", readJson(String.valueOf(context.get("runtime_config_json"))));
         agent.put("workflowProtocolPrompt", String.valueOf(context.getOrDefault("workflow_protocol_prompt", "")));
+        agent.put("workflowRole", context.get("workflow_role"));
+        agent.put("artifactType", context.get("artifact_type"));
+        if ("REVIEWER".equalsIgnoreCase(String.valueOf(context.get("workflow_role")))) {
+            List<Long> revisions=jdbc.query("select b.project_document_revision_id from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc,b.id desc limit 1",(rs,n)->rs.getLong(1),context.get("stage_run_id"),context.get("artifact_type"));
+            agent.put("expectedRevisionIds",revisions);
+        }
         agent.put("tools", tools);
         agent.put("skills", resolvedSkills);
         agent.put("mcp",Map.of("url",mcpUrl,"smsToken",mcpToken));
@@ -229,9 +251,28 @@ public class RuntimeCommandDispatcher {
     }
 
     private String instruction(Map<String, Object> context) {
-        StringBuilder instruction=new StringBuilder("Execute Requirement workflow node '").append(context.get("node_key")).append("'. Initial request:\n").append(context.get("initial_request"));
-        if("writer".equals(context.get("node_key"))){List<Map<String,Object>> review=jdbc.queryForList("select result_json from agent_workflow_run where stage_run_id=? and node_key='reviewer' and result_code='REVISION_REQUIRED' order by id desc limit 1",context.get("stage_run_id"));if(!review.isEmpty()){instruction.append("\nAddress this reviewer result: ").append(review.get(0).get("result_json"));List<Map<String,Object>> artifact=jdbc.queryForList("select b.project_document_id artifactId,d.version_no versionNo,b.project_document_revision_id revisionId from workflow_artifact_binding b join project_document d on d.id=b.project_document_id join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind='REQUIREMENT' and b.relation_type='OUTPUT' order by r.revision_no desc limit 1",context.get("stage_run_id"));instruction.append("\nUpdate exactly this existing artifact using artifactId and versionNo: ").append(writeJson(artifact.isEmpty()?Map.of():artifact.get(0)));}}
-        if("reviewer".equals(context.get("node_key"))){List<Map<String,Object>> artifact=jdbc.queryForList("select b.project_document_id,b.project_document_revision_id,r.revision_no from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind='REQUIREMENT' and b.relation_type='OUTPUT' order by r.revision_no desc limit 1",context.get("stage_run_id"));instruction.append("\nReview exactly this latest artifact: ").append(writeJson(artifact.isEmpty()?Map.of():artifact.get(0)));}
+        String stage = String.valueOf(context.getOrDefault("stage_key", "design"));
+        String role = String.valueOf(context.getOrDefault("workflow_role", ""));
+        String artifactKind = String.valueOf(context.getOrDefault("artifact_type", "REQUIREMENT"));
+        StringBuilder instruction = new StringBuilder("Execute ").append(stage).append(" workflow node '")
+                .append(context.get("node_key")).append("'. Initial request:\n").append(context.get("initial_request"));
+        List<?> inputs = readList(String.valueOf(context.get("input_snapshot_json")));
+        if (!inputs.isEmpty()) {
+            instruction.append("\nRequired upstream artifacts (immutable input revisions): ")
+                    .append(writeJson(inputs))
+                    .append("\nRead every listed documentId/revisionId with get_project_artifact before doing the task. "
+                            + "Use exactly these revisions; do not substitute a newer project document.");
+        }
+        if ("AUTHOR".equalsIgnoreCase(role) || "writer".equals(context.get("node_key"))) {
+            List<Map<String,Object>> review = jdbc.queryForList("select result_json from agent_workflow_run where stage_run_id=? and node_key='reviewer' and result_code='REVISION_REQUIRED' order by id desc limit 1", context.get("stage_run_id"));
+            if (!review.isEmpty()) instruction.append("\nAddress this reviewer result: ").append(review.get(0).get("result_json"));
+            List<Map<String,Object>> artifact = jdbc.queryForList("select b.project_document_id artifactId,d.version_no versionNo,b.project_document_revision_id revisionId from workflow_artifact_binding b join project_document d on d.id=b.project_document_id join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc limit 1", context.get("stage_run_id"), artifactKind);
+            if (!artifact.isEmpty()) instruction.append("\nUpdate exactly this existing artifact using artifactId and versionNo: ").append(writeJson(artifact.get(0)));
+        }
+        if ("REVIEWER".equalsIgnoreCase(role) || "reviewer".equals(context.get("node_key"))) {
+            List<Map<String,Object>> artifact = jdbc.queryForList("select b.project_document_id,b.project_document_revision_id,r.revision_no from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc limit 1", context.get("stage_run_id"), artifactKind);
+            instruction.append("\nReview exactly this latest artifact: ").append(writeJson(artifact.isEmpty()?Map.of():artifact.get(0)));
+        }
         return instruction.toString();
     }
 
@@ -239,5 +280,6 @@ public class RuntimeCommandDispatcher {
         return ((Number) values.get(key)).longValue();
     }
     @SuppressWarnings("unchecked") private Map<?,?> readJson(String value){try{Map<?,?> result=json.readValue(value,Map.class);return result==null?Map.of():result;}catch(Exception failure){return Map.of();}}
+    @SuppressWarnings("unchecked") private List<?> readList(String value){try{List<?> result=json.readValue(value,List.class);return result==null?List.of():result;}catch(Exception failure){return List.of();}}
     private String writeJson(Object value){try{return json.writeValueAsString(value);}catch(Exception failure){return "{}";}}
 }
