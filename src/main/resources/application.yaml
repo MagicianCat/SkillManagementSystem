@@ -74,6 +74,39 @@ management:
     health:
       show-details: when_authorized
 
+knowledge:
+  enabled: ${KNOWLEDGE_ENABLED:true}
+  qdrant:
+    base-url: ${QDRANT_BASE_URL:http://127.0.0.1:6333}
+    api-key: ${QDRANT_API_KEY:}
+    collection: ${QDRANT_COLLECTION:wiki_chunks_v1}
+    connect-timeout: ${QDRANT_CONNECT_TIMEOUT:PT3S}
+    request-timeout: ${QDRANT_REQUEST_TIMEOUT:PT5S}
+  embedding:
+    url: ${KB_EMBEDDING_URL:https://tkcopilot.taikang.com/v1/tongyi/embeddings}
+    api-key: ${KB_EMBEDDING_API_KEY:}
+    model: ${KB_EMBEDDING_MODEL:qwen3-embedding-0.6b}
+    dimensions: ${KB_EMBEDDING_DIMENSIONS:1024}
+    batch-size: ${KB_EMBEDDING_BATCH_SIZE:16}
+    timeout: ${KB_EMBEDDING_TIMEOUT:PT15S}
+  rerank:
+    enabled: ${KB_RERANK_ENABLED:true}
+    url: ${KB_RERANK_URL:https://tkcopilot.taikang.com/v1/tongyi/rerank}
+    api-key: ${KB_RERANK_API_KEY:${KB_EMBEDDING_API_KEY:}}
+    model: ${KB_RERANK_MODEL:qwen3-reranker-0.6b}
+    timeout: ${KB_RERANK_TIMEOUT:PT10S}
+  search:
+    chunk-top-k: ${KB_CHUNK_TOP_K:12}
+    document-top-k: ${KB_DOCUMENT_TOP_K:5}
+    snippets-per-document: ${KB_SNIPPETS_PER_DOCUMENT:2}
+  chunk:
+    target-chars: ${KB_CHUNK_TARGET_CHARS:3000}
+    overlap-chars: ${KB_CHUNK_OVERLAP_CHARS:400}
+  reconcile:
+    enabled: ${KB_RECONCILE_ENABLED:true}
+    initial-delay-ms: ${KB_RECONCILE_INITIAL_DELAY_MS:30000}
+    fixed-delay-ms: ${KB_RECONCILE_DELAY_MS:600000}
+
 skill-platform:
   feishu:
     enabled: ${FEISHU_ENABLED:false}

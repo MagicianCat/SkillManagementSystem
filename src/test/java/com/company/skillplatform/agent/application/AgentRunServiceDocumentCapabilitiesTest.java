@@ -1,11 +1,13 @@
 package com.company.skillplatform.agent.application;
 
 import com.company.skillplatform.agent.infrastructure.repository.AgentRunRepository;
+import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.project.infrastructure.repository.DocumentAgentSessionRepository;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 class AgentRunServiceDocumentCapabilitiesTest {
@@ -22,5 +24,14 @@ class AgentRunServiceDocumentCapabilitiesTest {
 
         assertDoesNotThrow(() -> service.requireCapability(run, "wiki.search"));
         assertDoesNotThrow(() -> service.requireCapability(run, "wiki.read"));
+    }
+
+    @Test
+    void documentJobCannotUseKnowledgeSearchOutsideItsSelectedWikiContext() {
+        var run = service.issueDocumentJobRun(1L, "project", null,
+                "requirement-analysis/v1", "session", "job").run();
+
+        assertThrows(BusinessException.class,
+                () -> service.requireCapability(run, "knowledge.search"));
     }
 }

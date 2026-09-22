@@ -113,7 +113,7 @@ public class AgentRunService {
     private IssuedRun issue(AgentRun run) {
         String token = Jwts.builder().issuer("skill-platform-agent").subject(String.valueOf(run.userId()))
                 .claim("runRef", run.runRef()).claim("profileKey", run.profileKey())
-                .claim("capabilities", java.util.List.of("skill.search", "skill.detail", "skill.recommendation.submit"))
+                .claim("capabilities", java.util.List.of("skill.search", "skill.detail", "knowledge.search", "skill.recommendation.submit"))
                 .claim("knowledgeScope", run.knowledgeScope())
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(run.expiresAt())).signWith(key).compact();
         return new IssuedRun(run, token);
@@ -166,7 +166,7 @@ public class AgentRunService {
         if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of("wiki.search", "wiki.read", "feishu.read", "workflow.human_input.request").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
-                "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
+                "knowledge.search", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
             throw new BusinessException("AGENT_CAPABILITY_DENIED", "Agent capability is not allowed", HttpStatus.FORBIDDEN);
         }
     }

@@ -19,6 +19,7 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,15 +36,16 @@ public class WikiDocumentService {
     private final ScopedRoleAssignmentRepository scopedRoles;
     private final IamUserRepository users;
     private final AuditService audit;
+    private final ApplicationEventPublisher events;
     private WikiDocumentReviewRepository reviewRepository;
 
     public WikiDocumentService(WikiDocumentRepository documents, WikiDocumentRevisionRepository revisions,
             WikiDocumentSkillRepository links, SkillRepository skills, SkillOwnerRepository owners,
             OrgTeamRepository teams, OrgTeamMemberRepository members, ScopedRoleAssignmentRepository scopedRoles,
-            IamUserRepository users, AuditService audit) {
+            IamUserRepository users, AuditService audit, ApplicationEventPublisher events) {
         this.documents = documents; this.revisions = revisions; this.links = links; this.skills = skills;
         this.owners = owners; this.teams = teams; this.members = members; this.scopedRoles = scopedRoles;
-        this.users = users; this.audit = audit;
+        this.users = users; this.audit = audit; this.events = events;
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -151,6 +153,7 @@ public class WikiDocumentService {
         document.setCurrentRevision(revision, actor); documents.save(document);
         saveLinks(document, selected, type);
         audit.success("WIKI_DOCUMENT_CREATED", actor, "WIKI_DOCUMENT", document.getId(), requestId, null, Map.of("documentType", type), Map.of());
+        events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(document.getId(), com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         return view(document);
     }
 
@@ -163,6 +166,7 @@ public class WikiDocumentService {
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, next, value, sha256(value), actor));
         document.setCurrentRevision(revision, actor); documents.saveAndFlush(document);
         audit.success("WIKI_DOCUMENT_UPDATED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of("revisionNo", next), Map.of());
+        events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         return view(document);
     }
 
@@ -176,11 +180,12 @@ public class WikiDocumentService {
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, next, source.getMarkdownContent(), sha256(source.getMarkdownContent()), actor));
         document.setCurrentRevision(revision, actor); documents.saveAndFlush(document);
         audit.success("WIKI_DOCUMENT_RESTORED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of("sourceRevisionId", revisionId, "revisionNo", next), Map.of());
+        events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         return view(document);
     }
 
     @Transactional
-    public void archive(Long id, Long userId, String requestId) { WikiDocumentEntity d = editable(id, userId); IamUserEntity actor = user(userId); d.archive(actor); documents.save(d); audit.success("WIKI_DOCUMENT_ARCHIVED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of(), Map.of()); }
+    public void archive(Long id, Long userId, String requestId) { WikiDocumentEntity d = editable(id, userId); IamUserEntity actor = user(userId); d.archive(actor); documents.save(d); audit.success("WIKI_DOCUMENT_ARCHIVED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of(), Map.of()); events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.DELETE)); }
 
     @Transactional(readOnly = true)
     public List<PromotionDocument> validatePromotion(Long skillId, Long teamId, List<Long> requestedIds) {
@@ -196,7 +201,7 @@ public class WikiDocumentService {
         }
         return selected.stream().collect(Collectors.toMap(WikiDocumentEntity::getId, d -> new PromotionDocument(d, d.getCurrentRevision()), (a,b) -> a, LinkedHashMap::new)).values().stream().toList();
     }
-    @Transactional public void promoteDocuments(List<Long> documentIds, Long actorId) { IamUserEntity actor=user(actorId); for(Long id:documentIds) documents.findById(id).filter(d->"ACTIVE".equals(d.getStatus())).ifPresent(d->{d.publishToPlatform(actor);documents.save(d);}); }
+    @Transactional public void promoteDocuments(List<Long> documentIds, Long actorId) { IamUserEntity actor=user(actorId); for(Long id:documentIds) documents.findById(id).filter(d->"ACTIVE".equals(d.getStatus())).ifPresent(d->{d.publishToPlatform(actor);documents.save(d);events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));}); }
 
     public boolean canEdit(WikiDocumentEntity document, Long userId) {
         if (isAdmin()) return true;

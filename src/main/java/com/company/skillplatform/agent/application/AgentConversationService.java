@@ -106,12 +106,13 @@ public class AgentConversationService {
         String phase=string(data.get("phase"));
         String message=switch(phase==null?"":phase){
             case "CONTEXT"->"正在确认你的团队和知识权限";
+            case "SEARCHING_KNOWLEDGE"->"正在检索相关研发知识";
             case "SEARCHING_DOCUMENTS"->"正在检索相关飞书文档";
             case "READING_DOCUMENTS"->"正在读取可访问的业务资料";
             case "COMPOSING"->"资料检索完成，正在整理回答";
             default->"正在处理…";
         };
-        return Map.of("runKey",data.get("runKey"),"phase",Set.of("CONTEXT","SEARCHING_DOCUMENTS","READING_DOCUMENTS","COMPOSING").contains(phase)?phase:"COMPOSING","message",message);
+        return Map.of("runKey",data.get("runKey"),"phase",Set.of("CONTEXT","SEARCHING_KNOWLEDGE","SEARCHING_DOCUMENTS","READING_DOCUMENTS","COMPOSING").contains(phase)?phase:"COMPOSING","message",message);
     }
     private Map<String,Object>safeToolData(Map<String,Object>data){Map<String,Object>safe=new LinkedHashMap<>();safe.put("runKey",data.get("runKey"));if(data.get("callId")!=null)safe.put("callId",data.get("callId"));if(data.get("toolName")!=null)safe.put("toolName",data.get("toolName"));if(data.get("arguments")!=null){String value=String.valueOf(data.get("arguments"));safe.put("argumentsSummary",value.substring(0,Math.min(1000,value.length())));}if(data.get("success")!=null)safe.put("success",data.get("success"));if(data.get("errorCode")!=null)safe.put("errorCode",data.get("errorCode"));return safe;}
     private String string(Object value){return value==null?null:String.valueOf(value);}

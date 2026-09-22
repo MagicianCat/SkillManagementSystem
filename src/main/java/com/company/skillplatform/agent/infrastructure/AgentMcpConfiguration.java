@@ -17,6 +17,7 @@ import com.company.skillplatform.agent.application.AgentEventHub;
 import com.company.skillplatform.project.application.ProjectControlService;
 import com.company.skillplatform.project.application.DocumentAgentSessionService;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
+import com.company.skillplatform.knowledge.application.KnowledgeSearchService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapper;
@@ -61,6 +62,7 @@ public class AgentMcpConfiguration {
     private final com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse;
     private final RestClient workflowGateway;
     private final String workflowServiceToken;
+    private final KnowledgeSearchService knowledge;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
@@ -68,11 +70,11 @@ public class AgentMcpConfiguration {
                                  AgentFeishuCallGuard feishuGuard, ProjectControlService projectControl, DocumentAgentSessionService documentAgents,
                                  JdbcTemplate jdbc, com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents,
                                  com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse,
-                                 RestClient.Builder restClientBuilder,
+                                 RestClient.Builder restClientBuilder, KnowledgeSearchService knowledge,
                                  @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:18080}") String gatewayUrl,
                                  @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String workflowServiceToken,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.knowledge=knowledge;
     }
 
     @Bean
@@ -83,7 +85,7 @@ public class AgentMcpConfiguration {
                 .contextExtractor(req -> io.modelcontextprotocol.common.McpTransportContext.create(Map.of("request", req)))
                 .maxRequestSize(256 * 1024).build();
         McpSyncServer server = McpServer.sync(transport).serverInfo("skill-platform", "1.0")
-                .instructions("Use skill search/detail tools, then submit one structured recommendation.")
+                .instructions("Use search_knowledge first for natural-language Wiki and Skill discovery; use legacy search/read tools only when needed, then submit one structured recommendation.")
                 .tools(tool("get_current_user_context", "Get the current user's visible teams before recommending skills.",
                         schema("object", List.of()), this::currentUserContext),
                         tool("search_skills", "Search published skills by development stage, platform and OS.",
@@ -94,6 +96,8 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of()), this::searchWiki),
                         tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document.",
                                 schema("object", List.of("documentId")), this::wikiDocument),
+                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token.",
+                                knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
                         tool("get_feishu_document", "Read a readable Feishu Docs document. Use docType from search results; never call this for readable=false.",
@@ -150,6 +154,13 @@ public class AgentMcpConfiguration {
         props.put("choices", Map.of("type", "array", "items", Map.of("type", "string", "minLength", 1, "maxLength", 500), "maxItems", 10));
         return new McpSchema.JsonSchema(type, props, required, false, Map.of(), Map.of());
     }
+    private McpSchema.JsonSchema knowledgeSearchSchema() {
+        Map<String,Object> props=new LinkedHashMap<>();
+        props.put("query",Map.of("type","string","minLength",1,"maxLength",1000));
+        props.put("developmentStage",Map.of("type","string","enum",Arrays.stream(DevelopmentStage.values()).map(Enum::name).toList()));
+        props.put("limit",Map.of("type","integer","minimum",1,"maximum",10,"default",5));
+        return new McpSchema.JsonSchema("object",props,List.of("query"),false,Map.of(),Map.of());
+    }
     private McpSchema.JsonSchema recommendationSchema() {
         Map<String,Object> itemProperties=new LinkedHashMap<>();
         itemProperties.put("skillKey",Map.of("type","string","minLength",1,"maxLength",64));
@@ -185,6 +196,7 @@ public class AgentMcpConfiguration {
         return ok(Map.of("userId", agent.userId(), "knowledgeScope", agent.knowledgeScope(), "teams", teams,
                 "rankingRule", "Prefer skills linked from the current user's team Wiki; never infer access to another team."));
     }
+    private McpSchema.CallToolResult searchKnowledge(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args){var agent=run(ex,"knowledge.search");String query=required(args,"query");String stage=str(args,"developmentStage");if(stage!=null)DevelopmentStage.valueOf(stage);return ok(knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,integer(args,"limit",5)));}
     private McpSchema.CallToolResult detail(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "skill.detail"); String key = required(args,"skillKey"); var view = skills.get(key); String content = readText(key, "skill.md", integer(args,"offset",0), bounded(args));
         var docs = "PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ? List.of() : wiki.search(agent.userId(), null, key, null, null, PageRequest.of(0, 20)).items();
