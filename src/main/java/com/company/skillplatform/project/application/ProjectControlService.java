@@ -24,7 +24,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ProjectControlService {
-    private static final Set<String> DOCUMENT_TYPES = Set.of("REQUIREMENT", "PRD", "ARCHITECTURE", "UI_DESIGN");
+    // MOCK（mock/dev-pipeline-demo）：追加 DETAILED_DESIGN/TEST_CASES/DEPLOY_CHECKLIST 供录制产物入库。
+    private static final Set<String> DOCUMENT_TYPES = Set.of("REQUIREMENT", "PRD", "ARCHITECTURE", "UI_DESIGN", "DETAILED_DESIGN", "TEST_CASES", "DEPLOY_CHECKLIST");
     private static final Set<String> ROLES = Set.of("OWNER", "MAINTAINER", "MEMBER");
     private final VirtualProjectRepository projects;
     private final VirtualProjectMemberRepository members;
