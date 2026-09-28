@@ -49,4 +49,5 @@ class FeishuUserTokenServiceTest {
         assertThat(service.accessTokenFor(7L)).isEqualTo("access-token");
         assertThat(credential.getStatus()).isEqualTo("AUTHORIZED");
     }
+
 }

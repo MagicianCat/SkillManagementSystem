@@ -103,6 +103,61 @@ class FeishuDocumentMcpProxyTest {
     }
 
     @Test
+    void identifiesWikiFileNodesAsUnsupportedWithoutDownloading() {
+        server.createContext("/open-apis/wiki/v2/spaces/get_node", exchange -> {
+            byte[] response = "{\"code\":0,\"data\":{\"node\":{\"obj_token\":\"file-token\",\"obj_type\":\"file\",\"title\":\"需求附件.txt\"}}}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length); exchange.getResponseBody().write(response); exchange.close();
+        });
+        server.start();
+        when(tokens.accessTokenFor(7L)).thenReturn("user-token");
+        String origin = "http://127.0.0.1:" + server.getAddress().getPort();
+        FeishuDocumentMcpProxy proxy = new FeishuDocumentMcpProxy(tokens, new ObjectMapper(), origin + "/mcp", origin + "/open-apis");
+
+        JsonNode result = proxy.fetch(7L, "EbfgwgBlIiALfUkzaUic8ElcnGe", "WIKI", 0, 1024);
+        assertThat(result.path("docType").asText()).isEqualTo("WIKI");
+        assertThat(result.path("resolvedDocType").asText()).isEqualTo("FILE");
+        assertThat(result.path("readable").asBoolean()).isFalse();
+        assertThat(result.path("title").asText()).isEqualTo("需求附件.txt");
+        assertThat(result.path("message").asText()).isEqualTo("暂不支持该类型文件");
+    }
+
+    @Test
+    void resolvesNativeDocxUrlThroughFeishuMcp() {
+        server.createContext("/mcp", exchange -> {
+            String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String responseBody;
+            if (request.contains("\"method\":\"initialize\"")) {
+                exchange.getResponseHeaders().add("mcp-session-id", "session-1");
+                responseBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+            } else if (request.contains("\"method\":\"tools/list\"")) {
+                responseBody = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"search-doc\"},{\"name\":\"fetch-doc\"}]}}";
+            } else {
+                assertThat(request).contains("\"doc_id\":\"CFR9dAG8soz0BzxLgpvcBgXVnhh\"");
+                responseBody = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"document-content\"}]}}";
+            }
+            byte[] response = responseBody.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length); exchange.getResponseBody().write(response); exchange.close();
+        });
+        server.createContext("/open-apis/drive/v1/metas/batch_query", exchange -> {
+            assertThat(exchange.getRequestHeaders().getFirst("Authorization")).isEqualTo("Bearer user-token");
+            String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(request).contains("\"doc_token\":\"CFR9dAG8soz0BzxLgpvcBgXVnhh\"").contains("\"doc_type\":\"docx\"");
+            byte[] response = "{\"code\":0,\"data\":{\"metas\":[{\"doc_token\":\"CFR9dAG8soz0BzxLgpvcBgXVnhh\",\"doc_type\":\"docx\",\"title\":\"Agent 配置设计说明\"}]}}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length); exchange.getResponseBody().write(response); exchange.close();
+        });
+        server.start();
+        when(tokens.accessTokenFor(7L)).thenReturn("user-token");
+        String origin = "http://127.0.0.1:" + server.getAddress().getPort();
+        FeishuDocumentMcpProxy proxy = new FeishuDocumentMcpProxy(tokens, new ObjectMapper(), origin + "/mcp", origin + "/open-apis");
+
+        JsonNode result = proxy.resolveDocumentUrl(7L, "https://tkhome.feishu.cn/docx/CFR9dAG8soz0BzxLgpvcBgXVnhh");
+        assertThat(result.path("docId").asText()).isEqualTo("CFR9dAG8soz0BzxLgpvcBgXVnhh");
+        assertThat(result.path("docType").asText()).isEqualTo("DOCX");
+        assertThat(result.path("readable").asBoolean()).isTrue();
+        assertThat(result.path("title").asText()).isEqualTo("Agent 配置设计说明");
+    }
+
+    @Test
     void unsupportedDocumentTypesDoNotCallUpstream() {
         when(tokens.accessTokenFor(7L)).thenReturn("user-token");
         FeishuDocumentMcpProxy proxy = new FeishuDocumentMcpProxy(tokens, new ObjectMapper(), "http://127.0.0.1:1/mcp", "http://127.0.0.1:1/open-apis");
