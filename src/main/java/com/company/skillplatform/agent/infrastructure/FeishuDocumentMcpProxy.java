@@ -190,20 +190,66 @@ public class FeishuDocumentMcpProxy {
         try {
             // Feishu rejects more than 50 children per request (code 99992402), so write in batches.
             final int BATCH = 50;
-            String[] lines = (markdown==null?"":markdown).split("\\R",-1);
             String base = apiBaseUrl.replaceAll("/$", "");
             String url = base + "/docx/v1/documents/" + URLEncoder.encode(documentToken,StandardCharsets.UTF_8) + "/blocks/" + URLEncoder.encode(documentToken,StandardCharsets.UTF_8) + "/children";
-            for (int start = 0; start < lines.length; start += BATCH) {
+            List<ObjectNode> blocks = markdownToBlocks(markdown);
+            for (int start = 0; start < blocks.size(); start += BATCH) {
                 ArrayNode children = json.createArrayNode();
-                for (int i = start; i < Math.min(lines.length, start + BATCH); i++) {
-                    ObjectNode block = json.createObjectNode().put("block_type",2);
-                    block.putObject("text").putArray("elements").addObject().putObject("text_run").put("content",lines[i]);
-                    children.add(block);
-                }
+                for (int i = start; i < Math.min(blocks.size(), start + BATCH); i++) children.add(blocks.get(i));
                 request("POST", url, json.createObjectNode().set("children",children), userToken(userId));
             }
         }
         catch(BusinessException e){throw e;} catch(Exception e){throw new BusinessException("FEISHU_PUBLICATION_FAILED","Feishu DOCX block writing failed",HttpStatus.BAD_GATEWAY);}
+    }
+
+    /** Parses a small markdown subset into Feishu DOCX blocks so published documents render as
+     *  real headings/lists/quotes/code instead of raw "#"/"-" text. Falls back to a text block. */
+    private List<ObjectNode> markdownToBlocks(String markdown) {
+        List<ObjectNode> blocks = new ArrayList<>();
+        if (markdown == null || markdown.isBlank()) return blocks;
+        String[] lines = markdown.split("\\R", -1);
+        StringBuilder codeBuf = null;
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("```")) {
+                if (codeBuf == null) { codeBuf = new StringBuilder(); }
+                else { blocks.add(codeBlock(codeBuf.toString())); codeBuf = null; }
+                continue;
+            }
+            if (codeBuf != null) { if (codeBuf.length() > 0) codeBuf.append('\n'); codeBuf.append(line); continue; }
+            blocks.add(lineToBlock(line));
+        }
+        if (codeBuf != null) blocks.add(codeBlock(codeBuf.toString())); // unclosed fence
+        return blocks;
+    }
+
+    private ObjectNode lineToBlock(String line) {
+        String t = line.trim();
+        java.util.function.Function<String, ObjectNode> textBlock = (content) -> block(2, "text", content);
+        java.util.regex.Matcher m;
+        if (t.isEmpty()) return textBlock.apply("");
+        if ((m = java.util.regex.Pattern.compile("^(#{1,9})\\s+(.*)$").matcher(t)).matches()) {
+            int level = Math.min(m.group(1).length(), 9);
+            return block(2 + level, "heading" + level, m.group(2)); // heading1=3 ... heading9=11
+        }
+        if ((m = java.util.regex.Pattern.compile("^[-*+]\\s+(.*)$").matcher(t)).matches()) return block(12, "bullet", m.group(1));
+        if ((m = java.util.regex.Pattern.compile("^\\d+[.)]\\s+(.*)$").matcher(t)).matches()) return block(13, "ordered", m.group(1));
+        if ((m = java.util.regex.Pattern.compile("^>\\s?(.*)$").matcher(t)).matches()) return block(15, "quote", m.group(1));
+        return textBlock.apply(line);
+    }
+
+    private ObjectNode block(int type, String key, String content) {
+        ObjectNode block = json.createObjectNode().put("block_type", type);
+        block.putObject(key).putArray("elements").addObject().putObject("text_run").put("content", content);
+        return block;
+    }
+
+    private ObjectNode codeBlock(String content) {
+        ObjectNode block = json.createObjectNode().put("block_type", 14);
+        ObjectNode code = block.putObject("code");
+        code.putArray("elements").addObject().putObject("text_run").put("content", content);
+        code.putObject("style").put("language", 1); // 1 = plaintext
+        return block;
     }
     public JsonNode mountNativeDocx(Long userId,String spaceId,String parentNodeToken,String documentToken){
         try {ObjectNode body=json.createObjectNode().put("obj_type","docx").put("obj_token",documentToken).put("parent_node_token",parentNodeToken).put("node_type","origin");JsonNode n=request("POST",apiBaseUrl.replaceAll("/$", "")+"/wiki/v2/spaces/"+URLEncoder.encode(spaceId,StandardCharsets.UTF_8)+"/nodes",body,userToken(userId));JsonNode node=n.path("data").path("node");return json.createObjectNode().put("nodeToken",firstText(node,"node_token","nodeToken","token")).put("documentUrl",firstText(node,"url"));}
