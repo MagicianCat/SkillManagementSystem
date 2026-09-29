@@ -1,6 +1,7 @@
 package com.company.skillplatform.project.application;
 
 import com.company.skillplatform.audit.application.AuditService;
+import com.company.skillplatform.agent.infrastructure.FeishuDocumentMcpProxy;
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.common.interfaces.PageResponse;
 import com.company.skillplatform.project.infrastructure.entity.*;
@@ -9,6 +10,7 @@ import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
 import com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -16,6 +18,7 @@ import java.time.*;
 import java.util.*;
 import org.springframework.data.domain.*;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -36,6 +39,9 @@ public class ProjectControlService {
     private final ObjectMapper mapper;
     private final ScopedRoleAssignmentRepository scopedRoles;
     private final ProjectWorkflowService workflow;
+    private JdbcTemplate jdbc;
+    private FeishuDocumentMcpProxy feishu;
+    private FeishuPublicationService feishuPublications;
     private final Clock clock = Clock.systemUTC();
 
     public ProjectControlService(VirtualProjectRepository projects, VirtualProjectMemberRepository members,
@@ -46,6 +52,9 @@ public class ProjectControlService {
         this.users = users; this.audit = audit; this.mapper = mapper;
         this.scopedRoles = scopedRoles; this.workflow = workflow;
     }
+    @org.springframework.beans.factory.annotation.Autowired public void setJdbc(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    @org.springframework.beans.factory.annotation.Autowired public void setFeishu(FeishuDocumentMcpProxy feishu) { this.feishu = feishu; }
+    @org.springframework.beans.factory.annotation.Autowired public void setFeishuPublications(FeishuPublicationService value) { this.feishuPublications = value; }
 
     @Transactional
     public ProjectView create(CreateProject command, Long actorId, String requestId) {
@@ -55,6 +64,7 @@ public class ProjectControlService {
         VirtualProjectEntity project = projects.save(new VirtualProjectEntity(validName(command.name()), trim(command.description(), 2000), actor));
         members.save(new VirtualProjectMemberEntity(project, actor, "OWNER", actor));
         workflow.initialize(project.getId(), command.enabledStages());
+        if (command.feishuWikiRootUrl() != null && !command.feishuWikiRootUrl().isBlank()) configureFeishuTarget(project.getProjectKey(), command.feishuWikiRootUrl(), actorId);
         audit.success("PROJECT_CREATED", actor, "VIRTUAL_PROJECT", project.getId(), requestId, Map.of(), Map.of("projectKey", project.getProjectKey()), Map.of());
         return projectView(project, actorId);
     }
@@ -199,6 +209,39 @@ public class ProjectControlService {
         }
     }
 
+    @Transactional(readOnly = true)
+    public FeishuTargetView validateFeishuTarget(String url, Long actorId) {
+        if (feishu == null) throw error("FEISHU_NOT_CONFIGURED", "Feishu integration is not available", HttpStatus.SERVICE_UNAVAILABLE);
+        JsonNode node = feishu.validatePublishTarget(actorId, url);
+        return new FeishuTargetView(false, node.path("url").asText(url), node.path("spaceId").asText(""), node.path("nodeToken").asText(""), node.path("title").asText(""), null, false);
+    }
+
+    @Transactional
+    public FeishuTargetView configureFeishuTarget(String key, String url, Long actorId) {
+        VirtualProjectEntity project = access(key, actorId); requireRole(project, actorId, "OWNER");
+        FeishuTargetView existing = feishuTarget(key, actorId);
+        Integer started = jdbc.queryForObject("select count(*) from workflow_run where project_id=?", Integer.class, project.getId());
+        if ((url == null || url.isBlank()) && !started.equals(0)) throw error("FEISHU_TARGET_LOCKED", "The Feishu publication root cannot be removed after workflow start", HttpStatus.CONFLICT);
+        if (url == null || url.isBlank()) { jdbc.update("delete from project_feishu_publish_target where project_id=?", project.getId()); return feishuTarget(key, actorId); }
+        if (existing.configured() && !existing.url().equals(url.trim()) && !started.equals(0)) throw error("FEISHU_TARGET_LOCKED", "The Feishu publication root cannot be changed after workflow start", HttpStatus.CONFLICT);
+        FeishuTargetView checked = validateFeishuTarget(url, actorId);
+        jdbc.update("insert into project_feishu_publish_target(time_created,time_updated,project_id,source_url,space_id,parent_node_token,title,validated_by,validated_at,status) values(now(3),now(3),?,?,?,?,?,?,now(3),'ACTIVE') on duplicate key update time_updated=now(3),source_url=values(source_url),validated_by=values(validated_by),validated_at=values(validated_at),title=values(title),space_id=values(space_id),parent_node_token=values(parent_node_token),status='ACTIVE'", project.getId(), checked.url(), checked.spaceId(), checked.nodeToken(), checked.title(), actorId);
+        if (feishuPublications != null) feishuPublications.enqueueForProject(project.getId());
+        return feishuTarget(key, actorId);
+    }
+
+    @Transactional(readOnly = true)
+    public FeishuTargetView feishuTarget(String key, Long actorId) {
+        VirtualProjectEntity project = access(key, actorId);
+        List<Map<String,Object>> rows = jdbc.queryForList("select source_url,space_id,parent_node_token,title,validated_at from project_feishu_publish_target where project_id=? and status='ACTIVE'", project.getId());
+        if (rows.isEmpty()) return new FeishuTargetView(false, null, null, null, null, null, canEditTarget(project, actorId));
+        Integer started = jdbc.queryForObject("select count(*) from workflow_run where project_id=?", Integer.class, project.getId());
+        boolean editable = canEditTarget(project, actorId) && started != null && started == 0;
+        Map<String,Object> r = rows.get(0); return new FeishuTargetView(true, String.valueOf(r.get("source_url")), String.valueOf(r.get("space_id")), String.valueOf(r.get("parent_node_token")), String.valueOf(r.get("title")), r.get("validated_at"), editable);
+    }
+
+    private boolean canEditTarget(VirtualProjectEntity p, Long actorId) { return "OWNER".equals(members.findByProjectIdAndUserId(p.getId(), actorId).map(VirtualProjectMemberEntity::getRoleKey).orElse(isAdmin() ? "OWNER" : "")); }
+
     private ProjectDocumentRevisionEntity saveRevision(ProjectDocumentEntity document, String content, String sourceType, String profileKey, String sessionId, String jobId, Object snapshots, Object assumptions, Object questions, List<Long> sourceDocumentIds, IamUserEntity actor) {
         String value = validContent(content); int next = (int) revisions.countByDocumentId(document.getId()) + 1;
         ProjectDocumentRevisionEntity revision = revisions.save(new ProjectDocumentRevisionEntity(document, next, value, sha256(value), sourceType == null ? "HUMAN" : sourceType, profileKey, sessionId, jobId, json(snapshots), json(assumptions), json(questions), actor));
@@ -234,8 +277,9 @@ public class ProjectControlService {
     private BusinessException conflict() { return error("OPTIMISTIC_LOCK_CONFLICT", "Resource version is stale", HttpStatus.CONFLICT); }
     private BusinessException error(String code, String message, HttpStatus status) { return new BusinessException(code, message, status); }
 
-    public record CreateProject(String name, String description, List<String> enabledStages) {
+    public record CreateProject(String name, String description, List<String> enabledStages, String feishuWikiRootUrl) {
         public CreateProject(String name, String description) { this(name, description, null); }
+        public CreateProject(String name, String description, List<String> enabledStages) { this(name, description, enabledStages, null); }
     }
     public record UpdateProject(String name, String description, int versionNo) {}
     public record CreateDocument(String documentType, String title, String markdownContent, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
@@ -243,6 +287,7 @@ public class ProjectControlService {
     public record SaveDraft(String title, String markdownContent, int versionNo, String sourceType, String profileKey, String agentSessionId, String agentJobId, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
     public record PublishCommand(Long revisionId, int versionNo) {}
     public record ProjectView(String projectKey, String name, String description, String status, String role, int versionNo) {}
+    public record FeishuTargetView(boolean configured, String url, String spaceId, String nodeToken, String title, Object validatedAt, boolean editable) {}
     public record MemberView(Long userId, String displayName, String role, String status) {}
     public record DocumentView(Long id, String projectKey, String documentType, String title, String status, RevisionView draft, RevisionView published, boolean everPublished, Instant lastDraftActivityAt, int versionNo) {}
     public record RevisionView(Long id, int revisionNo, String markdownContent, String contentSha256, String sourceType, String profileKey, String agentSessionId, String agentJobId, Long createdBy, String createdByName, Instant createdAt) {}

@@ -105,6 +105,137 @@ public class FeishuDocumentMcpProxy {
         return result;
     }
 
+    /** Validates a Wiki parent node and the caller's ability to create children. */
+    public JsonNode validatePublishTarget(Long userId, String url) {
+        if (url == null || url.isBlank()) throw new BusinessException("FEISHU_WIKI_URL_INVALID", "Feishu Wiki URL is required", HttpStatus.BAD_REQUEST);
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^https://([A-Za-z0-9.-]+\\.feishu\\.cn)/wiki/([A-Za-z0-9_-]+)(?:[?#].*)?$", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(url.trim());
+        if (!matcher.matches()) throw new BusinessException("FEISHU_WIKI_URL_INVALID", "Only a Feishu Wiki URL can be used as the publication root", HttpStatus.BAD_REQUEST);
+        String token = matcher.group(2), base = apiBaseUrl.replaceAll("/$", ""), uat = userToken(userId);
+        try {
+            JsonNode nodeResponse = request("GET", base + "/wiki/v2/spaces/get_node?token=" + URLEncoder.encode(token, StandardCharsets.UTF_8), null, uat);
+            JsonNode node = nodeResponse.path("data").path("node");
+            if (!node.isObject()) node = nodeResponse.path("data");
+            String title = firstText(node, "title", "node_title", "name");
+            String space = firstText(node, "space_id", "spaceId");
+            if (space.isBlank()) space = firstText(nodeResponse.path("data"), "space_id", "spaceId");
+            JsonNode permission = request("GET", base + "/drive/v1/permissions/" + URLEncoder.encode(token, StandardCharsets.UTF_8) + "/members/auth?type=wiki&action=edit", null, uat);
+            boolean editable = permission.path("data").path("auth_result").asBoolean(false)
+                    || permission.path("data").path("authResult").asBoolean(false);
+            if (!editable) throw new BusinessException("FEISHU_WIKI_EDIT_REQUIRED", "The current Feishu user has no edit permission for this Wiki node", HttpStatus.FORBIDDEN);
+            return json.createObjectNode().put("url", url.trim()).put("nodeToken", token).put("spaceId", space).put("title", title.isBlank() ? token : title).put("editable", true);
+        } catch (BusinessException e) { throw e; }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new BusinessException("FEISHU_UPSTREAM_ERROR", "Feishu validation was interrupted", HttpStatus.BAD_GATEWAY); }
+        catch (Exception e) { throw new BusinessException("FEISHU_UPSTREAM_ERROR", "Feishu Wiki validation failed", HttpStatus.BAD_GATEWAY); }
+    }
+
+    /** Creates a native DOCX, writes editable text blocks, and mounts it below a Wiki node. */
+    public JsonNode publishNativeDocx(Long userId, String spaceId, String parentNodeToken, String title, String markdown) {
+        String base = apiBaseUrl.replaceAll("/$", ""), uat = userToken(userId);
+        try {
+            ObjectNode body = json.createObjectNode().put("title", title == null || title.isBlank() ? "项目产物" : title);
+            JsonNode created = request("POST", base + "/docx/v1/documents", body, uat);
+            JsonNode data = created.path("data"); String docToken = firstText(data, "document_id", "documentId", "token");
+            if (docToken.isBlank()) throw new IllegalStateException("Feishu did not return a DOCX token");
+            ArrayNode children = json.createArrayNode();
+            for (String line : (markdown == null ? "" : markdown).split("\\R", -1)) {
+                ObjectNode block = json.createObjectNode().put("block_type", 2);
+                ObjectNode text = block.putObject("text"); ArrayNode elements = text.putArray("elements");
+                elements.addObject().putObject("text_run").put("content", line);
+                children.add(block);
+            }
+            ObjectNode blocks = json.createObjectNode().set("children", children);
+            request("POST", base + "/docx/v1/documents/" + URLEncoder.encode(docToken, StandardCharsets.UTF_8) + "/blocks/" + URLEncoder.encode(docToken, StandardCharsets.UTF_8) + "/children", blocks, uat);
+            ObjectNode wikiBody = json.createObjectNode().put("obj_type", "docx").put("obj_token", docToken).put("parent_node_token", parentNodeToken).put("node_type", "origin");
+            JsonNode mounted = request("POST", base + "/wiki/v2/spaces/" + URLEncoder.encode(spaceId, StandardCharsets.UTF_8) + "/nodes", wikiBody, uat);
+            JsonNode mountedNode = mounted.path("data").path("node");
+            String nodeToken = firstText(mountedNode, "node_token", "nodeToken", "token");
+            String url = firstText(mountedNode, "url");
+            if (url.isBlank() && !nodeToken.isBlank()) url = "https://www.feishu.cn/wiki/" + nodeToken;
+            return json.createObjectNode().put("documentToken", docToken).put("nodeToken", nodeToken).put("documentUrl", url);
+        } catch (BusinessException e) { throw e; }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new BusinessException("FEISHU_UPSTREAM_ERROR", "Feishu publication was interrupted", HttpStatus.BAD_GATEWAY); }
+        catch (Exception e) { throw new BusinessException("FEISHU_PUBLICATION_FAILED", "Feishu native document publication failed", HttpStatus.BAD_GATEWAY); }
+    }
+
+    public String createNativeDocx(Long userId, String title) {
+        try { ObjectNode body=json.createObjectNode().put("title", title==null||title.isBlank()?"项目产物":title);
+            JsonNode data = request("POST", apiBaseUrl.replaceAll("/$", "")+"/docx/v1/documents", body, userToken(userId)).path("data");
+            String token = firstText(data,"document_id","documentId","token");
+            if (token.isBlank()) token = firstText(data.path("document"),"document_id","documentId","token");
+            return token;
+        }
+        catch (BusinessException e){throw e;} catch(Exception e){throw new BusinessException("FEISHU_PUBLICATION_FAILED","Feishu DOCX creation failed",HttpStatus.BAD_GATEWAY);}
+    }
+    /** Creates a DOCX directly under a Wiki parent node (with title), returning both tokens. This is the
+     *  correct way to publish: mounting a pre-existing docx via /nodes creates a NEW EMPTY document. */
+    public JsonNode createWikiDocx(Long userId, String spaceId, String parentNodeToken, String title) {
+        try {
+            ObjectNode body = json.createObjectNode()
+                    .put("obj_type", "docx")
+                    .put("parent_node_token", parentNodeToken)
+                    .put("node_type", "origin")
+                    .put("title", title == null || title.isBlank() ? "项目产物" : title);
+            JsonNode node = request("POST", apiBaseUrl.replaceAll("/$", "") + "/wiki/v2/spaces/" + URLEncoder.encode(spaceId, StandardCharsets.UTF_8) + "/nodes", body, userToken(userId))
+                    .path("data").path("node");
+            String objToken = firstText(node, "obj_token", "objToken");
+            String nodeToken = firstText(node, "node_token", "nodeToken", "token");
+            String url = firstText(node, "url");
+            if (url.isBlank() && !nodeToken.isBlank()) url = "https://www.feishu.cn/wiki/" + nodeToken;
+            if (objToken.isBlank()) throw new IllegalStateException("Feishu did not return a wiki DOCX token");
+            return json.createObjectNode().put("documentToken", objToken).put("nodeToken", nodeToken).put("documentUrl", url);
+        }
+        catch (BusinessException e){throw e;} catch(Exception e){throw new BusinessException("FEISHU_PUBLICATION_FAILED","Feishu wiki document creation failed",HttpStatus.BAD_GATEWAY);}
+    }
+    public void writeNativeDocx(Long userId,String documentToken,String markdown) {
+        try {
+            // Feishu rejects more than 50 children per request (code 99992402), so write in batches.
+            final int BATCH = 50;
+            String[] lines = (markdown==null?"":markdown).split("\\R",-1);
+            String base = apiBaseUrl.replaceAll("/$", "");
+            String url = base + "/docx/v1/documents/" + URLEncoder.encode(documentToken,StandardCharsets.UTF_8) + "/blocks/" + URLEncoder.encode(documentToken,StandardCharsets.UTF_8) + "/children";
+            for (int start = 0; start < lines.length; start += BATCH) {
+                ArrayNode children = json.createArrayNode();
+                for (int i = start; i < Math.min(lines.length, start + BATCH); i++) {
+                    ObjectNode block = json.createObjectNode().put("block_type",2);
+                    block.putObject("text").putArray("elements").addObject().putObject("text_run").put("content",lines[i]);
+                    children.add(block);
+                }
+                request("POST", url, json.createObjectNode().set("children",children), userToken(userId));
+            }
+        }
+        catch(BusinessException e){throw e;} catch(Exception e){throw new BusinessException("FEISHU_PUBLICATION_FAILED","Feishu DOCX block writing failed",HttpStatus.BAD_GATEWAY);}
+    }
+    public JsonNode mountNativeDocx(Long userId,String spaceId,String parentNodeToken,String documentToken){
+        try {ObjectNode body=json.createObjectNode().put("obj_type","docx").put("obj_token",documentToken).put("parent_node_token",parentNodeToken).put("node_type","origin");JsonNode n=request("POST",apiBaseUrl.replaceAll("/$", "")+"/wiki/v2/spaces/"+URLEncoder.encode(spaceId,StandardCharsets.UTF_8)+"/nodes",body,userToken(userId));JsonNode node=n.path("data").path("node");return json.createObjectNode().put("nodeToken",firstText(node,"node_token","nodeToken","token")).put("documentUrl",firstText(node,"url"));}
+        catch(BusinessException e){throw e;} catch(Exception e){throw new BusinessException("FEISHU_PUBLICATION_FAILED","Feishu Wiki mount failed",HttpStatus.BAD_GATEWAY);}
+    }
+
+    private JsonNode request(String method, String url, Object body, String uat) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(60)).header("Authorization", "Bearer " + uat);
+        HttpRequest request = "GET".equals(method) ? builder.GET().build() : builder.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body))).build();
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode payload = json.readTree(response.body());
+        if (response.statusCode() == 401 || response.statusCode() == 403) throw new BusinessException("FEISHU_AUTH_REQUIRED", "Feishu authorization is invalid", HttpStatus.FORBIDDEN);
+        if (response.statusCode() / 100 != 2 || payload.path("code").asInt(0) != 0) {
+            log.warn("event=feishu.api.rejected method={} url={} status={} body={}", method, url, response.statusCode(),
+                    response.body() == null ? "" : response.body().substring(0, Math.min(2000, response.body().length())));
+            String msg = payload.path("msg").asText("");
+            StringBuilder detail = new StringBuilder(msg);
+            JsonNode violations = payload.path("error").path("field_violations");
+            if (violations.isArray() && !violations.isEmpty()) {
+                detail.append(" [");
+                for (int i = 0; i < violations.size(); i++) {
+                    JsonNode v = violations.get(i);
+                    detail.append(i == 0 ? "" : ", ").append(v.path("field").asText("")).append(": ").append(v.path("description").asText(""));
+                }
+                detail.append("]");
+            }
+            if (detail.length() == 0) detail.append("code=").append(payload.path("code").asInt());
+            throw upstreamFailure("Feishu API request failed: " + detail, response.statusCode());
+        }
+        return payload;
+    }
+
     private String fetchDocumentTitle(Long userId, String docId, String docType) {
         try {
             Map<String, Object> body = Map.of(

@@ -106,6 +106,11 @@ public class NotificationService {
                 "FEISHU_DIRECTORY", 0L, null);
     }
 
+    @Transactional
+    public void feishuDocumentPublication(Long actorId, NotificationType type, String title, String content, Long taskId, String targetData) {
+        users.findById(actorId).ifPresent(user -> notifications.save(new UserNotificationEntity(user, type, title, content, "FEISHU_DOCUMENT_PUBLICATION", taskId, null).withTargetData(targetData)));
+    }
+
     /** Reserved orchestration hook; call after publish when version-update recommendation is enabled. */
     @Transactional
     public void versionUpdated(SkillVersionEntity version, VersionUpdateRecipientProvider provider) {
@@ -159,9 +164,9 @@ public class NotificationService {
     private static NotificationView view(UserNotificationEntity n) {
         return new NotificationView(n.getId(), n.getType(), n.getTitle(), n.getContent(), n.getTargetType(),
                 n.getTargetId(), n.getSkill() == null ? null : n.getSkill().getSkillKey(),
-                n.getVersion() == null ? null : n.getVersion().getId(), n.getReadAt(), n.getTimeCreated());
+                n.getVersion() == null ? null : n.getVersion().getId(), n.getTargetData(), n.getReadAt(), n.getTimeCreated());
     }
 
     public record NotificationView(Long id, NotificationType type, String title, String content, String targetType,
-                                   Long targetId, String skillKey, Long versionId, Instant readAt, Instant createdAt) {}
+                                   Long targetId, String skillKey, Long versionId, String targetData, Instant readAt, Instant createdAt) {}
 }

@@ -15,12 +15,18 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/v1/projects")
 public class ProjectController {
     private final ProjectControlService service;
+    private com.company.skillplatform.project.application.FeishuPublicationService publications;
     public ProjectController(ProjectControlService service) { this.service = service; }
+    @org.springframework.beans.factory.annotation.Autowired public void setPublications(com.company.skillplatform.project.application.FeishuPublicationService value){this.publications=value;}
 
     @PostMapping @ResponseStatus(HttpStatus.CREATED)
-    public ProjectControlService.ProjectView create(@Valid @RequestBody CreateProject request, Authentication auth, HttpServletRequest http) { return service.create(new ProjectControlService.CreateProject(request.name(), request.description(), request.enabledStages()), actor(auth), http.getRequestId()); }
+    public ProjectControlService.ProjectView create(@Valid @RequestBody CreateProject request, Authentication auth, HttpServletRequest http) { return service.create(new ProjectControlService.CreateProject(request.name(), request.description(), request.enabledStages(), request.feishuWikiRootUrl()), actor(auth), http.getRequestId()); }
+    @PostMapping("/feishu-publish-target:validate") public ProjectControlService.FeishuTargetView validateFeishuTarget(@RequestBody FeishuTargetRequest request, Authentication auth) { return service.validateFeishuTarget(request.url(), actor(auth)); }
     @GetMapping public PageResponse<ProjectControlService.ProjectView> list(Pageable pageable, Authentication auth) { return service.list(actor(auth), pageable); }
     @GetMapping("/{projectKey}") public ProjectControlService.ProjectView get(@PathVariable String projectKey, Authentication auth) { return service.get(projectKey, actor(auth)); }
+    @GetMapping("/{projectKey}/feishu-publish-target") public ProjectControlService.FeishuTargetView feishuTarget(@PathVariable String projectKey, Authentication auth) { return service.feishuTarget(projectKey, actor(auth)); }
+    @PutMapping("/{projectKey}/feishu-publish-target") public ProjectControlService.FeishuTargetView saveFeishuTarget(@PathVariable String projectKey, @RequestBody FeishuTargetRequest request, Authentication auth) { return service.configureFeishuTarget(projectKey, request.url(), actor(auth)); }
+    @PostMapping("/{projectKey}/feishu-publications/{taskId}:retry") public com.company.skillplatform.project.application.FeishuPublicationService.PublicationView retryFeishu(@PathVariable String projectKey,@PathVariable Long taskId,Authentication auth){Long projectId=service.projectIdForAgent(projectKey,actor(auth));return publications.retry(projectId,taskId,actor(auth));}
     @PatchMapping("/{projectKey}") public ProjectControlService.ProjectView update(@PathVariable String projectKey, @Valid @RequestBody UpdateProject request, Authentication auth, HttpServletRequest http) { return service.update(projectKey, new ProjectControlService.UpdateProject(request.name(), request.description(), request.versionNo()), actor(auth), http.getRequestId()); }
     @PostMapping("/{projectKey}:archive") @ResponseStatus(HttpStatus.NO_CONTENT) public void archive(@PathVariable String projectKey, Authentication auth, HttpServletRequest http) { service.archive(projectKey, actor(auth), http.getRequestId()); }
 
@@ -37,7 +43,8 @@ public class ProjectController {
     @PostMapping("/{projectKey}/documents/{documentId}:publish") public ProjectControlService.DocumentView publish(@PathVariable String projectKey, @PathVariable Long documentId, @Valid @RequestBody PublishRequest request, Authentication auth, HttpServletRequest http) { return service.publish(projectKey, documentId, new ProjectControlService.PublishCommand(request.revisionId(), request.versionNo()), actor(auth), http.getRequestId()); }
 
     private Long actor(Authentication auth) { return (Long) auth.getPrincipal(); }
-    public record CreateProject(@NotBlank @Size(max = 255) String name, @Size(max = 2000) String description, List<String> enabledStages) {}
+    public record CreateProject(@NotBlank @Size(max = 255) String name, @Size(max = 2000) String description, List<String> enabledStages, String feishuWikiRootUrl) {}
+    public record FeishuTargetRequest(@NotBlank String url) {}
     public record UpdateProject(@NotBlank @Size(max = 255) String name, @Size(max = 2000) String description, int versionNo) {}
     public record MemberRequest(@NotBlank String role) {}
     public record CreateDocument(@NotBlank String documentType, @NotBlank @Size(max = 255) String title, @NotBlank String markdownContent, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}

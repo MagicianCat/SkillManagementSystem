@@ -19,6 +19,7 @@ public class ProjectAgentConfigurationController {
  @GetMapping("/agent-configuration/contexts") public List<ProjectAgentConfigurationService.ContextView> contexts(@PathVariable String projectKey,Authentication a){return service.contexts(projectKey,actor(a));}
  @PostMapping("/agent-configuration/feishu-contexts:resolve") public Object resolveFeishuContext(@PathVariable String projectKey,@RequestBody ResolveFeishu r,Authentication a){return service.resolveFeishuWiki(projectKey,actor(a),r.url());}
  @PutMapping("/agent-configuration/contexts") public List<ProjectAgentConfigurationService.ContextView> replaceContexts(@PathVariable String projectKey,@RequestBody List<ProjectAgentConfigurationService.ContextRequest> r,Authentication a){return service.replaceContexts(projectKey,actor(a),r);}
+ @PostMapping("/agent-configuration/contexts:append") public List<ProjectAgentConfigurationService.ContextView> appendContexts(@PathVariable String projectKey,@RequestBody List<ProjectAgentConfigurationService.ContextRequest> r,Authentication a){return service.appendContexts(projectKey,actor(a),r);}
  @GetMapping("/agent-configuration/reusable-projects") public List<ProjectAgentConfigurationService.ReusableProject> reusable(Authentication a){return service.reusable((Long)a.getPrincipal());}
  private Long actor(Authentication a){return (Long)a.getPrincipal();} public record Preset(Long presetVersionId){} public record Copy(String sourceProjectKey,String versionStrategy){} public record Node(Long agentProfileVersionId){} public record ResolveFeishu(String url){}
 }

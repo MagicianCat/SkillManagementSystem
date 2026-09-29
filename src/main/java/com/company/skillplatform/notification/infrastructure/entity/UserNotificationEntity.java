@@ -20,6 +20,7 @@ public class UserNotificationEntity extends BaseJpaEntity {
     @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "skill_id") private SkillEntity skill;
     @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "skill_version_id") private SkillVersionEntity version;
     @Column(name = "read_at") private Instant readAt;
+    @Column(name = "target_data", columnDefinition = "json") private String targetData;
 
     protected UserNotificationEntity() {}
 
@@ -29,6 +30,7 @@ public class UserNotificationEntity extends BaseJpaEntity {
         this.targetType = targetType; this.targetId = targetId; this.version = version;
         this.skill = version == null ? null : version.getSkill();
     }
+    public UserNotificationEntity withTargetData(String value) { this.targetData = value; return this; }
 
     public void markRead(Instant now) { if (readAt == null) readAt = now; }
     public IamUserEntity getRecipient() { return recipient; }
@@ -40,5 +42,5 @@ public class UserNotificationEntity extends BaseJpaEntity {
     public SkillEntity getSkill() { return skill; }
     public SkillVersionEntity getVersion() { return version; }
     public Instant getReadAt() { return readAt; }
+    public String getTargetData() { return targetData; }
 }
-

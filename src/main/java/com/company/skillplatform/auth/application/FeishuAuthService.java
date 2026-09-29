@@ -41,7 +41,7 @@ public class FeishuAuthService {
         Duration ttl = stateTtl(); String state = jwt.createSignedState(PROVIDER, safePath, nonce, ttl);
         usedNonces.entrySet().removeIf(e -> e.getValue() < System.currentTimeMillis());
         usedNonces.put(nonce, System.currentTimeMillis() + ttl.toMillis());
-        String scope = String.join(" ", "offline_access", "drive:drive.search:readonly", "drive:drive.metadata:readonly", "docx:document:readonly", "wiki:wiki:readonly", "wiki:node:retrieve", "wiki:node:read", "wiki:space:retrieve", "wiki:node:create", "wiki:space:write_only", "docx:document:create", "docx:document:write_only", "docs:document.content:read", "docs:document.media:upload", "docs:document.media:download", "docs:doc:readonly");
+        String scope = String.join(" ", "offline_access", "drive:drive.search:readonly", "drive:drive.metadata:readonly", "docx:document:readonly", "wiki:wiki:readonly", "wiki:node:retrieve", "wiki:node:read", "wiki:space:retrieve", "wiki:node:create", "wiki:space:write_only", "docx:document:create", "docx:document:write_only", "docs:document.content:read", "docs:document.media:upload", "docs:document.media:download", "docs:doc:readonly", "docs:permission.member:auth");
         return config.authorizeUrl() + "?app_id=" + enc(config.appId()) + "&redirect_uri=" + enc(config.effectiveRedirectUri())
                 + "&response_type=code&scope=" + enc(scope) + "&state=" + enc(state);
     }
