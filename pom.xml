@@ -21,6 +21,7 @@
         <jjwt.version>0.12.6</jjwt.version>
         <semver4j.version>5.6.0</semver4j.version>
         <commons-compress.version>1.27.1</commons-compress.version>
+        <jgit.version>6.10.0.202406032230-r</jgit.version>
         <testcontainers.version>1.20.4</testcontainers.version>
         <jacoco.version>0.8.12</jacoco.version>
     </properties>
@@ -106,6 +107,11 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-compress</artifactId>
             <version>${commons-compress.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.jgit</groupId>
+            <artifactId>org.eclipse.jgit</artifactId>
+            <version>${jgit.version}</version>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>

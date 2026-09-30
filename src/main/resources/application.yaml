@@ -108,6 +108,24 @@ knowledge:
     fixed-delay-ms: ${KB_RECONCILE_DELAY_MS:600000}
 
 skill-platform:
+  git:
+    enabled: ${GIT_ENABLED:false}
+    provider: ${GIT_PROVIDER:GENERIC}
+    url-mode: ${GIT_URL_MODE:BASE_RELATIVE}
+    base-url: ${GIT_BASE_URL:}
+    allowed-hosts: ${GIT_ALLOWED_HOSTS:}
+    auth-mode: ${GIT_AUTH_MODE:NONE}
+    username: ${GIT_USERNAME:}
+    token: ${GIT_TOKEN:}
+    connect-timeout: ${GIT_CONNECT_TIMEOUT:PT5S}
+    read-timeout: ${GIT_READ_TIMEOUT:PT20S}
+    poll-interval: ${GIT_POLL_INTERVAL:PT15S}
+    poll-max-backoff: ${GIT_POLL_MAX_BACKOFF:PT2M}
+    poll-batch-size: ${GIT_POLL_BATCH_SIZE:20}
+    max-repositories-per-project: ${GIT_MAX_REPOSITORIES_PER_PROJECT:10}
+    max-branches-per-repository: ${GIT_MAX_BRANCHES_PER_REPOSITORY:100}
+    cache-enabled: ${GIT_CACHE_ENABLED:true}
+    cache-root: ${GIT_CACHE_ROOT:.runtime/git-cache}
   feishu:
     enabled: ${FEISHU_ENABLED:false}
     app-id: ${FEISHU_APP_ID:}
