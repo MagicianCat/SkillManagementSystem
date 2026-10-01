@@ -126,6 +126,17 @@ skill-platform:
     max-branches-per-repository: ${GIT_MAX_BRANCHES_PER_REPOSITORY:100}
     cache-enabled: ${GIT_CACHE_ENABLED:true}
     cache-root: ${GIT_CACHE_ROOT:.runtime/git-cache}
+  code-graph:
+    worker:
+      enabled: ${CODE_GRAPH_WORKER_ENABLED:false}
+      base-url: ${CODE_GRAPH_WORKER_BASE_URL:http://127.0.0.1:4780}
+      token: ${CODE_GRAPH_WORKER_TOKEN:}
+      connect-timeout: ${CODE_GRAPH_WORKER_CONNECT_TIMEOUT:PT3S}
+      read-timeout: ${CODE_GRAPH_WORKER_READ_TIMEOUT:PT10S}
+      max-concurrent-builds: ${CODE_GRAPH_MAX_CONCURRENT_BUILDS:2}
+      workers: ${CODE_GRAPH_ENGINE_WORKERS:4}
+      analyze-timeout-seconds: ${CODE_GRAPH_ANALYZE_TIMEOUT_SECONDS:1800}
+      group-sync-timeout-seconds: ${CODE_GRAPH_GROUP_SYNC_TIMEOUT_SECONDS:600}
   feishu:
     enabled: ${FEISHU_ENABLED:false}
     app-id: ${FEISHU_APP_ID:}
