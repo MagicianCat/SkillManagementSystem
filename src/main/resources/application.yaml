@@ -126,7 +126,16 @@ skill-platform:
     max-branches-per-repository: ${GIT_MAX_BRANCHES_PER_REPOSITORY:100}
     cache-enabled: ${GIT_CACHE_ENABLED:true}
     cache-root: ${GIT_CACHE_ROOT:.runtime/git-cache}
+    source-package-root: ${GIT_SOURCE_PACKAGE_ROOT:.runtime/code-graph-sources}
+    source-package-worker-uri-root: ${GIT_SOURCE_PACKAGE_WORKER_URI_ROOT:}
+    max-source-package-bytes: ${GIT_MAX_SOURCE_PACKAGE_BYTES:104857600}
   code-graph:
+    workflow:
+      engine-type: ${CODE_GRAPH_ENGINE_TYPE:GITNEXUS}
+      engine-version: ${CODE_GRAPH_ENGINE_VERSION:1.6.12}
+      adapter-version: ${CODE_GRAPH_ADAPTER_VERSION:0.1.0}
+      engine-config-hash: ${CODE_GRAPH_ENGINE_CONFIG_HASH:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f}
+      group-config-hash: ${CODE_GRAPH_GROUP_CONFIG_HASH:ff7d8346945c150664ef3bfd7576e192b99e2129f6375cc6e2e6fda948397f26}
     worker:
       enabled: ${CODE_GRAPH_WORKER_ENABLED:false}
       base-url: ${CODE_GRAPH_WORKER_BASE_URL:http://127.0.0.1:4780}

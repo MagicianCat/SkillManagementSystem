@@ -31,11 +31,12 @@ public class CodeGraphLifecyclePublisher {
 
     public void terminal(long workflowRunId, long jobId, boolean succeeded, String detail) {
         var type = succeeded ? NotificationType.CODE_GRAPH_READY : NotificationType.CODE_GRAPH_FAILED;
+        var projectKey = jdbc.queryForObject("SELECT p.project_key FROM workflow_run w JOIN virtual_project p ON p.id=w.project_id WHERE w.id=?", String.class, workflowRunId);
         var recipients = new LinkedHashSet<>(jdbc.query("SELECT DISTINCT recipient FROM (SELECT p.created_by recipient FROM workflow_run w JOIN virtual_project p ON p.id=w.project_id WHERE w.id=? UNION SELECT m.user_id recipient FROM workflow_run w JOIN virtual_project_member m ON m.project_id=w.project_id AND m.status='ACTIVE' AND m.membership_type='OWNER' WHERE w.id=?) x",
                 (rs, row) -> rs.getLong(1), workflowRunId, workflowRunId));
         var title = succeeded ? "代码图谱已准备完成" : "代码图谱准备失败";
         var content = succeeded ? "项目代码图谱已就绪，可继续启动研发工作流" : "项目代码图谱准备失败：" + safe(detail);
-        var targetData = json(Map.of("workflowRunId", workflowRunId, "jobId", jobId));
+        var targetData = json(Map.of("projectKey", projectKey, "runId", workflowRunId, "codeGraphJobId", jobId));
         recipients.forEach(recipient -> jdbc.update("INSERT INTO user_notification(time_created,time_updated,recipient_id,notification_type,title,content,target_type,target_id,target_data) VALUES(NOW(3),NOW(3),?,?,?,?,?,?,CAST(? AS JSON))",
                 recipient, type.name(), title, content, "CODE_GRAPH", jobId, targetData));
     }

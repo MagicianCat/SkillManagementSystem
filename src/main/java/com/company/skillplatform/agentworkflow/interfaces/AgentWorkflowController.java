@@ -1,6 +1,7 @@
 package com.company.skillplatform.agentworkflow.interfaces;
 import com.company.skillplatform.agentworkflow.application.AgentWorkflowService;
 import com.company.skillplatform.agentworkflow.application.WorkflowSseService;
+import com.company.skillplatform.codegraph.application.WorkflowCodeGraphService;
 import jakarta.validation.Valid;
 import java.util.*;
 import org.springframework.http.MediaType;
@@ -11,7 +12,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 @RestController
 @RequestMapping("/api/v1")
 public class AgentWorkflowController {
- private final AgentWorkflowService service; private final WorkflowSseService sse; public AgentWorkflowController(AgentWorkflowService s,WorkflowSseService sse){service=s;this.sse=sse;}
+ private final AgentWorkflowService service; private final WorkflowSseService sse; private final WorkflowCodeGraphService codeGraph;
+ public AgentWorkflowController(AgentWorkflowService s,WorkflowSseService sse,WorkflowCodeGraphService codeGraph){service=s;this.sse=sse;this.codeGraph=codeGraph;}
  @GetMapping("/agent-profiles") public List<AgentWorkflowService.ProfileView> profiles(){return service.profiles();}
  @GetMapping("/agent-profiles/{code}") public AgentWorkflowService.ProfileView profile(@PathVariable String code){return service.profile(code);}
  @PostMapping("/agent-profiles") public AgentWorkflowService.ProfileView profile(@Valid @RequestBody ProfileRequest r,Authentication a){return service.createProfile(new AgentWorkflowService.ProfileCommand(r.code(),r.name(),r.category(),r.description()),String.valueOf(actor(a)));}
@@ -19,7 +21,8 @@ public class AgentWorkflowController {
  @PostMapping("/agent-profiles/{code}/versions") public AgentWorkflowService.VersionView version(@PathVariable String code,@RequestBody VersionRequest r,Authentication a){return service.createVersion(code,new AgentWorkflowService.VersionCommand(r.systemPrompt(),r.modelCode(),r.temperature(),r.maxIterationPerRun()==null?30:r.maxIterationPerRun(),r.timeoutSeconds()==null?1800:r.timeoutSeconds(),r.outputSchemaJson(),r.runtimeConfigJson(),r.changelog(),r.skills(),r.tools()),String.valueOf(actor(a)));}
  @PostMapping("/agent-profiles/{code}/versions/{versionNo}:publish") public AgentWorkflowService.VersionView publish(@PathVariable String code,@PathVariable int versionNo,Authentication a){return service.publish(code,versionNo,String.valueOf(actor(a)));}
  @PutMapping("/agent-profiles/{code}/versions/{versionNo}") public AgentWorkflowService.VersionView updateVersion(@PathVariable String code,@PathVariable int versionNo,@RequestBody VersionRequest r,Authentication a){return service.updateDraft(code,versionNo,new AgentWorkflowService.VersionCommand(r.systemPrompt(),r.modelCode(),r.temperature(),r.maxIterationPerRun()==null?30:r.maxIterationPerRun(),r.timeoutSeconds()==null?1800:r.timeoutSeconds(),r.outputSchemaJson(),r.runtimeConfigJson(),r.changelog(),r.skills(),r.tools()),actor(a));}
- @PostMapping("/projects/{projectKey}/workflow-runs") public AgentWorkflowService.RunView start(@PathVariable String projectKey,@RequestBody RunRequest r,Authentication a){return service.startConfigured(projectKey,actor(a),r.initialRequest(),r.contextSnapshotJson()==null?null:r.contextSnapshotJson().toString());}
+ /** Compatibility endpoint: legacy clients now enter the same mandatory code-graph preparation path. */
+ @PostMapping("/projects/{projectKey}/workflow-runs") public WorkflowCodeGraphService.PrepareResult start(@PathVariable String projectKey,@RequestBody RunRequest r,Authentication a){return codeGraph.prepare(projectKey,actor(a),r.initialRequest(),r.contextSnapshotJson()==null?null:r.contextSnapshotJson().toString());}
  @GetMapping("/projects/{projectKey}/workflow-runs/current") public AgentWorkflowService.RunView current(@PathVariable String projectKey,Authentication a){return service.current(projectKey,actor(a));}
  @GetMapping("/workflow-runs/{runId}") public AgentWorkflowService.RunView run(@PathVariable Long runId,Authentication a){return service.run(runId,actor(a));}
  @PostMapping("/workflow-runs/{runId}/interventions") public AgentWorkflowService.InterventionView intervention(@PathVariable Long runId,@RequestBody InterventionRequest r,Authentication a){Long user=actor(a);if(r.stageRunId()!=null)service.assertStageInteractive(runId,r.stageRunId(),r.type(),user);return service.interveneWithCommand(runId,user,new AgentWorkflowService.InterventionCommand(r.type(),r.content(),r.stageRunId(),r.agentSessionId(),r.agentRunId()));}

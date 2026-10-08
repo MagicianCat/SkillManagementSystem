@@ -15,6 +15,7 @@ import com.company.skillplatform.agentworkflow.application.ResolvedSkillService;
 import com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService;
 import com.company.skillplatform.agentworkflow.application.WorkflowSseService;
 import com.company.skillplatform.agent.application.AgentRunService;
+import com.company.skillplatform.codegraph.application.CodeGraphContextService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.UUID;
 
@@ -34,13 +35,15 @@ public class RuntimeCommandDispatcher {
     private final ObjectMapper json;
     private final WorkflowRuntimeEventService runtimeEvents;
     private final WorkflowSseService sse;
+    private final CodeGraphContextService codeGraphContext;
 
     public RuntimeCommandDispatcher(JdbcTemplate jdbc, RestClient.Builder builder,
             @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:8090}") String url,
             @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String token,
             @Value("${skill-platform.agent-runtime.mcp-url:http://host.docker.internal:8090/internal/mcp}") String mcpUrl,
             ResolvedSkillService skills, AgentRunService agentRuns, ObjectMapper json,
-            WorkflowRuntimeEventService runtimeEvents, WorkflowSseService sse) {
+            WorkflowRuntimeEventService runtimeEvents, WorkflowSseService sse,
+            CodeGraphContextService codeGraphContext) {
         this.jdbc = jdbc;
         this.client = builder.baseUrl(url).build();
         this.token = token;
@@ -50,6 +53,7 @@ public class RuntimeCommandDispatcher {
         this.json = json;
         this.runtimeEvents = runtimeEvents;
         this.sse = sse;
+        this.codeGraphContext = codeGraphContext;
     }
 
     @Scheduled(fixedDelayString = "${skill-platform.agent-runtime.dispatch-delay-ms:1000}")
@@ -192,7 +196,13 @@ public class RuntimeCommandDispatcher {
         manifest.put("projectId", projectId);
         manifest.put("workflowRunId", number(context, "workflow_run_id"));
         manifest.put("stageRunId", stageRunId);
-        manifest.put("inputArtifacts", readList(String.valueOf(context.get("input_snapshot_json"))));
+        List<?> inputArtifacts = readList(String.valueOf(context.get("input_snapshot_json")));
+        manifest.put("inputArtifacts", inputArtifacts);
+        manifest.put("codeGraph", codeGraphContext.preload(agentRunId, number(context, "started_by"),
+                String.valueOf(context.getOrDefault("initial_request", "")),
+                String.valueOf(context.getOrDefault("stage_key", "")),
+                String.valueOf(context.getOrDefault("workflow_role", context.getOrDefault("node_key", ""))),
+                inputArtifacts));
         Map<?, ?> run = client.post().uri("/internal/v1/conversations/{id}/runs", conversationId)
                 .header("X-SMS-Service-Token", token).contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("requestId", commandId + ":run", "agentRunId", agentRunId,

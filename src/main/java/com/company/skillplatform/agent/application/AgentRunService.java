@@ -106,7 +106,9 @@ public class AgentRunService {
                 .claim("projectKey", projectKey).claim("workflowRunId", workflowRunId)
                 .claim("stageRunId", stageRunId).claim("agentRunId", agentRunId)
                 .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list",
-                        "project.artifact.read", "project.artifact.write", "project.artifact.validate"))
+                        "project.artifact.read", "project.artifact.write", "project.artifact.validate",
+                        "code_graph.overview", "code_graph.query", "code_graph.context",
+                        "code_graph.impact", "code_graph.trace", "code_graph.route_map"))
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
         return new IssuedRun(run, token);
     }
@@ -131,8 +133,8 @@ public class AgentRunService {
                 Number workflowRunId = claims.get("workflowRunId", Number.class);
                 String projectKey = claims.get("projectKey", String.class);
                 Number stageRunId = claims.get("stageRunId", Number.class);
-                Integer active = jdbc.queryForObject("select count(*) from agent_workflow_run ar join stage_run sr on sr.id=ar.stage_run_id join workflow_run wr on wr.id=sr.workflow_run_id join virtual_project p on p.id=wr.project_id where ar.id=? and sr.id=? and wr.id=? and p.project_key=? and sr.status in ('RUNNING','PROVISIONING','PAUSED','HUMAN_REQUIRED') and wr.status not in ('COMPLETED','CANCELLED','FAILED')", Integer.class,
-                        agentRunId.longValue(), stageRunId.longValue(), workflowRunId.longValue(), projectKey);
+                Integer active = jdbc.queryForObject("select count(*) from agent_workflow_run ar join stage_run sr on sr.id=ar.stage_run_id join workflow_run wr on wr.id=sr.workflow_run_id join virtual_project p on p.id=wr.project_id join virtual_project_member m on m.project_id=p.id and m.user_id=? and m.status='ACTIVE' where ar.id=? and sr.id=? and wr.id=? and p.project_key=? and sr.status in ('RUNNING','PROVISIONING','PAUSED','HUMAN_REQUIRED') and wr.status not in ('COMPLETED','CANCELLED','FAILED')", Integer.class,
+                        userId, agentRunId.longValue(), stageRunId.longValue(), workflowRunId.longValue(), projectKey);
                 if (active == null || active == 0) throw new BusinessException("AGENT_RUN_INVALID", "Workflow agent run is inactive", HttpStatus.UNAUTHORIZED);
                 return new AgentRun(runRef, userId, profile, null, null, claims.getExpiration().toInstant(),
                         "ACTIVE", "PROJECT_MEMBER", projectKey, null, null);
@@ -163,7 +165,10 @@ public class AgentRunService {
     public void requireCapability(AgentRun run, String capability) {
         if (run.sessionKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read").contains(capability)) return;
         if (run.projectKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate").contains(capability)) return;
-        if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of("wiki.search", "wiki.read", "feishu.read", "workflow.human_input.request").contains(capability)) return;
+        if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of(
+                "wiki.search", "wiki.read", "feishu.read", "workflow.human_input.request",
+                "code_graph.overview", "code_graph.query", "code_graph.context",
+                "code_graph.impact", "code_graph.trace", "code_graph.route_map").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
                 "knowledge.search", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {

@@ -18,6 +18,7 @@ import com.company.skillplatform.project.application.ProjectControlService;
 import com.company.skillplatform.project.application.DocumentAgentSessionService;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
 import com.company.skillplatform.knowledge.application.KnowledgeSearchService;
+import com.company.skillplatform.codegraph.application.CodeGraphQueryService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapper;
@@ -63,6 +64,7 @@ public class AgentMcpConfiguration {
     private final RestClient workflowGateway;
     private final String workflowServiceToken;
     private final KnowledgeSearchService knowledge;
+    private final CodeGraphQueryService codeGraphQueries;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
@@ -71,10 +73,11 @@ public class AgentMcpConfiguration {
                                  JdbcTemplate jdbc, com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents,
                                  com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse,
                                  RestClient.Builder restClientBuilder, KnowledgeSearchService knowledge,
+                                 CodeGraphQueryService codeGraphQueries,
                                  @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:18080}") String gatewayUrl,
                                  @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String workflowServiceToken,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.knowledge=knowledge;
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.knowledge=knowledge; this.codeGraphQueries=codeGraphQueries;
     }
 
     @Bean
@@ -114,6 +117,18 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of("artifactType", "content")), this::validateProjectArtifact),
                         tool("workflow_request_human_input", "Pause the current workflow Agent and ask the human one explicit question. Ask only one question at a time.",
                                 schema("object", List.of("question")), this::requestHumanInput),
+                        tool("code_graph_overview", "List repositories in the immutable code graph bound to this Agent run.",
+                                codeGraphSchema(List.of()), this::codeGraphOverview),
+                        tool("code_graph_query", "Search symbols in the immutable code graph. Arbitrary Cypher is not supported.",
+                                codeGraphSchema(List.of("query")), this::codeGraphQuery),
+                        tool("code_graph_context", "Read the bounded incoming and outgoing context of one code symbol.",
+                                codeGraphSchema(List.of("target")), this::codeGraphContext),
+                        tool("code_graph_impact", "Analyze bounded upstream or downstream impact for one code symbol.",
+                                codeGraphSchema(List.of("target", "direction")), this::codeGraphImpact),
+                        tool("code_graph_trace", "Trace a bounded path between two code symbols.",
+                                codeGraphSchema(List.of("from", "to")), this::codeGraphTrace),
+                        tool("code_graph_route_map", "List normalized cross-repository route associations.",
+                                codeGraphSchema(List.of()), this::codeGraphRouteMap),
                         tool("get_skill_file_content", "Get a safe, bounded segment of a published text file.",
                                 schema("object", List.of("skillKey", "path")), this::file),
                         tool("submit_skill_recommendation", "Submit the final structured skill recommendation.",
@@ -175,6 +190,23 @@ public class AgentMcpConfiguration {
         props.put("items",Map.of("type","array","maxItems",20,"items",item));
         props.put("citations",Map.of("type","array","maxItems",20));
         return new McpSchema.JsonSchema("object",props,List.of("summary","items"),false,Map.of(),Map.of());
+    }
+    private McpSchema.JsonSchema codeGraphSchema(List<String> required) {
+        Map<String,Object> selectorProperties = new LinkedHashMap<>();
+        selectorProperties.put("uid", Map.of("type", "string", "maxLength", 200));
+        selectorProperties.put("name", Map.of("type", "string", "maxLength", 300));
+        selectorProperties.put("kind", Map.of("type", "string", "maxLength", 80));
+        selectorProperties.put("filePath", Map.of("type", "string", "maxLength", 500));
+        var selector = Map.of("type", "object", "properties", selectorProperties, "additionalProperties", false);
+        Map<String,Object> props = new LinkedHashMap<>();
+        props.put("query", Map.of("type", "string", "minLength", 1, "maxLength", 500));
+        props.put("repository", Map.of("type", "string", "maxLength", 128));
+        props.put("target", selector); props.put("from", selector); props.put("to", selector);
+        props.put("direction", Map.of("type", "string", "enum", List.of("UPSTREAM", "DOWNSTREAM")));
+        props.put("depth", Map.of("type", "integer", "minimum", 1, "maximum", 10));
+        props.put("maxDepth", Map.of("type", "integer", "minimum", 1, "maximum", 20));
+        props.put("limit", Map.of("type", "integer", "minimum", 1, "maximum", 100));
+        return new McpSchema.JsonSchema("object", props, required, false, Map.of(), Map.of());
     }
     private McpSchema.CallToolResult search(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "skill.search"); String stage = str(args, "developmentStage"); String platform = normalizePlatform(str(args,"platform")), osType = normalizeOs(str(args,"osType")); int page = integer(args, "page", 0), size = Math.min(integer(args, "pageSize", 20), 20);
@@ -276,6 +308,39 @@ public class AgentMcpConfiguration {
         Map<String,Object> data=new LinkedHashMap<>();data.put("questionId",questionId);data.put("question",question);data.put("choices",choices==null?List.of():choices);data.put("stageId",ids.get("stage_run_id"));data.put("agentSessionId",ids.get("session_id"));data.put("agentRunId",agentRunId);data.put("agentNodeKey",jdbc.queryForObject("select node_key from agent_workflow_run where id=?",String.class,agentRunId));
         var stored=workflowEvents.append("human-question-"+questionId,workflowId,((Number)ids.get("stage_run_id")).longValue(),((Number)ids.get("session_id")).longValue(),agentRunId,"human.question.created",data);workflowSse.publish(workflowId,stored);
         return ok(Map.of("questionId",questionId,"status","WAITING_HUMAN","question",question,"instruction","Wait for the human answer and do not continue this turn."));
+    }
+    private McpSchema.CallToolResult codeGraphOverview(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "code_graph.overview");
+        return ok(codeGraphQueries.overviewForAgent(requiredWorkflowAgentRunId(agent), agent.userId()));
+    }
+    private McpSchema.CallToolResult codeGraphQuery(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        return codeGraph(ex, args, "query", "code_graph.query");
+    }
+    private McpSchema.CallToolResult codeGraphContext(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        return codeGraph(ex, args, "context", "code_graph.context");
+    }
+    private McpSchema.CallToolResult codeGraphImpact(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        return codeGraph(ex, args, "impact", "code_graph.impact");
+    }
+    private McpSchema.CallToolResult codeGraphTrace(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        return codeGraph(ex, args, "trace", "code_graph.trace");
+    }
+    private McpSchema.CallToolResult codeGraphRouteMap(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        return codeGraph(ex, args, "route-map", "code_graph.route_map");
+    }
+    private McpSchema.CallToolResult codeGraph(io.modelcontextprotocol.server.McpSyncServerExchange ex,
+                                               Map<String,Object> args, String operation, String capability) {
+        var agent = run(ex, capability);
+        var parameters = new LinkedHashMap<String,Object>(args == null ? Map.of() : args);
+        Object repository = parameters.remove("repository");
+        var result = codeGraphQueries.executeForAgent(requiredWorkflowAgentRunId(agent), agent.userId(), operation,
+                repository == null ? null : String.valueOf(repository), parameters);
+        return ok(result);
+    }
+    private long requiredWorkflowAgentRunId(AgentRun agent) {
+        Long id = workflowAgentRunId(agent);
+        if (id == null) throw new BusinessException("WORKFLOW_CONTEXT_REQUIRED", "Workflow context is required", org.springframework.http.HttpStatus.FORBIDDEN);
+        return id;
     }
     private void signalGatewayWaiting(Long agentRunId,Object conversationId) {
         String conversation=conversationId==null?"":String.valueOf(conversationId).trim();

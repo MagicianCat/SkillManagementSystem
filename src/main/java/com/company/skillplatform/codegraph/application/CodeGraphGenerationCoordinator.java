@@ -4,6 +4,7 @@ import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort;
 import com.company.skillplatform.codegraph.domain.CodeGraphFingerprint;
 import com.company.skillplatform.codegraph.domain.CodeGraphModels.GenerationCommand;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.HashSet;
 import java.util.Map;
@@ -14,15 +15,26 @@ public class CodeGraphGenerationCoordinator {
     private final CodeGraphEnginePort engine;
     private final CodeGraphMetadataStore store;
     private final CodeGraphLifecyclePublisher lifecycle;
+    private final CodeGraphAncestorResolver ancestors;
 
     public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
                                           CodeGraphLifecyclePublisher lifecycle) {
-        this.engine = engine; this.store = store; this.lifecycle = lifecycle;
+        this(engine, store, lifecycle, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
+                                          CodeGraphLifecyclePublisher lifecycle,
+                                          CodeGraphAncestorResolver ancestors) {
+        this.engine = engine; this.store = store; this.lifecycle = lifecycle; this.ancestors = ancestors;
     }
 
     public StartResult start(GenerationCommand command) {
         validate(command);
-        var planner = new CodeGraphReusePlanner(store::findReadySnapshots);
+        var planner = new CodeGraphReusePlanner(store::findReadySnapshots,
+                repository -> store.findCompatibleSnapshots(repository, command.engineType(), command.engineVersion(),
+                        command.adapterVersion(), command.engineConfigHash()),
+                (repository, candidate) -> ancestors == null ? java.util.OptionalInt.empty() : ancestors.distance(command.workflowRunId(), repository, candidate));
         var plan = planner.plan(command.repositories(), command.engineType(), command.engineVersion(),
                 command.adapterVersion(), command.engineConfigHash());
         var bundleHash = CodeGraphFingerprint.bundle(plan.repositories().stream().map(item ->
@@ -42,8 +54,29 @@ public class CodeGraphGenerationCoordinator {
         var pending = store.createBuild(command, plan, bundleHash, requestId, bundleKey);
         lifecycle.event(command.workflowRunId(), "code_graph.preparation.started", Map.of("jobId", pending.jobId(), "repositoryCount", command.repositories().size()));
         try {
+            var repositories = new java.util.LinkedHashMap<String, Object>();
+            plan.repositories().forEach(item -> {
+                var reuse = new java.util.LinkedHashMap<String, Object>();
+                reuse.put("mode", switch (item.decision()) {
+                    case REUSE_EXACT -> "EXACT";
+                    case INCREMENTAL -> "INCREMENTAL";
+                    case FULL_REQUIRED -> "FULL";
+                });
+                var base = item.baseSnapshot();
+                if (base != null) {
+                    reuse.put("baseCommitSha", base.commitSha());
+                    reuse.put("baseTreeSha", base.treeSha());
+                    reuse.put("baseArtifactUri", base.artifactUri());
+                    reuse.put("baseArtifactSha256", base.artifactSha256());
+                    reuse.put("baseArtifactRepositoryAlias", base.artifactRepositoryAlias() == null ? item.repository().logicalName() : base.artifactRepositoryAlias());
+                }
+                repositories.put(item.repository().logicalName(), reuse);
+            });
+            var buildMode = buildMode(plan);
+            var reusePlan = Map.of("repositories", repositories);
             var handle = engine.build(new CodeGraphEnginePort.BuildRequest(requestId, bundleKey,
-                    command.repositories(), Map.of()));
+                    command.repositories(), Map.of("reusePlan", reusePlan,
+                            "buildMode", buildMode)));
             store.attachEngineJob(pending.jobId(), handle.engineJobId());
             return new StartResult(pending.jobId(), handle.engineJobId(), "BUILDING", false, bundleHash);
         } catch (RuntimeException exception) {
@@ -92,6 +125,13 @@ public class CodeGraphGenerationCoordinator {
         command.repositories().forEach(repository -> {
             if (!aliases.add(repository.logicalName())) throw new IllegalArgumentException("Repository aliases must be unique");
         });
+    }
+
+    static String buildMode(CodeGraphReusePlanner.Plan plan) {
+        var hasFull = plan.repositories().stream().anyMatch(item -> item.decision() == CodeGraphReusePlanner.Decision.FULL_REQUIRED);
+        var hasIncremental = plan.repositories().stream().anyMatch(item -> item.decision() == CodeGraphReusePlanner.Decision.INCREMENTAL);
+        var hasReuse = plan.repositories().stream().anyMatch(item -> item.decision() != CodeGraphReusePlanner.Decision.FULL_REQUIRED);
+        return !hasReuse ? "FULL" : (!hasFull && hasIncremental ? "INCREMENTAL" : "MIXED");
     }
 
     private String safeMessage(RuntimeException exception) {

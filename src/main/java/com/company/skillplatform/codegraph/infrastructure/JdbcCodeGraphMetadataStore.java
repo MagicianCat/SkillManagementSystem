@@ -4,6 +4,7 @@ import com.company.skillplatform.codegraph.application.CodeGraphMetadataStore;
 import com.company.skillplatform.codegraph.application.CodeGraphReusePlanner;
 import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort;
 import com.company.skillplatform.codegraph.domain.CodeGraphModels.GenerationCommand;
+import com.company.skillplatform.codegraph.domain.CodeGraphModels.RepositoryInput;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -31,10 +32,32 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         if (fingerprints.isEmpty()) return Map.of();
         var placeholders = String.join(",", java.util.Collections.nCopies(fingerprints.size(), "?"));
         var result = new HashMap<String, CodeGraphReusePlanner.SnapshotMatch>();
-        jdbc.query("SELECT id,graph_fingerprint,status FROM code_graph_repository_snapshot WHERE status='READY' AND graph_fingerprint IN (" + placeholders + ")",
-                (rs, row) -> new CodeGraphReusePlanner.SnapshotMatch(rs.getLong("id"), rs.getString("graph_fingerprint"), rs.getString("status")),
+        jdbc.query("SELECT s.id,s.graph_fingerprint,s.status,s.commit_sha,s.tree_sha,s.artifact_key,s.artifact_sha256,s.artifact_repository_alias " +
+                        "FROM code_graph_repository_snapshot s WHERE s.status='READY' AND s.artifact_key IS NOT NULL AND s.artifact_sha256 IS NOT NULL " +
+                        "AND s.artifact_repository_alias IS NOT NULL " +
+                        "AND s.graph_fingerprint IN (" + placeholders + ")",
+                (rs, row) -> new CodeGraphReusePlanner.SnapshotMatch(rs.getLong("id"), rs.getString("graph_fingerprint"), rs.getString("status"),
+                        rs.getString("commit_sha"), rs.getString("tree_sha"), rs.getString("artifact_key"), rs.getString("artifact_sha256"), rs.getString("artifact_repository_alias")),
                 fingerprints.toArray()).forEach(match -> result.put(match.fingerprint(), match));
         return result;
+    }
+
+    @Override
+    public List<CodeGraphReusePlanner.SnapshotCandidate> findCompatibleSnapshots(RepositoryInput repository,
+                                                                                  String engineType,
+                                                                                  String engineVersion,
+                                                                                  String adapterVersion,
+                                                                                  String engineConfigHash) {
+        return jdbc.query("SELECT s.id,s.graph_fingerprint,s.status,s.commit_sha,s.tree_sha,s.artifact_key,s.artifact_sha256,s.artifact_repository_alias " +
+                        "FROM code_graph_repository_snapshot s " +
+                        "WHERE s.status='READY' AND s.artifact_key IS NOT NULL AND s.artifact_sha256 IS NOT NULL " +
+                        "AND s.artifact_repository_alias IS NOT NULL " +
+                        "AND logical_repository_key=? AND engine_type=? AND engine_version=? " +
+                        "AND adapter_version=? AND engine_config_hash=? AND commit_sha<>? ORDER BY time_updated DESC",
+                (rs, row) -> new CodeGraphReusePlanner.SnapshotCandidate(rs.getLong("id"), rs.getString("graph_fingerprint"),
+                        rs.getString("status"), rs.getString("commit_sha"), rs.getString("tree_sha"), rs.getString("artifact_key"),
+                        rs.getString("artifact_sha256"), rs.getString("artifact_repository_alias")),
+                repository.repositoryKey(), engineType, engineVersion, adapterVersion, engineConfigHash, repository.commitSha());
     }
 
     @Override
@@ -51,6 +74,7 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         jdbc.update("INSERT INTO code_graph_generation_job(time_created,time_updated,workflow_run_id,target_binding_id,request_id,reason,status,engine_type,reuse_plan_json,build_request_json,progress,started_at,completed_at) VALUES(NOW(3),NOW(3),?,?,?,?,'READY',?,?,?,100,NOW(3),NOW(3))",
                 command.workflowRunId(), bindingId, requestId, command.reason(), command.engineType(), json(plan), json(new StoredBuild(command, plan, bundleHash)));
         activateBinding(command.workflowRunId(), bindingId, bundleId);
+        markWorkflowReady(command.workflowRunId());
         return jdbc.queryForObject("SELECT id FROM code_graph_generation_job WHERE request_id=?", Long.class, requestId);
     }
 
@@ -103,24 +127,29 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         var bundleStatus = jdbc.queryForObject("SELECT status FROM code_graph_bundle WHERE id=? FOR UPDATE", String.class, bundleId);
         if ("READY".equals(bundleStatus)) {
             activateBinding(job.build().command().workflowRunId(), job.bindingId(), bundleId);
+            markWorkflowReady(job.build().command().workflowRunId());
             jdbc.update("UPDATE code_graph_generation_job SET status='READY',progress=100,completed_at=NOW(3),lease_until=NULL,time_updated=NOW(3) WHERE id=? AND status='BUILDING'", jobId);
             return true;
         }
         for (var item : job.build().plan().repositories()) {
-            jdbc.update("INSERT INTO code_graph_repository_snapshot(time_created,time_updated,logical_repository_key,commit_sha,tree_sha,engine_type,engine_version,adapter_version,engine_config_hash,graph_fingerprint,artifact_key,artifact_sha256,status,build_mode) VALUES(NOW(3),NOW(3),?,?,?,?,?,?,?,?,?,?,'READY','FULL') ON DUPLICATE KEY UPDATE time_updated=NOW(3),artifact_key=VALUES(artifact_key),artifact_sha256=VALUES(artifact_sha256),status='READY',build_mode='FULL',last_error=NULL",
+            if (item.decision() == CodeGraphReusePlanner.Decision.REUSE_EXACT) continue;
+            var mode = item.decision() == CodeGraphReusePlanner.Decision.INCREMENTAL ? "INCREMENTAL" : "FULL";
+            jdbc.update("INSERT INTO code_graph_repository_snapshot(time_created,time_updated,logical_repository_key,commit_sha,tree_sha,engine_type,engine_version,adapter_version,engine_config_hash,graph_fingerprint,base_snapshot_id,commit_distance,artifact_key,artifact_sha256,artifact_repository_alias,status,build_mode) VALUES(NOW(3),NOW(3),?,?,?,?,?,?,?,?,?,?,?,?,?,'READY',?) ON DUPLICATE KEY UPDATE time_updated=NOW(3),base_snapshot_id=VALUES(base_snapshot_id),commit_distance=VALUES(commit_distance),artifact_key=VALUES(artifact_key),artifact_sha256=VALUES(artifact_sha256),artifact_repository_alias=VALUES(artifact_repository_alias),status='READY',build_mode=VALUES(build_mode),last_error=NULL",
                     item.repository().repositoryKey(), item.repository().commitSha(), item.repository().treeSha(),
                     job.build().command().engineType(), job.build().command().engineVersion(), job.build().command().adapterVersion(),
-                    job.build().command().engineConfigHash(), item.fingerprint(), artifact.uri(), artifact.sha256());
+                    job.build().command().engineConfigHash(), item.fingerprint(), item.baseSnapshotId(), item.commitDistance(), artifact.uri(), artifact.sha256(), item.repository().logicalName(), mode);
         }
         jdbc.update("DELETE FROM code_graph_bundle_repository WHERE bundle_id=?", bundleId);
         for (var item : job.build().plan().repositories()) {
             var snapshotId = jdbc.queryForObject("SELECT id FROM code_graph_repository_snapshot WHERE graph_fingerprint=? AND status='READY'", Long.class, item.fingerprint());
-            jdbc.update("INSERT INTO code_graph_bundle_repository(time_created,bundle_id,repository_snapshot_id,repository_alias) VALUES(NOW(3),?,?,?)",
-                    bundleId, snapshotId, item.repository().logicalName());
+            var mode = item.decision() == CodeGraphReusePlanner.Decision.REUSE_EXACT ? "REUSED" : item.decision().name();
+            jdbc.update("INSERT INTO code_graph_bundle_repository(time_created,bundle_id,repository_snapshot_id,repository_alias,build_mode,base_snapshot_id) VALUES(NOW(3),?,?,?,?,?)",
+                    bundleId, snapshotId, item.repository().logicalName(), mode, item.baseSnapshotId());
         }
         jdbc.update("UPDATE code_graph_bundle SET status='READY',artifact_key=?,artifact_sha256=?,time_updated=NOW(3),last_error=NULL WHERE id=?",
                 artifact.uri(), artifact.sha256(), bundleId);
         activateBinding(job.build().command().workflowRunId(), job.bindingId(), bundleId);
+        markWorkflowReady(job.build().command().workflowRunId());
         jdbc.update("UPDATE code_graph_generation_job SET status='READY',progress=100,completed_at=NOW(3),lease_until=NULL,time_updated=NOW(3) WHERE id=? AND status='BUILDING'", jobId);
         return true;
     }
@@ -138,6 +167,8 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         jdbc.update("UPDATE workflow_run_code_graph_binding SET status='FAILED',time_updated=NOW(3) WHERE id=? AND status='PREPARING'", bindingId);
         jdbc.update("UPDATE code_graph_bundle b JOIN workflow_run_code_graph_binding x ON x.bundle_id=b.id SET b.status='FAILED',b.last_error=?,b.time_updated=NOW(3) WHERE x.id=? AND b.status='BUILDING'",
                 truncate(errorMessage, 4000), bindingId);
+        jdbc.update("UPDATE workflow_run w JOIN code_graph_generation_job j ON j.workflow_run_id=w.id SET w.status='CODE_GRAPH_PREPARATION_FAILED',w.failure_reason=?,w.time_updated=NOW(3) WHERE j.id=? AND w.status='PREPARING_CODE_GRAPH'",
+                truncate(errorMessage, 2000), jobId);
     }
 
     private long createBinding(GenerationCommand command, String bundleHash, Long bundleId, String status) {
@@ -152,6 +183,10 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
     private void activateBinding(long runId, long bindingId, long bundleId) {
         jdbc.update("UPDATE workflow_run_code_graph_binding SET status='SUPERSEDED',time_updated=NOW(3) WHERE workflow_run_id=? AND status='ACTIVE' AND id<>?", runId, bindingId);
         jdbc.update("UPDATE workflow_run_code_graph_binding SET status='ACTIVE',bundle_id=?,activated_at=NOW(3),time_updated=NOW(3) WHERE id=? AND status='PREPARING'", bundleId, bindingId);
+    }
+
+    private void markWorkflowReady(long runId) {
+        jdbc.update("UPDATE workflow_run SET status='READY_TO_START',failure_reason=NULL,time_updated=NOW(3) WHERE id=? AND status='PREPARING_CODE_GRAPH'", runId);
     }
 
     private String json(Object value) {

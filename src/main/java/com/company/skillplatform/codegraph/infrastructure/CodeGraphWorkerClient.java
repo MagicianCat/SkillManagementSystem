@@ -2,6 +2,7 @@ package com.company.skillplatform.codegraph.infrastructure;
 
 import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort;
 import com.company.skillplatform.codegraph.domain.CodeGraphModels.Artifact;
+import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort.GraphRepository;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -11,6 +12,7 @@ import org.springframework.web.client.RestClientException;
 import java.net.http.HttpClient;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 
 @Component
 public class CodeGraphWorkerClient implements CodeGraphEnginePort {
@@ -33,8 +35,10 @@ public class CodeGraphWorkerClient implements CodeGraphEnginePort {
         options.put("analyzeTimeoutSeconds", properties.analyzeTimeoutSeconds());
         options.put("groupSyncTimeoutSeconds", properties.groupSyncTimeoutSeconds());
         options.putAll(request.options());
+        var configuredBuildMode = String.valueOf(request.options().getOrDefault("buildMode", "FULL"));
+        var reusePlan = request.options().getOrDefault("reusePlan", Map.of());
         var body = Map.of("schemaVersion", 1, "requestId", request.requestId(), "bundleKey", request.bundleKey(),
-                "buildMode", "FULL", "repositories", request.repositories(), "options", options);
+                "buildMode", configuredBuildMode, "repositories", request.repositories(), "reusePlan", reusePlan, "options", options);
         try {
             var response = client.post().uri("/internal/code-graph/build")
                     .header("Authorization", "Bearer " + properties.token())
@@ -67,6 +71,39 @@ public class CodeGraphWorkerClient implements CodeGraphEnginePort {
         } catch (CodeGraphWorkerException exception) { throw exception; }
         catch (IllegalArgumentException | RestClientException exception) {
             throw new CodeGraphWorkerException("CODE_GRAPH_WORKER_INVALID_RESPONSE", "Code graph worker status is invalid", true, exception);
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public QueryResult query(QueryRequest request) {
+        ensureEnabled();
+        var graph = Map.of("bundleArtifactUri", request.graph().artifactUri(),
+                "bundleSha256", request.graph().artifactSha256(),
+                "repositories", request.graph().repositories().stream()
+                        .map(item -> Map.of("logicalName", item.logicalName(), "alias", item.alias())).toList());
+        var body = new LinkedHashMap<String, Object>();
+        body.put("schemaVersion", 1);
+        body.put("graph", graph);
+        if (request.repository() != null && !request.repository().isBlank()) body.put("repository", request.repository());
+        body.putAll(request.parameters());
+        var path = switch (request.operation().toLowerCase()) {
+            case "overview" -> "/internal/code-graph/overview";
+            case "query", "search" -> "/internal/code-graph/query";
+            case "context", "node" -> "/internal/code-graph/context";
+            case "impact" -> "/internal/code-graph/impact";
+            case "trace" -> "/internal/code-graph/trace";
+            case "route-map" -> "/internal/code-graph/route-map";
+            default -> throw new CodeGraphWorkerException("CODE_GRAPH_QUERY_INVALID", "Unsupported query operation", false);
+        };
+        try {
+            var response = client.post().uri(path).header("Authorization", "Bearer " + properties.token())
+                    .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(Map.class);
+            if (response == null) throw new CodeGraphWorkerException("CODE_GRAPH_WORKER_INVALID_RESPONSE", "Worker returned an empty query result", false);
+            return new QueryResult(request.operation(), response);
+        } catch (CodeGraphWorkerException exception) { throw exception; }
+        catch (RestClientException exception) {
+            throw new CodeGraphWorkerException("CODE_GRAPH_QUERY_FAILED", "Code graph query failed", true, exception);
         }
     }
 

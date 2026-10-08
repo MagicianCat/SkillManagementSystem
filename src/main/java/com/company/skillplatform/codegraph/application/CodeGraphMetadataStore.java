@@ -2,6 +2,7 @@ package com.company.skillplatform.codegraph.application;
 
 import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort;
 import com.company.skillplatform.codegraph.domain.CodeGraphModels.GenerationCommand;
+import com.company.skillplatform.codegraph.domain.CodeGraphModels.RepositoryInput;
 
 import java.util.List;
 import java.util.Map;
@@ -9,6 +10,13 @@ import java.util.OptionalLong;
 
 public interface CodeGraphMetadataStore {
     Map<String, CodeGraphReusePlanner.SnapshotMatch> findReadySnapshots(List<String> fingerprints);
+    default List<CodeGraphReusePlanner.SnapshotCandidate> findCompatibleSnapshots(RepositoryInput repository,
+                                                                                    String engineType,
+                                                                                    String engineVersion,
+                                                                                    String adapterVersion,
+                                                                                    String engineConfigHash) {
+        return List.of();
+    }
     OptionalLong findReadyBundle(String bundleHash);
     long activateReused(GenerationCommand command, CodeGraphReusePlanner.Plan plan, String bundleHash, long bundleId);
     PendingJob createBuild(GenerationCommand command, CodeGraphReusePlanner.Plan plan, String bundleHash,
