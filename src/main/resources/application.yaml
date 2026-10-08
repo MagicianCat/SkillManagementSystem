@@ -130,6 +130,12 @@ skill-platform:
     source-package-worker-uri-root: ${GIT_SOURCE_PACKAGE_WORKER_URI_ROOT:}
     max-source-package-bytes: ${GIT_MAX_SOURCE_PACKAGE_BYTES:104857600}
   code-graph:
+    semantic:
+      enabled: ${CODE_GRAPH_SEMANTIC_ENABLED:true}
+      collection: ${CODE_GRAPH_QDRANT_COLLECTION:code_graph_symbols_v1}
+      top-k: ${CODE_GRAPH_SEMANTIC_TOP_K:20}
+      preload-max-items: ${CODE_GRAPH_PRELOAD_MAX_ITEMS:12}
+      preload-max-chars: ${CODE_GRAPH_PRELOAD_MAX_CHARS:8000}
     workflow:
       engine-type: ${CODE_GRAPH_ENGINE_TYPE:GITNEXUS}
       engine-version: ${CODE_GRAPH_ENGINE_VERSION:1.6.12}
@@ -138,7 +144,8 @@ skill-platform:
       group-config-hash: ${CODE_GRAPH_GROUP_CONFIG_HASH:ff7d8346945c150664ef3bfd7576e192b99e2129f6375cc6e2e6fda948397f26}
     worker:
       enabled: ${CODE_GRAPH_WORKER_ENABLED:false}
-      base-url: ${CODE_GRAPH_WORKER_BASE_URL:http://127.0.0.1:4780}
+      # 本地 M6 worker 暴露在 4781；生产/容器部署通过环境变量覆盖。
+      base-url: ${CODE_GRAPH_WORKER_BASE_URL:http://127.0.0.1:4781}
       token: ${CODE_GRAPH_WORKER_TOKEN:}
       connect-timeout: ${CODE_GRAPH_WORKER_CONNECT_TIMEOUT:PT3S}
       read-timeout: ${CODE_GRAPH_WORKER_READ_TIMEOUT:PT10S}

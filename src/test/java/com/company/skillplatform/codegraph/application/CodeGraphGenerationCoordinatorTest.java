@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 class CodeGraphGenerationCoordinatorTest {
     @Test
@@ -24,6 +25,21 @@ class CodeGraphGenerationCoordinatorTest {
         assertThat(result.reused()).isTrue();
         assertThat(calls).hasValue(0);
         assertThat(store.activated).isTrue();
+    }
+
+    @Test
+    void readyBundleRequestsNonBlockingSemanticIndexForBuildAndReuse() {
+        var trigger = mock(CodeGraphSemanticIndexTrigger.class);
+        var reused = new CodeGraphGenerationCoordinator(engine(new AtomicInteger(), CodeGraphEnginePort.State.SUCCEEDED),
+                new FakeStore(true, true), mock(CodeGraphLifecyclePublisher.class), null, trigger);
+        reused.start(command());
+        verify(trigger).requestForJob(3L);
+
+        var built = new CodeGraphGenerationCoordinator(engine(new AtomicInteger(), CodeGraphEnginePort.State.SUCCEEDED),
+                new FakeStore(false, false), mock(CodeGraphLifecyclePublisher.class), null, trigger);
+        var start = built.start(command());
+        built.poll(start.jobId());
+        verify(trigger, org.mockito.Mockito.times(2)).requestForJob(3L);
     }
 
     @Test

@@ -6,6 +6,8 @@ import com.company.skillplatform.codegraph.infrastructure.CodeGraphWorkflowPrope
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.git.application.GitWorkflowRepositoryFreezeService;
 import com.company.skillplatform.git.application.ProjectGitRepositoryService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -14,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 /** Coordinates M3's two-phase workflow start: freeze/build first, create Agent runs only after activation. */
 @Service
 public class WorkflowCodeGraphService {
+    private static final Logger log = LoggerFactory.getLogger(WorkflowCodeGraphService.class);
     private final AgentWorkflowService workflows;
     private final ProjectGitRepositoryService projectRepositories;
     private final GitWorkflowRepositoryFreezeService frozenRepositories;
@@ -69,9 +72,21 @@ public class WorkflowCodeGraphService {
         return status.get(runId, actorId);
     }
 
+    /**
+     * Activates a prepared workflow run.
+     *
+     * <p><b>Gate contract (M6 §20):</b> activation is gated <em>only</em> on the structural
+     * code graph being READY — expressed as {@code workflow_run.status = 'READY_TO_START'}.
+     * The semantic sidecar status ({@code semantic_index_status} on the active binding) is
+     * deliberately <em>not</em> consulted here: {@code DEGRADED} (Qdrant failed) and
+     * {@code INDEXING} (still building) runs must both start, with Agent preload falling
+     * back to structural queries until the sidecar recovers. See the design doc section
+     * "Qdrant 是否阻塞 Workflow".</p>
+     */
     public AgentWorkflowService.RunView activate(long runId, long actorId) {
         workflows.requireRunManager(runId, actorId);
         if (!"READY_TO_START".equals(workflowStatus(runId))) return workflows.activatePrepared(runId, actorId);
+        logSemanticStatus(runId); // observability only — never blocks activation
         if (frozenRepositories.isFresh(runId)) return workflows.activatePrepared(runId, actorId);
 
         jdbc.update("UPDATE workflow_run SET status='PREPARING_CODE_GRAPH',failure_reason=NULL,time_updated=NOW(3) WHERE id=? AND status='READY_TO_START'", runId);
@@ -82,6 +97,18 @@ public class WorkflowCodeGraphService {
             failBeforeSubmission(runId, exception);
         }
         return workflows.run(runId, actorId);
+    }
+
+    private void logSemanticStatus(long runId) {
+        try {
+            var rows = jdbc.query("SELECT semantic_index_status FROM workflow_run_code_graph_binding WHERE workflow_run_id=? AND status='ACTIVE' LIMIT 1",
+                    (rs, n) -> rs.getString(1), runId);
+            if (rows.isEmpty()) return;
+            var status = rows.get(0);
+            if (!"READY".equals(status)) {
+                log.info("event=code_graph.activate.semantic_{} runId={}", status == null ? "unknown" : status.toLowerCase(), runId);
+            }
+        } catch (RuntimeException ignored) { /* observability must never break activation */ }
     }
 
     private void start(long runId, long actorId, String reason) {

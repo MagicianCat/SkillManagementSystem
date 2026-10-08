@@ -17,7 +17,7 @@ public interface CodeGraphEnginePort {
         public QueryRequest {
             operation = operation == null ? "" : operation.trim().toLowerCase();
             operation = switch (operation) { case "search" -> "query"; case "node" -> "context"; default -> operation; };
-            if (!operation.matches("overview|query|context|impact|trace|route-map")) throw new IllegalArgumentException("Unsupported code graph query");
+            if (!operation.matches("overview|query|context|impact|trace|route-map|semantic-export")) throw new IllegalArgumentException("Unsupported code graph query");
             parameters = parameters == null ? Map.of() : Map.copyOf(parameters);
         }
     }
@@ -26,7 +26,12 @@ public interface CodeGraphEnginePort {
     }
     record GraphRepository(String logicalName, String alias) {}
     record QueryResult(String operation, Map<String, Object> data) {
-        public QueryResult { data = data == null ? Map.of() : Map.copyOf(data); }
+        public QueryResult {
+            // Wrap in an unmodifiable view but tolerate null values — worker
+            // responses can carry null fields (e.g. empty summary/startLine on
+            // missing labels), and Map.copyOf NPEs on null values.
+            data = data == null ? Map.of() : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(data));
+        }
     }
 
     record BuildRequest(String requestId, String bundleKey, List<RepositoryInput> repositories,

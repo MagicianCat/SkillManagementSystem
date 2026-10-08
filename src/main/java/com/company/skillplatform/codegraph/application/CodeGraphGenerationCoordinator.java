@@ -16,17 +16,20 @@ public class CodeGraphGenerationCoordinator {
     private final CodeGraphMetadataStore store;
     private final CodeGraphLifecyclePublisher lifecycle;
     private final CodeGraphAncestorResolver ancestors;
+    private final CodeGraphSemanticIndexTrigger semanticIndex;
 
     public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
                                           CodeGraphLifecyclePublisher lifecycle) {
-        this(engine, store, lifecycle, null);
+        this(engine, store, lifecycle, null, jobId -> {});
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
                                           CodeGraphLifecyclePublisher lifecycle,
-                                          CodeGraphAncestorResolver ancestors) {
+                                          CodeGraphAncestorResolver ancestors,
+                                          CodeGraphSemanticIndexTrigger semanticIndex) {
         this.engine = engine; this.store = store; this.lifecycle = lifecycle; this.ancestors = ancestors;
+        this.semanticIndex = semanticIndex;
     }
 
     public StartResult start(GenerationCommand command) {
@@ -46,6 +49,7 @@ public class CodeGraphGenerationCoordinator {
                 var jobId = store.activateReused(command, plan, bundleHash, ready.getAsLong());
                 lifecycle.event(command.workflowRunId(), "code_graph.bundle.ready", Map.of("jobId", jobId, "reused", true));
                 lifecycle.terminal(command.workflowRunId(), jobId, true, null);
+                requestSemanticIndex(jobId);
                 return new StartResult(jobId, null, "READY", true, bundleHash);
             }
         }
@@ -106,6 +110,7 @@ public class CodeGraphGenerationCoordinator {
                 }
                 lifecycle.event(job.workflowRunId(), "code_graph.bundle.ready", Map.of("jobId", jobId, "reused", false));
                 lifecycle.terminal(job.workflowRunId(), jobId, true, null);
+                requestSemanticIndex(jobId);
             }
             case FAILED, CANCELLED -> {
                 var errorCode = status.errorCode() == null ? "CODE_GRAPH_BUILD_FAILED" : status.errorCode();
@@ -137,6 +142,11 @@ public class CodeGraphGenerationCoordinator {
     private String safeMessage(RuntimeException exception) {
         var message = exception.getMessage();
         return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message.substring(0, Math.min(1000, message.length()));
+    }
+
+    private void requestSemanticIndex(long jobId) {
+        try { semanticIndex.requestForJob(jobId); }
+        catch (RuntimeException ignored) { /* Optional sidecar must never reverse structural readiness. */ }
     }
 
     public record StartResult(long jobId, String engineJobId, String status, boolean reused, String bundleHash) {}

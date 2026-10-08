@@ -21,7 +21,12 @@ public class CodeGraphWorkerClient implements CodeGraphEnginePort {
 
     public CodeGraphWorkerClient(RestClient.Builder builder, CodeGraphWorkerProperties properties) {
         var factory = new JdkClientHttpRequestFactory(HttpClient.newBuilder()
-                .connectTimeout(properties.connectTimeout()).build());
+                .connectTimeout(properties.connectTimeout())
+                // The worker is always a local/trusted service. Explicitly bypass any
+                // system proxy, otherwise a machine-level ALL_PROXY env var (e.g. a
+                // developer's socks5 proxy) hijacks calls to localhost.
+                .proxy(java.net.ProxySelector.of(null))
+                .build());
         factory.setReadTimeout(properties.readTimeout());
         this.client = builder.clone().baseUrl(properties.baseUrl()).requestFactory(factory).build();
         this.properties = properties;
@@ -94,6 +99,7 @@ public class CodeGraphWorkerClient implements CodeGraphEnginePort {
             case "impact" -> "/internal/code-graph/impact";
             case "trace" -> "/internal/code-graph/trace";
             case "route-map" -> "/internal/code-graph/route-map";
+            case "semantic-export" -> "/internal/code-graph/semantic-export";
             default -> throw new CodeGraphWorkerException("CODE_GRAPH_QUERY_INVALID", "Unsupported query operation", false);
         };
         try {
@@ -103,7 +109,18 @@ public class CodeGraphWorkerClient implements CodeGraphEnginePort {
             return new QueryResult(request.operation(), response);
         } catch (CodeGraphWorkerException exception) { throw exception; }
         catch (RestClientException exception) {
-            throw new CodeGraphWorkerException("CODE_GRAPH_QUERY_FAILED", "Code graph query failed", true, exception);
+            // Walk the cause chain into the message so logs show the underlying network failure
+            // (connect timeout, unknown host, TLS, etc.) — otherwise E2E failures look identical
+            // to semantic failures from the outside.
+            var causes = new StringBuilder();
+            for (Throwable t = exception; t != null && causes.length() < 600; t = t.getCause()) {
+                if (causes.length() > 0) causes.append(" <- ");
+                causes.append(t.getClass().getSimpleName());
+                if (t.getMessage() != null && !t.getMessage().isBlank()) {
+                    causes.append('(').append(t.getMessage().length() > 120 ? t.getMessage().substring(0, 120) : t.getMessage()).append(')');
+                }
+            }
+            throw new CodeGraphWorkerException("CODE_GRAPH_QUERY_FAILED", "Code graph query failed: " + causes, true, exception);
         }
     }
 

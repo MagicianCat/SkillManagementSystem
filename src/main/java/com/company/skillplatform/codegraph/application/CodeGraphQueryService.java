@@ -55,7 +55,7 @@ public class CodeGraphQueryService {
         var binding = agentBinding(agentRunId, actorId);
         var graph = resolve(binding.workflowRunId(), actorId, binding.bindingId());
         return new AgentGraphInfo(binding.workflowRunId(), graph.bindingId(), graph.version(), graph.engineType(),
-                graph.repositories().stream().map(GraphRepository::logicalName).toList());
+                graph.repositories().stream().map(GraphRepository::logicalName).toList(), graph.bundleId(), graph.semanticIndexStatus());
     }
 
     @Transactional(readOnly = true)
@@ -118,23 +118,27 @@ public class CodeGraphQueryService {
 
     private GraphContext resolve(long runId, long actorId, Long pinnedBindingId) {
         var rows = pinnedBindingId == null
-                ? jdbc.query("SELECT b.id,b.version_no,b.engine_type,g.id,g.artifact_key,g.artifact_sha256 FROM workflow_run w JOIN virtual_project_member m ON m.project_id=w.project_id AND m.user_id=? AND m.status='ACTIVE' JOIN workflow_run_code_graph_binding b ON b.workflow_run_id=w.id LEFT JOIN code_graph_bundle g ON g.id=b.bundle_id WHERE w.id=? AND b.status IN ('ACTIVE','SUPERSEDED') ORDER BY CASE WHEN b.status='ACTIVE' THEN 0 ELSE 1 END,b.version_no DESC LIMIT 1", (rs, row) -> new BindingRow(rs.getLong(1), rs.getInt(2), rs.getString(3), rs.getLong(4), rs.getString(5), rs.getString(6)), actorId, runId)
-                : jdbc.query("SELECT b.id,b.version_no,b.engine_type,g.id,g.artifact_key,g.artifact_sha256 FROM workflow_run w JOIN virtual_project_member m ON m.project_id=w.project_id AND m.user_id=? AND m.status='ACTIVE' JOIN workflow_run_code_graph_binding b ON b.workflow_run_id=w.id AND b.id=? LEFT JOIN code_graph_bundle g ON g.id=b.bundle_id WHERE w.id=? AND b.status IN ('ACTIVE','SUPERSEDED')", (rs, row) -> new BindingRow(rs.getLong(1), rs.getInt(2), rs.getString(3), rs.getLong(4), rs.getString(5), rs.getString(6)), actorId, pinnedBindingId, runId);
+                ? jdbc.query("SELECT b.id,b.version_no,b.engine_type,g.id,g.artifact_key,g.artifact_sha256,b.semantic_index_status FROM workflow_run w JOIN virtual_project_member m ON m.project_id=w.project_id AND m.user_id=? AND m.status='ACTIVE' JOIN workflow_run_code_graph_binding b ON b.workflow_run_id=w.id LEFT JOIN code_graph_bundle g ON g.id=b.bundle_id WHERE w.id=? AND b.status IN ('ACTIVE','SUPERSEDED') ORDER BY CASE WHEN b.status='ACTIVE' THEN 0 ELSE 1 END,b.version_no DESC LIMIT 1", (rs, row) -> new BindingRow(rs.getLong(1), rs.getInt(2), rs.getString(3), rs.getLong(4), rs.getString(5), rs.getString(6), rs.getString(7)), actorId, runId)
+                : jdbc.query("SELECT b.id,b.version_no,b.engine_type,g.id,g.artifact_key,g.artifact_sha256,b.semantic_index_status FROM workflow_run w JOIN virtual_project_member m ON m.project_id=w.project_id AND m.user_id=? AND m.status='ACTIVE' JOIN workflow_run_code_graph_binding b ON b.workflow_run_id=w.id AND b.id=? LEFT JOIN code_graph_bundle g ON g.id=b.bundle_id WHERE w.id=? AND b.status IN ('ACTIVE','SUPERSEDED')", (rs, row) -> new BindingRow(rs.getLong(1), rs.getInt(2), rs.getString(3), rs.getLong(4), rs.getString(5), rs.getString(6), rs.getString(7)), actorId, pinnedBindingId, runId);
         if (rows.isEmpty() || rows.get(0).artifactKey() == null || rows.get(0).artifactSha256() == null) throw new BusinessException("CODE_GRAPH_NOT_READY", "Code graph is not ready", HttpStatus.NOT_FOUND);
         var row = rows.get(0);
         var repos = jdbc.query("SELECT repository_alias FROM code_graph_bundle_repository WHERE bundle_id=? ORDER BY repository_alias", (rs, n) -> new GraphRepository(rs.getString(1), rs.getString(1)), row.bundleId());
-        return new GraphContext(row.bindingId(), row.version(), row.engineType(), row.bundleId(), new GraphRef(row.artifactKey(), row.artifactSha256(), repos), repos);
+        return new GraphContext(row.bindingId(), row.version(), row.engineType(), row.bundleId(), new GraphRef(row.artifactKey(), row.artifactSha256(), repos), repos, row.semanticIndexStatus());
     }
 
-    private record BindingRow(long bindingId, int version, String engineType, long bundleId, String artifactKey, String artifactSha256) {}
+    private record BindingRow(long bindingId, int version, String engineType, long bundleId, String artifactKey, String artifactSha256, String semanticIndexStatus) {}
     private record AgentBinding(long workflowRunId, Long bindingId) {}
-    private record GraphContext(long bindingId, int version, String engineType, long bundleId, GraphRef reference, List<GraphRepository> repositories) {}
+    private record GraphContext(long bindingId, int version, String engineType, long bundleId, GraphRef reference, List<GraphRepository> repositories, String semanticIndexStatus) {}
     public record RepositoryOverview(String alias, String logicalRepositoryKey, String commitSha, String treeSha, String buildMode) {}
     public record Overview(long workflowRunId, long bindingId, int bindingVersion, String engineType,
                            List<RepositoryOverview> repositories, Map<String, Object> graph) {}
     public record QueryResult(long workflowRunId, String operation, Map<String, Object> data) {}
     public record AgentGraphInfo(long workflowRunId, long bindingId, int bindingVersion, String engineType,
-                                 List<String> repositories) {}
+                                 List<String> repositories, long bundleId, String semanticIndexStatus) {
+        public AgentGraphInfo(long workflowRunId, long bindingId, int bindingVersion, String engineType, List<String> repositories) {
+            this(workflowRunId, bindingId, bindingVersion, engineType, repositories, 0, "DISABLED");
+        }
+    }
     public record AgentOverview(long workflowRunId, long bindingId, int bindingVersion, String engineType,
                                 Map<String, Object> graph) {}
 }
