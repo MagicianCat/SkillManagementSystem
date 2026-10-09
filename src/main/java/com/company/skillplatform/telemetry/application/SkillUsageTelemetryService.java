@@ -47,7 +47,10 @@ public class SkillUsageTelemetryService {
                     cipher.encrypt(value(user.getFeishuOpenId())), command.localDirectory(), command.clientSessionId(),
                     command.generationId(), command.client(), command.clientVersion(), command.agentType(), command.model(),
                     command.invokedAt() == null ? now : command.invokedAt(), now);
-            return view(events.saveAndFlush(event));
+            event = events.saveAndFlush(event);
+            if (command.generationId() != null && !command.generationId().isBlank())
+                events.linkGenerationByExternalId(userId, command.generationId());
+            return view(event);
         });
     }
 

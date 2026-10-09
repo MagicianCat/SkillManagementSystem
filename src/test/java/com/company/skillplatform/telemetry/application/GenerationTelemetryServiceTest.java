@@ -76,7 +76,8 @@ class GenerationTelemetryServiceTest {
         verify(generations).saveAndFlush(argThat(g ->
                 g.getStatus() == GenerationStatus.COMPLETED
                         && g.getPrimaryStage() == GenerationStage.BACKEND_CODING));
-        verify(skillUsageEvents).linkSessionToGeneration(eq(7L), eq("session-1"), any());
+        verify(skillUsageEvents).linkGenerationByExternalId(7L, "g-1");
+        verify(skillUsageEvents, never()).linkSessionToGeneration(anyLong(), anyString(), anyLong());
     }
 
     @Test

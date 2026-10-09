@@ -78,7 +78,7 @@ public class GenerationTelemetryService {
 
         replaceSkillRelations(generation, command.skillKeys());
         replaceFileMetrics(generation, command.fileTypes());
-        linkSkillUsageEvents(userId, command.clientSessionId(), generation.getId());
+        linkSkillUsageEvents(userId, command.generationId());
 
         return new GenerationView(generation.getId(), command.generationId(), generation.getStatus().name(),
                 stage == null ? null : stage.name());
@@ -121,10 +121,10 @@ public class GenerationTelemetryService {
         fileMetrics.flush();
     }
 
-    /** 把同一会话内已上报的 Skill 使用事件挂到本次 Generation（语义：Generation 1-N Skill Event）。 */
-    private void linkSkillUsageEvents(Long userId, String clientSessionId, Long generationId) {
-        if (clientSessionId == null || clientSessionId.isBlank()) return;
-        skillUsageEvents.linkSessionToGeneration(userId, clientSessionId, generationId);
+    /** 按稳定轮次 ID 精确关联，禁止跨同一会话中的不同轮次串绑。 */
+    private void linkSkillUsageEvents(Long userId, String generationId) {
+        if (generationId == null || generationId.isBlank()) return;
+        skillUsageEvents.linkGenerationByExternalId(userId, generationId);
     }
 
     private long nz(Long v) { return v == null ? 0L : v; }
