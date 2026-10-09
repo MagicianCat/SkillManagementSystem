@@ -17,7 +17,7 @@ public class JdbcCodeGraphSemanticCatalog implements CodeGraphSemanticCatalog {
 
     @Override
     public Optional<IndexTarget> findByGenerationJob(long jobId) {
-        var rows = jdbc.query("SELECT b.id,b.bundle_id,g.artifact_key,g.artifact_sha256 FROM code_graph_generation_job j JOIN workflow_run_code_graph_binding b ON b.id=j.target_binding_id JOIN code_graph_bundle g ON g.id=b.bundle_id WHERE j.id=? AND j.status='READY' AND b.status IN ('ACTIVE','SUPERSEDED') AND g.status='READY'",
+        var rows = jdbc.query("SELECT b.id,b.bundle_id,g.artifact_key,g.artifact_sha256 FROM code_graph_generation_job j JOIN workflow_run_code_graph_binding b ON b.id=j.target_binding_id JOIN code_graph_bundle g ON g.id=b.bundle_id WHERE j.id=? AND j.status='READY' AND b.status IN ('ACTIVE','SUPERSEDED') AND g.status='READY' AND g.semantic_cleanup_status NOT IN ('DELETING','DELETED')",
                 (rs, n) -> new Object[]{rs.getLong(1), rs.getLong(2), rs.getString(3), rs.getString(4)}, jobId);
         if (rows.isEmpty()) return Optional.empty();
         var row = rows.get(0); var bundleId = (Long) row[1];

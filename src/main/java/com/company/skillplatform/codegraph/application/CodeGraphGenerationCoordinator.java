@@ -3,6 +3,7 @@ package com.company.skillplatform.codegraph.application;
 import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort;
 import com.company.skillplatform.codegraph.domain.CodeGraphFingerprint;
 import com.company.skillplatform.codegraph.domain.CodeGraphModels.GenerationCommand;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -17,19 +18,29 @@ public class CodeGraphGenerationCoordinator {
     private final CodeGraphLifecyclePublisher lifecycle;
     private final CodeGraphAncestorResolver ancestors;
     private final CodeGraphSemanticIndexTrigger semanticIndex;
+    private final ApplicationEventPublisher events;
 
     public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
                                           CodeGraphLifecyclePublisher lifecycle) {
-        this(engine, store, lifecycle, null, jobId -> {});
+        this(engine, store, lifecycle, null, jobId -> {}, null);
+    }
+
+    /** Backwards-compatible constructor (no event bus). Events are silently dropped. */
+    public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
+                                          CodeGraphLifecyclePublisher lifecycle,
+                                          CodeGraphAncestorResolver ancestors,
+                                          CodeGraphSemanticIndexTrigger semanticIndex) {
+        this(engine, store, lifecycle, ancestors, semanticIndex, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     public CodeGraphGenerationCoordinator(CodeGraphEnginePort engine, CodeGraphMetadataStore store,
                                           CodeGraphLifecyclePublisher lifecycle,
                                           CodeGraphAncestorResolver ancestors,
-                                          CodeGraphSemanticIndexTrigger semanticIndex) {
+                                          CodeGraphSemanticIndexTrigger semanticIndex,
+                                          ApplicationEventPublisher events) {
         this.engine = engine; this.store = store; this.lifecycle = lifecycle; this.ancestors = ancestors;
-        this.semanticIndex = semanticIndex;
+        this.semanticIndex = semanticIndex; this.events = events;
     }
 
     public StartResult start(GenerationCommand command) {
@@ -50,6 +61,7 @@ public class CodeGraphGenerationCoordinator {
                 lifecycle.event(command.workflowRunId(), "code_graph.bundle.ready", Map.of("jobId", jobId, "reused", true));
                 lifecycle.terminal(command.workflowRunId(), jobId, true, null);
                 requestSemanticIndex(jobId);
+                publishTerminal(jobId, command.workflowRunId(), true, null, null);
                 return new StartResult(jobId, null, "READY", true, bundleHash);
             }
         }
@@ -87,6 +99,7 @@ public class CodeGraphGenerationCoordinator {
             store.fail(pending.jobId(), "CODE_GRAPH_BUILD_SUBMIT_FAILED", safeMessage(exception));
             lifecycle.event(command.workflowRunId(), "code_graph.preparation.failed", Map.of("jobId", pending.jobId(), "errorCode", "CODE_GRAPH_BUILD_SUBMIT_FAILED"));
             lifecycle.terminal(command.workflowRunId(), pending.jobId(), false, safeMessage(exception));
+            publishTerminal(pending.jobId(), command.workflowRunId(), false, "CODE_GRAPH_BUILD_SUBMIT_FAILED", safeMessage(exception));
             throw exception;
         }
     }
@@ -101,16 +114,19 @@ public class CodeGraphGenerationCoordinator {
             case SUCCEEDED -> {
                 if (status.artifact() == null) {
                     store.fail(jobId, "CODE_GRAPH_ARTIFACT_MISSING", "Worker succeeded without an artifact");
+                    publishTerminal(jobId, job.workflowRunId(), false, "CODE_GRAPH_ARTIFACT_MISSING", "Worker succeeded without an artifact");
                     return new PollResult(jobId, "FAILED", status.progress());
                 }
                 if (!store.complete(jobId, status)) {
                     lifecycle.event(job.workflowRunId(), "code_graph.preparation.failed", Map.of("jobId", jobId, "errorCode", "CODE_GRAPH_ARTIFACT_INCOMPATIBLE"));
                     lifecycle.terminal(job.workflowRunId(), jobId, false, "Worker artifact is incompatible");
+                    publishTerminal(jobId, job.workflowRunId(), false, "CODE_GRAPH_ARTIFACT_INCOMPATIBLE", "Worker artifact is incompatible");
                     return new PollResult(jobId, "FAILED", status.progress());
                 }
                 lifecycle.event(job.workflowRunId(), "code_graph.bundle.ready", Map.of("jobId", jobId, "reused", false));
                 lifecycle.terminal(job.workflowRunId(), jobId, true, null);
                 requestSemanticIndex(jobId);
+                publishTerminal(jobId, job.workflowRunId(), true, null, null);
             }
             case FAILED, CANCELLED -> {
                 var errorCode = status.errorCode() == null ? "CODE_GRAPH_BUILD_FAILED" : status.errorCode();
@@ -118,10 +134,18 @@ public class CodeGraphGenerationCoordinator {
                 store.fail(jobId, errorCode, errorMessage);
                 lifecycle.event(job.workflowRunId(), "code_graph.preparation.failed", Map.of("jobId", jobId, "errorCode", errorCode));
                 lifecycle.terminal(job.workflowRunId(), jobId, false, errorMessage);
+                publishTerminal(jobId, job.workflowRunId(), false, errorCode, errorMessage);
             }
         }
         var mapped = switch (status.state()) { case SUCCEEDED -> "READY"; case FAILED, CANCELLED -> "FAILED"; default -> "BUILDING"; };
         return new PollResult(jobId, mapped, status.progress());
+    }
+
+    private void publishTerminal(long jobId, long workflowRunId, boolean succeeded, String errorCode, String errorMessage) {
+        if (events == null) return;
+        try {
+            events.publishEvent(new CodeGraphJobTerminalEvent(this, jobId, workflowRunId, null, succeeded, errorCode, errorMessage));
+        } catch (RuntimeException ignored) { /* event bus must never block polling */ }
     }
 
     private void validate(GenerationCommand command) {

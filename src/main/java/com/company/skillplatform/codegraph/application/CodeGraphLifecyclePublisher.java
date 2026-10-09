@@ -41,6 +41,24 @@ public class CodeGraphLifecyclePublisher {
                 recipient, type.name(), title, content, "CODE_GRAPH", jobId, targetData));
     }
 
+    /**
+     * M7: terminal notification for an in-flight REPO_APPEND update. Distinct from
+     * {@link #terminal} so the user can tell "initial preparation finished" apart from
+     * "running update finished" and so we can route the click-through to the project's
+     * code-graph page instead of the preparation screen.
+     */
+    public void terminalUpdate(long workflowRunId, long jobId, boolean succeeded, String detail) {
+        var type = succeeded ? NotificationType.CODE_GRAPH_UPDATED : NotificationType.CODE_GRAPH_FAILED;
+        var projectKey = jdbc.queryForObject("SELECT p.project_key FROM workflow_run w JOIN virtual_project p ON p.id=w.project_id WHERE w.id=?", String.class, workflowRunId);
+        var recipients = new LinkedHashSet<>(jdbc.query("SELECT DISTINCT recipient FROM (SELECT p.created_by recipient FROM workflow_run w JOIN virtual_project p ON p.id=w.project_id WHERE w.id=? UNION SELECT m.user_id recipient FROM workflow_run w JOIN virtual_project_member m ON m.project_id=w.project_id AND m.status='ACTIVE' AND m.membership_type='OWNER' WHERE w.id=?) x",
+                (rs, row) -> rs.getLong(1), workflowRunId, workflowRunId));
+        var title = succeeded ? "代码图谱已更新" : "代码图谱更新失败";
+        var content = succeeded ? "新增仓库已合并到代码图谱，新会话将使用更新后的版本" : "新增仓库的代码图谱更新失败：" + safe(detail);
+        var targetData = json(Map.of("projectKey", projectKey, "runId", workflowRunId, "codeGraphJobId", jobId));
+        recipients.forEach(recipient -> jdbc.update("INSERT INTO user_notification(time_created,time_updated,recipient_id,notification_type,title,content,target_type,target_id,target_data) VALUES(NOW(3),NOW(3),?,?,?,?,?,?,CAST(? AS JSON))",
+                recipient, type.name(), title, content, "CODE_GRAPH", jobId, targetData));
+    }
+
     private String safe(String value) {
         if (value == null || value.isBlank()) return "未知错误";
         return value.substring(0, Math.min(value.length(), 1500));

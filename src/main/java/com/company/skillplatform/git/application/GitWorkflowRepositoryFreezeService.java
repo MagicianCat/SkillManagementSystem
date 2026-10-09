@@ -39,6 +39,20 @@ public class GitWorkflowRepositoryFreezeService {
         return List.copyOf(result);
     }
 
+    /**
+     * M7: freezes exactly one workflow-level repository row. Used when appending a
+     * repository to a RUNNING workflow — we must NOT re-resolve existing rows, only
+     * the newly appended one. Idempotent: if the row is already frozen we return the
+     * existing frozen state without advancing it.
+     */
+    @Transactional
+    public GitRemotePort.FrozenRepository freezeOne(long workflowRunRepositoryId, String normalizedUrl, String trackedBranch) {
+        GitRemotePort.FrozenRepository frozen = remote.freeze(normalizedUrl, trackedBranch);
+        jdbc.update("update workflow_run_git_repository set resolved_commit_sha=?,resolved_tree_sha=?,resolved_at=now(3),logical_repository_key=?,source_artifact_uri=?,source_sha256=? where id=? and status='ACTIVE'",
+                frozen.commitSha(), frozen.treeSha(), frozen.logicalRepositoryKey(), frozen.sourceArtifactUri(), frozen.sourceSha256(), workflowRunRepositoryId);
+        return frozen;
+    }
+
     @Transactional(readOnly = true)
     public boolean isFresh(long workflowRunId) {
         var rows = jdbc.queryForList("select normalized_url,tracked_branch,resolved_commit_sha from workflow_run_git_repository where workflow_run_id=? and status='ACTIVE' order by id", workflowRunId);

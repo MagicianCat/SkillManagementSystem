@@ -1,5 +1,6 @@
 package com.company.skillplatform.codegraph.infrastructure;
 
+import com.company.skillplatform.codegraph.application.CodeGraphLifecyclePublisher;
 import com.company.skillplatform.codegraph.application.CodeGraphMetadataStore;
 import com.company.skillplatform.codegraph.application.CodeGraphReusePlanner;
 import com.company.skillplatform.codegraph.domain.CodeGraphEnginePort;
@@ -7,6 +8,7 @@ import com.company.skillplatform.codegraph.domain.CodeGraphModels.GenerationComm
 import com.company.skillplatform.codegraph.domain.CodeGraphModels.RepositoryInput;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,9 +24,11 @@ import java.util.OptionalLong;
 public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final CodeGraphLifecyclePublisher lifecycle;
 
-    public JdbcCodeGraphMetadataStore(JdbcTemplate jdbc, ObjectMapper mapper) {
-        this.jdbc = jdbc; this.mapper = mapper;
+    public JdbcCodeGraphMetadataStore(JdbcTemplate jdbc, ObjectMapper mapper,
+                                      @Lazy CodeGraphLifecyclePublisher lifecycle) {
+        this.jdbc = jdbc; this.mapper = mapper; this.lifecycle = lifecycle;
     }
 
     @Override
@@ -71,23 +75,30 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
     public long activateReused(GenerationCommand command, CodeGraphReusePlanner.Plan plan, String bundleHash, long bundleId) {
         var bindingId = createBinding(command, bundleHash, bundleId, "PREPARING");
         var requestId = java.util.UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO code_graph_generation_job(time_created,time_updated,workflow_run_id,target_binding_id,request_id,reason,status,engine_type,reuse_plan_json,build_request_json,progress,started_at,completed_at) VALUES(NOW(3),NOW(3),?,?,?,?,'READY',?,?,?,100,NOW(3),NOW(3))",
-                command.workflowRunId(), bindingId, requestId, command.reason(), command.engineType(), json(plan), json(new StoredBuild(command, plan, bundleHash)));
+        var jobType = "REPO_APPEND".equals(command.reason()) ? "REPO_APPEND" : "INITIAL";
+        jdbc.update("INSERT INTO code_graph_generation_job(time_created,time_updated,workflow_run_id,target_binding_id,request_id,reason,job_type,status,engine_type,reuse_plan_json,build_request_json,progress,started_at,completed_at) VALUES(NOW(3),NOW(3),?,?,?,?,?,'READY',?,?,?,100,NOW(3),NOW(3))",
+                command.workflowRunId(), bindingId, requestId, command.reason(), jobType, command.engineType(), json(plan), json(new StoredBuild(command, plan, bundleHash)));
         activateBinding(command.workflowRunId(), bindingId, bundleId);
-        markWorkflowReady(command.workflowRunId());
-        return jdbc.queryForObject("SELECT id FROM code_graph_generation_job WHERE request_id=?", Long.class, requestId);
+        markWorkflowReadyIfInitial(jobType, command.workflowRunId());
+        var jobId = jdbc.queryForObject("SELECT id FROM code_graph_generation_job WHERE request_id=?", Long.class, requestId);
+        publishBindingActivated(command.workflowRunId(), bindingId, bundleId, jobType);
+        return jobId;
     }
 
     @Override
     @Transactional
     public PendingJob createBuild(GenerationCommand command, CodeGraphReusePlanner.Plan plan, String bundleHash,
                                   String requestId, String engineBundleKey) {
+        // Global lock order starts with workflow_run. This serialises binding version
+        // allocation and avoids bundle/binding inversions with completion and append.
+        lockWorkflow(command.workflowRunId());
         jdbc.update("INSERT INTO code_graph_bundle(time_created,time_updated,bundle_hash,engine_type,engine_bundle_key,repository_count,status) VALUES(NOW(3),NOW(3),?,?,?,?,'BUILDING') ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),time_updated=NOW(3),status=IF(status='READY',status,'BUILDING'),last_error=NULL",
                 bundleHash, command.engineType(), engineBundleKey, command.repositories().size());
         var bundleId = jdbc.queryForObject("SELECT id FROM code_graph_bundle WHERE bundle_hash=?", Long.class, bundleHash);
         var bindingId = createBinding(command, bundleHash, bundleId, "PREPARING");
-        jdbc.update("INSERT INTO code_graph_generation_job(time_created,time_updated,workflow_run_id,target_binding_id,request_id,reason,status,engine_type,reuse_plan_json,build_request_json,progress,started_at) VALUES(NOW(3),NOW(3),?,?,?,?,'BUILDING',?,?,?,0,NOW(3))",
-                command.workflowRunId(), bindingId, requestId, command.reason(), command.engineType(), json(plan), json(new StoredBuild(command, plan, bundleHash)));
+        var jobType = "REPO_APPEND".equals(command.reason()) ? "REPO_APPEND" : "INITIAL";
+        jdbc.update("INSERT INTO code_graph_generation_job(time_created,time_updated,workflow_run_id,target_binding_id,request_id,reason,job_type,status,engine_type,reuse_plan_json,build_request_json,progress,started_at) VALUES(NOW(3),NOW(3),?,?,?,?,?,'BUILDING',?,?,?,0,NOW(3))",
+                command.workflowRunId(), bindingId, requestId, command.reason(), jobType, command.engineType(), json(plan), json(new StoredBuild(command, plan, bundleHash)));
         var jobId = jdbc.queryForObject("SELECT id FROM code_graph_generation_job WHERE request_id=?", Long.class, requestId);
         return new PendingJob(jobId, bindingId, requestId, engineBundleKey);
     }
@@ -112,6 +123,12 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
     @Override
     @Transactional
     public boolean complete(long jobId, CodeGraphEnginePort.BuildStatus status) {
+        // Discover the run without locking, then follow the global lock order:
+        // workflow_run -> generation_job -> bundle -> binding.
+        var runIds = jdbc.query("SELECT workflow_run_id FROM code_graph_generation_job WHERE id=? AND status='BUILDING'",
+                (rs, row) -> rs.getLong(1), jobId);
+        if (runIds.isEmpty()) return false;
+        lockWorkflow(runIds.get(0));
         var rows = jdbc.query("SELECT target_binding_id,build_request_json FROM code_graph_generation_job WHERE id=? AND status='BUILDING' FOR UPDATE",
                 (rs, row) -> new StoredJob(rs.getLong(1), read(rs.getString(2))), jobId);
         if (rows.isEmpty()) return false;
@@ -125,10 +142,12 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         }
         var bundleId = jdbc.queryForObject("SELECT bundle_id FROM workflow_run_code_graph_binding WHERE id=?", Long.class, job.bindingId());
         var bundleStatus = jdbc.queryForObject("SELECT status FROM code_graph_bundle WHERE id=? FOR UPDATE", String.class, bundleId);
+        var jobType = jobType(jobId);
         if ("READY".equals(bundleStatus)) {
             activateBinding(job.build().command().workflowRunId(), job.bindingId(), bundleId);
-            markWorkflowReady(job.build().command().workflowRunId());
+            markWorkflowReadyIfInitial(jobType, job.build().command().workflowRunId());
             jdbc.update("UPDATE code_graph_generation_job SET status='READY',progress=100,completed_at=NOW(3),lease_until=NULL,time_updated=NOW(3) WHERE id=? AND status='BUILDING'", jobId);
+            publishBindingActivated(job.build().command().workflowRunId(), job.bindingId(), bundleId, jobType);
             return true;
         }
         for (var item : job.build().plan().repositories()) {
@@ -149,15 +168,21 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         jdbc.update("UPDATE code_graph_bundle SET status='READY',artifact_key=?,artifact_sha256=?,time_updated=NOW(3),last_error=NULL WHERE id=?",
                 artifact.uri(), artifact.sha256(), bundleId);
         activateBinding(job.build().command().workflowRunId(), job.bindingId(), bundleId);
-        markWorkflowReady(job.build().command().workflowRunId());
+        markWorkflowReadyIfInitial(jobType, job.build().command().workflowRunId());
         jdbc.update("UPDATE code_graph_generation_job SET status='READY',progress=100,completed_at=NOW(3),lease_until=NULL,time_updated=NOW(3) WHERE id=? AND status='BUILDING'", jobId);
+        publishBindingActivated(job.build().command().workflowRunId(), job.bindingId(), bundleId, jobType);
         return true;
     }
 
     @Override
     @Transactional
     public void fail(long jobId, String errorCode, String errorMessage) {
-        var bindingIds = jdbc.query("SELECT target_binding_id FROM code_graph_generation_job WHERE id=?", (rs, row) -> rs.getLong(1), jobId);
+        var jobs = jdbc.query("SELECT workflow_run_id,target_binding_id FROM code_graph_generation_job WHERE id=?",
+                (rs, row) -> new long[]{rs.getLong(1), rs.getLong(2)}, jobId);
+        if (jobs.isEmpty()) return;
+        lockWorkflow(jobs.get(0)[0]);
+        var bindingIds = jdbc.query("SELECT target_binding_id FROM code_graph_generation_job WHERE id=? FOR UPDATE",
+                (rs, row) -> rs.getLong(1), jobId);
         if (!bindingIds.isEmpty()) failRows(jobId, bindingIds.get(0), errorCode, errorMessage);
     }
 
@@ -167,12 +192,16 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
         jdbc.update("UPDATE workflow_run_code_graph_binding SET status='FAILED',time_updated=NOW(3) WHERE id=? AND status='PREPARING'", bindingId);
         jdbc.update("UPDATE code_graph_bundle b JOIN workflow_run_code_graph_binding x ON x.bundle_id=b.id SET b.status='FAILED',b.last_error=?,b.time_updated=NOW(3) WHERE x.id=? AND b.status='BUILDING'",
                 truncate(errorMessage, 4000), bindingId);
-        jdbc.update("UPDATE workflow_run w JOIN code_graph_generation_job j ON j.workflow_run_id=w.id SET w.status='CODE_GRAPH_PREPARATION_FAILED',w.failure_reason=?,w.time_updated=NOW(3) WHERE j.id=? AND w.status='PREPARING_CODE_GRAPH'",
-                truncate(errorMessage, 2000), jobId);
+        // M7: only flip the workflow status for the INITIAL preparation path. A failed
+        // REPO_APPEND must not disturb a RUNNING workflow nor the current ACTIVE binding.
+        if (!"REPO_APPEND".equals(jobType(jobId))) {
+            jdbc.update("UPDATE workflow_run w JOIN code_graph_generation_job j ON j.workflow_run_id=w.id SET w.status='CODE_GRAPH_PREPARATION_FAILED',w.failure_reason=?,w.time_updated=NOW(3) WHERE j.id=? AND w.status='PREPARING_CODE_GRAPH'",
+                    truncate(errorMessage, 2000), jobId);
+        }
     }
 
     private long createBinding(GenerationCommand command, String bundleHash, Long bundleId, String status) {
-        jdbc.queryForObject("SELECT id FROM workflow_run WHERE id=? FOR UPDATE", Long.class, command.workflowRunId());
+        lockWorkflow(command.workflowRunId());
         var version = jdbc.queryForObject("SELECT COALESCE(MAX(version_no),0)+1 FROM workflow_run_code_graph_binding WHERE workflow_run_id=?", Integer.class, command.workflowRunId());
         var engineBundleKey = "cg-" + bundleHash.substring(0, 24);
         jdbc.update("INSERT INTO workflow_run_code_graph_binding(time_created,time_updated,workflow_run_id,version_no,bundle_id,engine_type,engine_bundle_key,repository_set_hash,reason,status,semantic_index_status) VALUES(NOW(3),NOW(3),?,?,?,?,?,?,?,?,'DISABLED')",
@@ -181,12 +210,67 @@ public class JdbcCodeGraphMetadataStore implements CodeGraphMetadataStore {
     }
 
     private void activateBinding(long runId, long bindingId, long bundleId) {
+        lockWorkflow(runId);
         jdbc.update("UPDATE workflow_run_code_graph_binding SET status='SUPERSEDED',time_updated=NOW(3) WHERE workflow_run_id=? AND status='ACTIVE' AND id<>?", runId, bindingId);
         jdbc.update("UPDATE workflow_run_code_graph_binding SET status='ACTIVE',bundle_id=?,activated_at=NOW(3),time_updated=NOW(3) WHERE id=? AND status='PREPARING'", bundleId, bindingId);
     }
 
+    /**
+     * M7: emits {@code code_graph.binding.activated} after a REPO_APPEND binding swap.
+     * Initial-preparation swaps do not re-emit (they already have bundle.ready semantics).
+     */
+    private void publishBindingActivated(long runId, long bindingId, long bundleId, String jobType) {
+        if (!"REPO_APPEND".equals(jobType)) return;
+        try {
+            var previous = jdbc.query("SELECT id,version_no,bundle_id FROM workflow_run_code_graph_binding WHERE workflow_run_id=? AND status='SUPERSEDED' ORDER BY time_updated DESC LIMIT 1",
+                    (rs, n) -> Map.<String, Object>of(
+                            "bindingId", rs.getLong(1),
+                            "version", rs.getInt(2),
+                            "bundleId", rs.getLong(3)),
+                    runId);
+            var current = jdbc.queryForObject("SELECT version_no,repository_set_hash FROM workflow_run_code_graph_binding WHERE id=?",
+                    (rs, n) -> Map.<String, Object>of(
+                            "version", rs.getInt(1),
+                            "repositorySetHash", rs.getString(2)),
+                    bindingId);
+            var repositoryCount = jdbc.queryForObject("SELECT COUNT(*) FROM code_graph_bundle_repository WHERE bundle_id=?", Integer.class, bundleId);
+            var payload = new HashMap<String, Object>();
+            payload.put("bindingId", bindingId);
+            payload.put("bundleId", bundleId);
+            payload.put("version", current == null ? null : current.get("version"));
+            payload.put("repositoryCount", repositoryCount == null ? 0 : repositoryCount);
+            if (!previous.isEmpty()) {
+                payload.put("previousBindingId", previous.get(0).get("bindingId"));
+                payload.put("previousVersion", previous.get(0).get("version"));
+                payload.put("previousBundleId", previous.get(0).get("bundleId"));
+            }
+            lifecycle.event(runId, "code_graph.binding.activated", payload);
+        } catch (RuntimeException exception) {
+            // Event emission must never roll back the binding swap.
+        }
+    }
+
     private void markWorkflowReady(long runId) {
         jdbc.update("UPDATE workflow_run SET status='READY_TO_START',failure_reason=NULL,time_updated=NOW(3) WHERE id=? AND status='PREPARING_CODE_GRAPH'", runId);
+    }
+
+    /**
+     * M7: workflow status transitions only on the INITIAL preparation path. A successful
+     * REPO_APPEND updates the binding/bundle/job in place; the running workflow keeps
+     * its current status (typically RUNNING) so existing agent runs are undisturbed.
+     */
+    private void markWorkflowReadyIfInitial(String jobType, long runId) {
+        if ("REPO_APPEND".equals(jobType)) return;
+        markWorkflowReady(runId);
+    }
+
+    private String jobType(long jobId) {
+        var rows = jdbc.query("SELECT job_type FROM code_graph_generation_job WHERE id=?", (rs, n) -> rs.getString(1), jobId);
+        return rows.isEmpty() ? "INITIAL" : rows.get(0);
+    }
+
+    private void lockWorkflow(long workflowRunId) {
+        jdbc.queryForObject("SELECT id FROM workflow_run WHERE id=? FOR UPDATE", Long.class, workflowRunId);
     }
 
     private String json(Object value) {

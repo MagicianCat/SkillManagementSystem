@@ -94,6 +94,14 @@ class CodeGraphSemanticIndexServiceTest {
         verify(catalog).findByGenerationJob(9);
     }
 
+    @Test
+    void pointIdentityIsIsolatedByBundleEvenWhenSnapshotAndNodeAreReused() {
+        assertThat(CodeGraphSemanticIndexService.stableId(44L, 55L, "Method:a"))
+                .isNotEqualTo(CodeGraphSemanticIndexService.stableId(45L, 55L, "Method:a"));
+        assertThat(CodeGraphSemanticIndexService.stableId(44L, 55L, "Method:a"))
+                .isEqualTo(CodeGraphSemanticIndexService.stableId(44L, 55L, "Method:a"));
+    }
+
     private static CodeGraphSemanticCatalog.IndexTarget target() {
         return new CodeGraphSemanticCatalog.IndexTarget(77, 44,
                 new CodeGraphEnginePort.GraphRef("file:///bundle.tar.zst", "b".repeat(64),

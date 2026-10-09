@@ -160,7 +160,7 @@ public class CodeGraphSemanticIndexService implements CodeGraphSemanticIndexTrig
         payload.put("commitSha", repository.commitSha()); payload.put("nodeUid", uid);
         for (String key : List.of("nodeType", "name", "qualifiedName", "filePath", "language", "summary", "startLine", "endLine"))
             if (item.get(key) != null) payload.put(key, item.get(key));
-        return new CodeGraphVectorPoint(stableId(repository.snapshotId(), uid), vector, payload);
+        return new CodeGraphVectorPoint(stableId(target.bundleId(), repository.snapshotId(), uid), vector, payload);
     }
 
     private String semanticText(Map<String, Object> item) {
@@ -170,9 +170,9 @@ public class CodeGraphSemanticIndexService implements CodeGraphSemanticIndexTrig
     private String required(Map<String, Object> item, String key) { var value = text(item, key); if (value.isBlank()) throw new IllegalStateException(key + " missing"); return value; }
     private String text(Map<String, Object> item, String key) { return item.get(key) == null ? "" : String.valueOf(item.get(key)); }
 
-    static String stableId(long snapshotId, String nodeUid) {
+    static String stableId(long bundleId, long snapshotId, String nodeUid) {
         try {
-            var digest = MessageDigest.getInstance("SHA-256").digest((snapshotId + ":" + nodeUid).getBytes(StandardCharsets.UTF_8));
+            var digest = MessageDigest.getInstance("SHA-256").digest((bundleId + ":" + snapshotId + ":" + nodeUid).getBytes(StandardCharsets.UTF_8));
             var bytes = ByteBuffer.wrap(digest); long most = bytes.getLong(), least = bytes.getLong();
             most = (most & 0xffffffffffff0fffL) | 0x0000000000005000L;
             least = (least & 0x3fffffffffffffffL) | 0x8000000000000000L;

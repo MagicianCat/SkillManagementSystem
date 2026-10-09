@@ -2,6 +2,7 @@ package com.company.skillplatform.codegraph.interfaces;
 
 import com.company.skillplatform.codegraph.application.CodeGraphStatusService;
 import com.company.skillplatform.codegraph.application.CodeGraphQueryService;
+import com.company.skillplatform.codegraph.application.WorkflowCodeGraphAppendService;
 import com.company.skillplatform.codegraph.application.WorkflowCodeGraphService;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.security.core.Authentication;
@@ -21,8 +22,10 @@ public class CodeGraphController {
     private final CodeGraphStatusService status;
     private final WorkflowCodeGraphService workflow;
     private final CodeGraphQueryService queries;
-    public CodeGraphController(CodeGraphStatusService status, WorkflowCodeGraphService workflow, CodeGraphQueryService queries) {
-        this.status = status; this.workflow = workflow; this.queries = queries;
+    private final WorkflowCodeGraphAppendService updates;
+    public CodeGraphController(CodeGraphStatusService status, WorkflowCodeGraphService workflow, CodeGraphQueryService queries,
+                               WorkflowCodeGraphAppendService updates) {
+        this.status = status; this.workflow = workflow; this.queries = queries; this.updates = updates;
     }
 
     @PostMapping("/projects/{projectKey}/workflow-runs:prepare")
@@ -41,6 +44,17 @@ public class CodeGraphController {
     @PostMapping("/workflow-runs/{runId}/code-graph:retry")
     public CodeGraphStatusService.View retry(@PathVariable long runId, Authentication authentication) {
         return workflow.retry(runId, actor(authentication));
+    }
+
+    /**
+     * M7: retry a FAILED REPO_APPEND update. Only the failed target version is rebuilt;
+     * the current ACTIVE binding keeps serving traffic throughout.
+     */
+    @PostMapping("/workflow-runs/{runId}/code-graph/updates/{updateRequestId}:retry")
+    public Map<String, Object> retryUpdate(@PathVariable long runId, @PathVariable long updateRequestId,
+                                           Authentication authentication) {
+        var id = updates.retryUpdate(runId, updateRequestId, actor(authentication));
+        return Map.of("updateRequestId", id, "workflowRunId", runId);
     }
 
     @GetMapping("/workflow-runs/{runId}/code-graph/overview")
