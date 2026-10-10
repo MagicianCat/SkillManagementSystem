@@ -142,6 +142,7 @@ skill-platform:
       adapter-version: ${CODE_GRAPH_ADAPTER_VERSION:0.1.0}
       engine-config-hash: ${CODE_GRAPH_ENGINE_CONFIG_HASH:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f}
       group-config-hash: ${CODE_GRAPH_GROUP_CONFIG_HASH:ff7d8346945c150664ef3bfd7576e192b99e2129f6375cc6e2e6fda948397f26}
+      debug-rebuild-enabled: ${CODE_GRAPH_DEBUG_REBUILD_ENABLED:false}
     worker:
       enabled: ${CODE_GRAPH_WORKER_ENABLED:false}
       # 本地 M6 worker 暴露在 4781；生产/容器部署通过环境变量覆盖。

@@ -28,6 +28,19 @@ class CodeGraphGenerationCoordinatorTest {
     }
 
     @Test
+    void forcedRebuildBypassesReadyBundleAndSubmitsFullBuild() {
+        var calls = new AtomicInteger();
+        var store = new FakeStore(true, true);
+        var result = new CodeGraphGenerationCoordinator(engine(calls, CodeGraphEnginePort.State.SUCCEEDED), store,
+                mock(CodeGraphLifecyclePublisher.class)).start(command(), true);
+
+        assertThat(result.reused()).isFalse();
+        assertThat(result.status()).isEqualTo("BUILDING");
+        assertThat(calls).hasValue(1);
+        assertThat(store.activated).isFalse();
+    }
+
+    @Test
     void readyBundleRequestsNonBlockingSemanticIndexForBuildAndReuse() {
         var trigger = mock(CodeGraphSemanticIndexTrigger.class);
         var reused = new CodeGraphGenerationCoordinator(engine(new AtomicInteger(), CodeGraphEnginePort.State.SUCCEEDED),

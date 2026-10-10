@@ -46,6 +46,11 @@ public class CodeGraphController {
         return workflow.retry(runId, actor(authentication));
     }
 
+    @PostMapping("/workflow-runs/{runId}/code-graph:debug-rebuild")
+    public CodeGraphStatusService.View debugRebuild(@PathVariable long runId, Authentication authentication) {
+        return workflow.debugRebuild(runId, actor(authentication));
+    }
+
     /**
      * M7: retry a FAILED REPO_APPEND update. Only the failed target version is rebuilt;
      * the current ACTIVE binding keeps serving traffic throughout.

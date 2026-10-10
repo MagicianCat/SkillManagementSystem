@@ -1,10 +1,17 @@
 package com.company.skillplatform.codegraph.infrastructure;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties("skill-platform.code-graph.workflow")
 public record CodeGraphWorkflowProperties(String engineType, String engineVersion, String adapterVersion,
-                                          String engineConfigHash, String groupConfigHash) {
+                                          String engineConfigHash, String groupConfigHash,
+                                          boolean debugRebuildEnabled) {
+    public CodeGraphWorkflowProperties(String engineType, String engineVersion, String adapterVersion,
+                                       String engineConfigHash, String groupConfigHash) {
+        this(engineType, engineVersion, adapterVersion, engineConfigHash, groupConfigHash, false);
+    }
+    @ConstructorBinding
     public CodeGraphWorkflowProperties {
         engineType = value(engineType, "GITNEXUS");
         engineVersion = value(engineVersion, "1.6.12");

@@ -19,6 +19,11 @@ public class CodeGraphPreparationService {
     }
 
     public CodeGraphGenerationCoordinator.StartResult prepare(long actorId, GenerationCommand command) {
+        return prepare(actorId, command, false);
+    }
+
+    /** Starts a build, optionally bypassing all snapshot/bundle reuse. */
+    public CodeGraphGenerationCoordinator.StartResult prepare(long actorId, GenerationCommand command, boolean forceRebuild) {
         var access = access(command.workflowRunId(), actorId);
         if (!access.manager()) throw new BusinessException("PROJECT_MANAGE_FORBIDDEN", "Project manager role required", HttpStatus.FORBIDDEN);
         for (var repository : command.repositories()) {
@@ -27,7 +32,7 @@ public class CodeGraphPreparationService {
             if (count == null || count == 0) throw new BusinessException("CODE_GRAPH_REPOSITORY_NOT_FROZEN",
                     "Code graph repositories must match the workflow frozen repository set", HttpStatus.CONFLICT);
         }
-        return coordinator.start(command);
+        return coordinator.start(command, forceRebuild);
     }
 
     public CodeGraphGenerationCoordinator.PollResult poll(long actorId, long workflowRunId, long jobId) {

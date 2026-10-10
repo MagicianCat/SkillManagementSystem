@@ -44,17 +44,23 @@ public class CodeGraphGenerationCoordinator {
     }
 
     public StartResult start(GenerationCommand command) {
+        return start(command, false);
+    }
+
+    /** Starts a generation, optionally bypassing exact and incremental reuse. */
+    public StartResult start(GenerationCommand command, boolean forceRebuild) {
         validate(command);
         var planner = new CodeGraphReusePlanner(store::findReadySnapshots,
                 repository -> store.findCompatibleSnapshots(repository, command.engineType(), command.engineVersion(),
                         command.adapterVersion(), command.engineConfigHash()),
                 (repository, candidate) -> ancestors == null ? java.util.OptionalInt.empty() : ancestors.distance(command.workflowRunId(), repository, candidate));
-        var plan = planner.plan(command.repositories(), command.engineType(), command.engineVersion(),
+        var planned = planner.plan(command.repositories(), command.engineType(), command.engineVersion(),
                 command.adapterVersion(), command.engineConfigHash());
+        var plan = forceRebuild ? fullRebuildPlan(planned) : planned;
         var bundleHash = CodeGraphFingerprint.bundle(plan.repositories().stream().map(item ->
                 new CodeGraphFingerprint.BundleEntry(item.repository().logicalName(), item.fingerprint())).toList(),
-                command.groupConfigHash());
-        if (plan.fullyReusable()) {
+                forceRebuild ? command.groupConfigHash() + ":debug:" + UUID.randomUUID() : command.groupConfigHash());
+        if (!forceRebuild && plan.fullyReusable()) {
             var ready = store.findReadyBundle(bundleHash);
             if (ready.isPresent()) {
                 var jobId = store.activateReused(command, plan, bundleHash, ready.getAsLong());
@@ -102,6 +108,14 @@ public class CodeGraphGenerationCoordinator {
             publishTerminal(pending.jobId(), command.workflowRunId(), false, "CODE_GRAPH_BUILD_SUBMIT_FAILED", safeMessage(exception));
             throw exception;
         }
+    }
+
+    private CodeGraphReusePlanner.Plan fullRebuildPlan(CodeGraphReusePlanner.Plan planned) {
+        var repositories = planned.repositories().stream()
+                .map(item -> new CodeGraphReusePlanner.RepositoryPlan(item.repository(), item.fingerprint(),
+                        CodeGraphReusePlanner.Decision.FULL_REQUIRED, null, null, null, null))
+                .toList();
+        return new CodeGraphReusePlanner.Plan(repositories, false);
     }
 
     public PollResult poll(long jobId) {

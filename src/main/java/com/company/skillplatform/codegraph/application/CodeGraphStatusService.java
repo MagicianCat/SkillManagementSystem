@@ -55,7 +55,9 @@ public class CodeGraphStatusService {
             for (JsonNode node : root) {
                 var decision = node.path("decision").asText("FULL_REQUIRED");
                 var state = "REUSE_EXACT".equals(decision) ? "REUSED" : "READY".equals(jobStatus) ? "READY" : "FAILED".equals(jobStatus) ? "FAILED" : "BUILDING";
-                result.add(new RepositoryProgress(node.path("repository").path("logicalName").asText(), decision, state));
+                var repository = node.path("repository");
+                result.add(new RepositoryProgress(repository.path("logicalName").asText(),
+                        repository.path("repositoryKey").asText(null), decision, state));
             }
             return result;
         } catch (Exception ignored) { return List.of(); }
@@ -99,7 +101,7 @@ public class CodeGraphStatusService {
                        int repositoryCount,
                        BindingSummary activeBinding, BindingSummary preparingBinding,
                        PendingUpdate pendingUpdate, UpdateError lastUpdateError) {}
-    public record RepositoryProgress(String name, String reuseDecision, String status) {}
+    public record RepositoryProgress(String name, String repositoryKey, String reuseDecision, String status) {}
     public record BindingSummary(long bindingId, int version, String status, String semanticIndexStatus,
                                  java.time.Instant activatedAt, Long bundleId, Integer repositoryCount) {}
     public record PendingUpdate(long updateRequestId, String status, int retryCount,

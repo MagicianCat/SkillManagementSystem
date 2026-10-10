@@ -49,7 +49,7 @@ public class WorkflowCodeGraphService {
         try {
             projectRepositories.snapshotForRun(run.id(), run.projectId(), actorId);
             frozenRepositories.freeze(run.id());
-            start(run.id(), actorId, "INITIAL");
+            start(run.id(), actorId, "INITIAL", false);
         } catch (RuntimeException exception) {
             failBeforeSubmission(run.id(), exception);
         }
@@ -65,7 +65,34 @@ public class WorkflowCodeGraphService {
         jdbc.update("UPDATE workflow_run SET status='PREPARING_CODE_GRAPH',failure_reason=NULL,time_updated=NOW(3) WHERE id=?", runId);
         try {
             frozenRepositories.freeze(runId);
-            start(runId, actorId, "MANUAL_RETRY");
+            start(runId, actorId, "MANUAL_RETRY", false);
+        } catch (RuntimeException exception) {
+            failBeforeSubmission(runId, exception);
+        }
+        return status.get(runId, actorId);
+    }
+
+    /**
+     * Debug-only rebuild for a prepared run. This deliberately does not reuse
+     * the failure retry contract: it creates a new binding from the same frozen
+     * repositories while no Agent stage has been activated yet.
+     */
+    public CodeGraphStatusService.View debugRebuild(long runId, long actorId) {
+        if (!properties.debugRebuildEnabled()) {
+            throw new BusinessException("CODE_GRAPH_DEBUG_REBUILD_DISABLED", "Debug code graph rebuild is disabled", HttpStatus.NOT_FOUND);
+        }
+        workflows.requireRunManager(runId, actorId);
+        if (!"READY_TO_START".equals(workflowStatus(runId))) {
+            throw new BusinessException("CODE_GRAPH_REBUILD_NOT_ALLOWED", "Code graph rebuild is only allowed before workflow activation", HttpStatus.CONFLICT);
+        }
+        Integer agentRuns = jdbc.queryForObject("SELECT COUNT(*) FROM agent_workflow_run ar JOIN stage_run s ON s.id=ar.stage_run_id WHERE s.workflow_run_id=?", Integer.class, runId);
+        if (agentRuns != null && agentRuns > 0) {
+            throw new BusinessException("CODE_GRAPH_REBUILD_NOT_ALLOWED", "Workflow stages have already been created", HttpStatus.CONFLICT);
+        }
+        jdbc.update("UPDATE workflow_run SET status='PREPARING_CODE_GRAPH',failure_reason=NULL,time_updated=NOW(3) WHERE id=? AND status='READY_TO_START'", runId);
+        try {
+            frozenRepositories.freeze(runId);
+            start(runId, actorId, "DEBUG_REBUILD", true);
         } catch (RuntimeException exception) {
             failBeforeSubmission(runId, exception);
         }
@@ -92,7 +119,7 @@ public class WorkflowCodeGraphService {
         jdbc.update("UPDATE workflow_run SET status='PREPARING_CODE_GRAPH',failure_reason=NULL,time_updated=NOW(3) WHERE id=? AND status='READY_TO_START'", runId);
         try {
             frozenRepositories.freeze(runId);
-            start(runId, actorId, "START_FRESHNESS_REFRESH");
+            start(runId, actorId, "START_FRESHNESS_REFRESH", false);
         } catch (RuntimeException exception) {
             failBeforeSubmission(runId, exception);
         }
@@ -111,11 +138,13 @@ public class WorkflowCodeGraphService {
         } catch (RuntimeException ignored) { /* observability must never break activation */ }
     }
 
-    private void start(long runId, long actorId, String reason) {
+    private void start(long runId, long actorId, String reason, boolean forceRebuild) {
         var inputs = frozenRepositories.inputs(runId);
         if (inputs.isEmpty()) throw new BusinessException("CODE_GRAPH_REPOSITORY_NOT_FROZEN", "No frozen repository input is available", HttpStatus.CONFLICT);
-        preparation.prepare(actorId, new GenerationCommand(runId, reason, properties.engineType(), properties.engineVersion(),
-                properties.adapterVersion(), properties.engineConfigHash(), properties.groupConfigHash(), inputs));
+        var command = new GenerationCommand(runId, reason, properties.engineType(), properties.engineVersion(),
+                properties.adapterVersion(), properties.engineConfigHash(), properties.groupConfigHash(), inputs);
+        if (forceRebuild) preparation.prepare(actorId, command, true);
+        else preparation.prepare(actorId, command);
     }
 
     private boolean hasOpenJob(long runId) {
