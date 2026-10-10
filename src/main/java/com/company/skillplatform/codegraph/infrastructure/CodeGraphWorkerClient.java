@@ -88,7 +88,8 @@ public class CodeGraphWorkerClient implements CodeGraphEnginePort {
                 "repositories", request.graph().repositories().stream()
                         .map(item -> Map.of("logicalName", item.logicalName(), "alias", item.alias())).toList());
         var body = new LinkedHashMap<String, Object>();
-        body.put("schemaVersion", 1);
+        Object requestedSchemaVersion = request.parameters().get("schemaVersion");
+        body.put("schemaVersion", requestedSchemaVersion instanceof Number n ? n.intValue() : 1);
         body.put("graph", graph);
         if (request.repository() != null && !request.repository().isBlank()) body.put("repository", request.repository());
         body.putAll(request.parameters());

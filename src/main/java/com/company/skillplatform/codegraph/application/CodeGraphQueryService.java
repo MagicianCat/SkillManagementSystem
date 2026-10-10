@@ -88,7 +88,18 @@ public class CodeGraphQueryService {
         switch (operation.toLowerCase()) {
             case "query", "search" -> putString(result, source, "query", 500);
             case "context", "node" -> putSelector(result, source, "target");
-            case "impact" -> { putSelector(result, source, "target"); putEnum(result, source, "direction", List.of("UPSTREAM", "DOWNSTREAM")); putInt(result, source, "depth", 1, 10); putInt(result, source, "limit", 1, 500); }
+            case "impact" -> {
+                putSelector(result, source, "target");
+                putEnum(result, source, "direction", List.of("UPSTREAM", "DOWNSTREAM"));
+                putEnum(result, source, "mode", List.of("CALL_CHAIN", "REFERENCE_IMPACT"));
+                putInt(result, source, "depth", 1, 10);
+                putInt(result, source, "maxDepth", 1, 10);
+                putInt(result, source, "maxNodes", 1, 500);
+                putInt(result, source, "maxEdges", 1, 1000);
+                putInt(result, source, "maxPaths", 1, 100);
+                putInt(result, source, "limit", 1, 500);
+                putInt(result, source, "schemaVersion", 1, 2);
+            }
             case "trace" -> { putSelector(result, source, "from"); putSelector(result, source, "to"); putInt(result, source, "maxDepth", 1, 20); }
             case "route-map" -> putInt(result, source, "limit", 1, 500);
             default -> throw new BusinessException("CODE_GRAPH_QUERY_INVALID", "Unsupported code graph query", HttpStatus.BAD_REQUEST);
