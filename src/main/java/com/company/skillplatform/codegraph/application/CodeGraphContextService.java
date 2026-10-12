@@ -25,28 +25,44 @@ public class CodeGraphContextService {
     private final CodeGraphSemanticSearchService semanticSearch;
     private final CodeGraphSemanticCatalog semanticCatalog;
     private final CodeGraphSemanticProperties semanticProperties;
+    private final CodeGraphPolicyResolver policyResolver;
+    private final CodeGraphToolPolicyGuard policyGuard;
+    private final CodeGraphEvidenceService evidence;
 
     /** Backwards-compatible constructor for tests; semantic catalog and properties may be absent. */
     public CodeGraphContextService(CodeGraphQueryService queries, ObjectMapper mapper) {
-        this(queries, mapper, null, null, null);
+        this(queries, mapper, null, null, null, null, null, null);
     }
 
     public CodeGraphContextService(CodeGraphQueryService queries, ObjectMapper mapper,
                                    CodeGraphSemanticSearchService semanticSearch) {
-        this(queries, mapper, semanticSearch, null, null);
+        this(queries, mapper, semanticSearch, null, null, null, null, null);
+    }
+
+    public CodeGraphContextService(CodeGraphQueryService queries,ObjectMapper mapper,
+                                   CodeGraphSemanticSearchService semanticSearch,
+                                   CodeGraphSemanticCatalog semanticCatalog,
+                                   CodeGraphSemanticProperties semanticProperties) {
+        this(queries,mapper,semanticSearch,semanticCatalog,semanticProperties,null,null,null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     public CodeGraphContextService(CodeGraphQueryService queries, ObjectMapper mapper,
                                    CodeGraphSemanticSearchService semanticSearch,
                                    CodeGraphSemanticCatalog semanticCatalog,
-                                   CodeGraphSemanticProperties semanticProperties) {
+                                   CodeGraphSemanticProperties semanticProperties,
+                                   CodeGraphPolicyResolver policyResolver,
+                                   CodeGraphToolPolicyGuard policyGuard,
+                                   CodeGraphEvidenceService evidence) {
         this.queries = queries; this.mapper = mapper; this.semanticSearch = semanticSearch;
         this.semanticCatalog = semanticCatalog; this.semanticProperties = semanticProperties;
+        this.policyResolver=policyResolver;this.policyGuard=policyGuard;this.evidence=evidence;
     }
 
     public Map<String, Object> preload(long agentRunId, long actorId, String initialRequest, String stage,
                                        String role, List<?> upstreamArtifacts) {
+        if (policyResolver != null && policyGuard != null && evidence != null)
+            return preloadScoped(agentRunId, actorId, initialRequest, stage, role, upstreamArtifacts);
         try {
             var graph = queries.describeForAgent(agentRunId, actorId);
             int maxFacts = maxFacts();
@@ -122,6 +138,19 @@ public class CodeGraphContextService {
         }
     }
 
+    private Map<String,Object> preloadScoped(long agentRunId,long actorId,String initialRequest,String stage,String role,List<?> upstreamArtifacts) {
+        try {
+            var resolved=policyResolver.resolveForAgent(agentRunId,actorId);var graph=queries.describeForAgent(agentRunId,actorId);
+            var manifest=base(graph);var current=evidence.summary(resolved.workflowRunId(),resolved.graphBindingId());
+            manifest.put("policySource",resolved.policySource());manifest.put("allowedTools",resolved.policy().allowedTools());manifest.put("stopInstruction",resolved.policy().stopInstruction());manifest.put("evidence",current);
+            if(resolved.policy().maxPreloadQueries()<=0){manifest.put("status","REUSED");manifest.put("preloadSkipped",true);return manifest;}
+            String operation=resolved.policy().allowedTools().contains("route-map")?"route-map":"query";
+            Map<String,Object> parameters="query".equals(operation)?Map.of("query",focus(initialRequest,stage,role,upstreamArtifacts),"limit",resolved.policy().maxNodes()):Map.of("limit",resolved.policy().maxNodes());
+            Map<String,Object> result=policyGuard.preload(agentRunId,actorId,operation,null,parameters);
+            manifest.put("status",result.getOrDefault("status","READY"));manifest.put("preload",result);manifest.put("evidence",evidence.summary(resolved.workflowRunId(),resolved.graphBindingId()));return manifest;
+        } catch(RuntimeException failure){var manifest=new LinkedHashMap<String,Object>();manifest.put("status","DEGRADED");manifest.put("facts",List.of());manifest.put("factCount",0);manifest.put("retryable",true);manifest.put("degradedReasonCode","CODE_GRAPH_PRELOAD_FAILED");return manifest;}
+    }
+
     /** Marks the binding DEGRADED only when it is currently READY, so we never stomp on a fresh INDEXING cycle. */
     private void markSemanticDegraded(long bindingId) {
         if (semanticCatalog == null) return;
@@ -153,7 +182,7 @@ public class CodeGraphContextService {
 
     private String focus(String request, String stage, String role, List<?> upstream) {
         var suffix = switch (stage == null ? "" : stage.toUpperCase()) {
-            case "ARCHITECTURE" -> " controller service dispatcher domain integration dependency";
+            case "ARCHITECTURE", "ARCHITECTURE_DESIGN" -> " controller service dispatcher domain integration dependency";
             case "UI", "UI_DESIGN" -> " route page component api interaction state";
             case "PRODUCT" -> " user flow capability workflow api";
             default -> " workflow entry requirement api service";

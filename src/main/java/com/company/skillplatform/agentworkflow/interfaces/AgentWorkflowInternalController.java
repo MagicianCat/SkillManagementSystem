@@ -25,10 +25,12 @@ public class AgentWorkflowInternalController {
         if (token == null || !token.equals(serviceToken)) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "SMS service authentication failed");
         }
-        service.ingestEventInternal(runId, request.eventId(), request.nodeKey(), request.executionStatus(),
-                request.resultCode(), request.resultJson());
+        if (request.stageRunId() == null || request.agentRunId() == null)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Explicit stageRunId and agentRunId are required");
+        service.ingestEventInternal(runId, request.stageRunId(), request.agentRunId(), request.eventId(),
+                request.nodeKey(), request.executionStatus(), request.resultCode(), request.resultJson());
     }
 
-    public record RuntimeEvent(String eventId, String nodeKey, String executionStatus,
+    public record RuntimeEvent(Long stageRunId, Long agentRunId, String eventId, String nodeKey, String executionStatus,
                                String resultCode, String resultJson) {}
 }

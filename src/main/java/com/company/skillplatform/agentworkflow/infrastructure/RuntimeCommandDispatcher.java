@@ -16,6 +16,7 @@ import com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventS
 import com.company.skillplatform.agentworkflow.application.WorkflowSseService;
 import com.company.skillplatform.agent.application.AgentRunService;
 import com.company.skillplatform.codegraph.application.CodeGraphContextService;
+import com.company.skillplatform.codegraph.application.CodeGraphPolicyResolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.UUID;
 
@@ -36,6 +37,7 @@ public class RuntimeCommandDispatcher {
     private final WorkflowRuntimeEventService runtimeEvents;
     private final WorkflowSseService sse;
     private final CodeGraphContextService codeGraphContext;
+    private final CodeGraphPolicyResolver graphPolicies;
 
     public RuntimeCommandDispatcher(JdbcTemplate jdbc, RestClient.Builder builder,
             @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:8090}") String url,
@@ -43,7 +45,7 @@ public class RuntimeCommandDispatcher {
             @Value("${skill-platform.agent-runtime.mcp-url:http://host.docker.internal:8090/internal/mcp}") String mcpUrl,
             ResolvedSkillService skills, AgentRunService agentRuns, ObjectMapper json,
             WorkflowRuntimeEventService runtimeEvents, WorkflowSseService sse,
-            CodeGraphContextService codeGraphContext) {
+            CodeGraphContextService codeGraphContext,CodeGraphPolicyResolver graphPolicies) {
         this.jdbc = jdbc;
         this.client = builder.baseUrl(url).build();
         this.token = token;
@@ -54,6 +56,7 @@ public class RuntimeCommandDispatcher {
         this.runtimeEvents = runtimeEvents;
         this.sse = sse;
         this.codeGraphContext = codeGraphContext;
+        this.graphPolicies=graphPolicies;
     }
 
     @Scheduled(fixedDelayString = "${skill-platform.agent-runtime.dispatch-delay-ms:1000}")
@@ -243,7 +246,8 @@ public class RuntimeCommandDispatcher {
         Map<String, Object> agent = new LinkedHashMap<>();
         agent.put("name", context.get("node_key"));
         agent.put("systemPrompt", context.get("system_prompt"));
-        agent.put("platformBaseInstructions", "Respect SMS project authorization and MCP boundaries. Never access context, tools, tokens, or secrets outside the current workflow run. When human input is required, call workflow_request_human_input with exactly one question, then stop the current turn and wait for the answer; never simulate waiting with plain text. " + HUMAN_RESUME_PROTOCOL);
+        agent.put("platformBaseInstructions", "Respect SMS project authorization and MCP boundaries. Never access context, tools, tokens, or secrets outside the current workflow run. When human input is required, call workflow_request_human_input with exactly one question, then stop the current turn and wait for the answer; never simulate waiting with plain text. " + HUMAN_RESUME_PROTOCOL
+                + graphPolicyInstruction(agentRunId,number(context,"started_by")));
         agent.put("model", context.get("model_code"));
         agent.put("temperature", context.get("temperature"));
         agent.put("maxIterationPerRun", context.get("max_iteration_per_run"));
@@ -256,7 +260,7 @@ public class RuntimeCommandDispatcher {
         agent.put("workflowRole", context.get("workflow_role"));
         agent.put("artifactType", context.get("artifact_type"));
         if ("REVIEWER".equalsIgnoreCase(String.valueOf(context.get("workflow_role")))) {
-            List<Long> revisions=jdbc.query("select b.project_document_revision_id from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc,b.id desc limit 1",(rs,n)->rs.getLong(1),context.get("stage_run_id"),context.get("artifact_type"));
+            List<Long> revisions=jdbc.query("select b.project_document_revision_id from workflow_artifact_binding b where b.agent_run_id=? and b.relation_type='REVIEW_TARGET' order by b.id desc limit 1",(rs,n)->rs.getLong(1),context.get("agent_run_id"));
             agent.put("expectedRevisionIds",revisions);
         }
         agent.put("tools", tools);
@@ -277,6 +281,8 @@ public class RuntimeCommandDispatcher {
         return conversationId;
     }
 
+    private String graphPolicyInstruction(long agentRunId,long actorId){try{var resolved=graphPolicies.resolveForAgent(agentRunId,actorId);return "\nCode graph policy: consume existing Evidence first. Allowed operations: "+resolved.policy().allowedTools()+". Active-call budget: "+resolved.policy().softToolCalls()+". "+resolved.policy().stopInstruction();}catch(RuntimeException unavailable){return "";}}
+
     private String instruction(Map<String, Object> context) {
         String stage = String.valueOf(context.getOrDefault("stage_key", "design"));
         String role = String.valueOf(context.getOrDefault("workflow_role", ""));
@@ -287,17 +293,17 @@ public class RuntimeCommandDispatcher {
         if (!inputs.isEmpty()) {
             instruction.append("\nRequired upstream artifacts (immutable input revisions): ")
                     .append(writeJson(inputs))
-                    .append("\nRead every listed documentId/revisionId with get_project_artifact before doing the task. "
-                            + "Use exactly these revisions; do not substitute a newer project document.");
+                    .append("\nRead every listed immutable input by calling get_project_artifact with both artifactId=documentId and revisionId. "
+                            + "Use exactly these revisions; do not substitute the current draft or another project document.");
         }
         if ("AUTHOR".equalsIgnoreCase(role) || "writer".equals(context.get("node_key"))) {
             List<Map<String,Object>> review = jdbc.queryForList("select result_json from agent_workflow_run where stage_run_id=? and node_key='reviewer' and result_code='REVISION_REQUIRED' order by id desc limit 1", context.get("stage_run_id"));
             if (!review.isEmpty()) instruction.append("\nAddress this reviewer result: ").append(review.get(0).get("result_json"));
-            List<Map<String,Object>> artifact = jdbc.queryForList("select b.project_document_id artifactId,d.version_no versionNo,b.project_document_revision_id revisionId from workflow_artifact_binding b join project_document d on d.id=b.project_document_id join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc limit 1", context.get("stage_run_id"), artifactKind);
-            if (!artifact.isEmpty()) instruction.append("\nUpdate exactly this existing artifact using artifactId and versionNo: ").append(writeJson(artifact.get(0)));
+            List<Map<String,Object>> artifact = jdbc.queryForList("select b.project_document_id artifactId,b.project_document_revision_id revisionId from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc limit 1", context.get("stage_run_id"), artifactKind);
+            if (!artifact.isEmpty()) instruction.append("\nThe backend has pinned the existing stage artifact for update: ").append(writeJson(artifact.get(0))).append(". Call save_artifact_draft without choosing a different artifact target.");
         }
         if ("REVIEWER".equalsIgnoreCase(role) || "reviewer".equals(context.get("node_key"))) {
-            List<Map<String,Object>> artifact = jdbc.queryForList("select b.project_document_id,b.project_document_revision_id,r.revision_no from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.stage_run_id=? and b.artifact_kind=? and b.relation_type='OUTPUT' order by r.revision_no desc limit 1", context.get("stage_run_id"), artifactKind);
+            List<Map<String,Object>> artifact = jdbc.queryForList("select b.project_document_id,b.project_document_revision_id,r.revision_no from workflow_artifact_binding b join project_document_revision r on r.id=b.project_document_revision_id where b.agent_run_id=? and b.relation_type='REVIEW_TARGET' order by b.id desc limit 1", context.get("agent_run_id"));
             instruction.append("\nReview exactly this latest artifact: ").append(writeJson(artifact.isEmpty()?Map.of():artifact.get(0)));
         }
         return instruction.toString();

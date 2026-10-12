@@ -4,6 +4,7 @@ import com.company.skillplatform.codegraph.application.CodeGraphStatusService;
 import com.company.skillplatform.codegraph.application.CodeGraphQueryService;
 import com.company.skillplatform.codegraph.application.WorkflowCodeGraphAppendService;
 import com.company.skillplatform.codegraph.application.WorkflowCodeGraphService;
+import com.company.skillplatform.codegraph.application.CodeGraphPolicyObservabilityService;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,9 +24,10 @@ public class CodeGraphController {
     private final WorkflowCodeGraphService workflow;
     private final CodeGraphQueryService queries;
     private final WorkflowCodeGraphAppendService updates;
+    private final CodeGraphPolicyObservabilityService policyObservability;
     public CodeGraphController(CodeGraphStatusService status, WorkflowCodeGraphService workflow, CodeGraphQueryService queries,
-                               WorkflowCodeGraphAppendService updates) {
-        this.status = status; this.workflow = workflow; this.queries = queries; this.updates = updates;
+                               WorkflowCodeGraphAppendService updates,CodeGraphPolicyObservabilityService policyObservability) {
+        this.status = status; this.workflow = workflow; this.queries = queries; this.updates = updates;this.policyObservability=policyObservability;
     }
 
     @PostMapping("/projects/{projectKey}/workflow-runs:prepare")
@@ -66,6 +68,12 @@ public class CodeGraphController {
     public CodeGraphQueryService.Overview overview(@PathVariable long runId, Authentication authentication) {
         return queries.overview(runId, actor(authentication));
     }
+
+    @GetMapping("/workflow-runs/{runId}/code-graph/tool-usage")
+    public Object toolUsage(@PathVariable long runId,Authentication authentication){return policyObservability.usage(runId,actor(authentication));}
+
+    @GetMapping("/workflow-runs/{runId}/code-graph/evidence")
+    public Object evidence(@PathVariable long runId,Authentication authentication){return policyObservability.evidence(runId,actor(authentication));}
 
     @PostMapping("/workflow-runs/{runId}/code-graph/search")
     public CodeGraphQueryService.QueryResult search(@PathVariable long runId, @RequestBody QueryRequest request, Authentication authentication) {

@@ -90,8 +90,7 @@ public class RuntimeEventCollector {
                     ((Number) run.get("workflow_run_id")).longValue(), ((Number) run.get("stage_run_id")).longValue(),
                     ((Number) run.get("session_id")).longValue(), ((Number) run.get("agent_run_id")).longValue(), storedType, eventData);
             if ("AGENT_RUN_COMPLETED".equals(type) || "AGENT_RUN_FAILED".equals(type)) {
-                String executionStatus = "AGENT_RUN_COMPLETED".equals(type)
-                        ? text(payload, "executionStatus", "SUCCESS") : "FAILED";
+                String executionStatus = "AGENT_RUN_COMPLETED".equals(type) ? "SUCCESS" : "FAILED";
                 String resultCode = text(payload, "resultCode",
                         "AGENT_RUN_COMPLETED".equals(type) ? "COMPLETED" : "RUNTIME_FAILED");
                 try {

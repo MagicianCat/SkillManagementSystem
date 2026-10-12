@@ -3,6 +3,7 @@ package com.company.skillplatform.project.application;
 import com.company.skillplatform.agent.application.AgentRunService;
 import com.company.skillplatform.agent.infrastructure.FeishuDocumentMcpProxy;
 import com.company.skillplatform.audit.application.AuditService;
+import com.company.skillplatform.agentworkflow.application.WorkflowArtifactAuthorityService;
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.project.infrastructure.entity.*;
 import com.company.skillplatform.project.infrastructure.repository.*;
@@ -53,6 +54,7 @@ public class DocumentAgentSessionService {
     private final DocumentAgentSessionWikiContextRepository sessionWikiContexts;
     private final WikiDocumentService wiki;
     private final AuditService audit;
+    private final WorkflowArtifactAuthorityService workflowArtifacts;
 
     public DocumentAgentSessionService(ProjectControlService projects, ProjectDocumentRepository documents,
                                        VirtualProjectRepository virtualProjects, IamUserRepository users,
@@ -60,6 +62,7 @@ public class DocumentAgentSessionService {
                                        DocumentAgentJobContextRepository contexts, DocumentAgentJobEventRepository events,
                                        AgentRunService runs, FeishuDocumentMcpProxy feishu, ObjectMapper mapper, ProjectWorkflowService workflow,
                                        DocumentAgentSessionWikiContextRepository sessionWikiContexts, WikiDocumentService wiki, AuditService audit,
+                                       WorkflowArtifactAuthorityService workflowArtifacts,
                                        RestClient.Builder builder,
                                        @Value("${skill-platform.document-agent.gateway-url:http://127.0.0.1:8090}") String gatewayUrl,
                                        @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String serviceToken,
@@ -67,7 +70,7 @@ public class DocumentAgentSessionService {
         this.projects = projects; this.documents = documents; this.virtualProjects = virtualProjects; this.users = users; this.sessions = sessions; this.jobs = jobs;
         this.contexts = contexts; this.events = events; this.runs = runs; this.feishu = feishu; this.mapper = mapper;
         this.workflow = workflow;
-        this.sessionWikiContexts = sessionWikiContexts; this.wiki = wiki; this.audit = audit;
+        this.sessionWikiContexts = sessionWikiContexts; this.wiki = wiki; this.audit = audit; this.workflowArtifacts = workflowArtifacts;
         this.gateway = builder.baseUrl(gatewayUrl).build(); this.serviceToken = serviceToken; this.maxDispatchAttempts = Math.max(1, maxDispatchAttempts);
     }
 
@@ -331,19 +334,9 @@ public class DocumentAgentSessionService {
                                                               String artifactType, String title, String content,
                                                               Long artifactId, Integer versionNo, Object skillSnapshots,
                                                               Object assumptions, Object openQuestions, List<Long> sourceArtifactIds) {
-        if (agent.sessionKey() == null && agent.runRef().startsWith("workflow-")) {
-            if (agent.projectKey() == null) throw error("PROJECT_CONTEXT_REQUIRED", "Workflow project context is required", HttpStatus.FORBIDDEN);
-            if (artifactId == null) {
-                return projects.createAgentDocument(agent.projectKey(), new ProjectControlService.AgentDocument(
-                        artifactType, title, content, agent.profileKey(), agent.runRef(), agent.runRef(),
-                        skillSnapshots, assumptions, openQuestions, sourceArtifactIds), agent.userId(), "mcp:" + agent.runRef());
-            }
-            ProjectDocumentEntity target = documents.findById(artifactId).orElseThrow(() -> error("PROJECT_DOCUMENT_NOT_FOUND", "Project document not found", HttpStatus.NOT_FOUND));
-            int currentVersion = versionNo == null ? target.getVersionNo() : versionNo;
-            return projects.saveDraft(agent.projectKey(), artifactId, new ProjectControlService.SaveDraft(
-                    title, content, currentVersion, "AGENT", agent.profileKey(), agent.runRef(), agent.runRef(),
-                    skillSnapshots, assumptions, openQuestions, sourceArtifactIds), agent.userId(), "mcp:" + agent.runRef());
-        }
+        if (workflowArtifacts.supports(agent))
+            return workflowArtifacts.save(agent, artifactType, title, content, artifactId,
+                    skillSnapshots, assumptions, openQuestions);
         if (agent.sessionKey() == null || agent.projectKey() == null) throw error("DOCUMENT_JOB_CONTEXT_REQUIRED", "A document job token is required", HttpStatus.FORBIDDEN);
         DocumentAgentSessionEntity session = sessions.findForMcp(agent.sessionKey()).orElseThrow(() -> error("DOCUMENT_AGENT_SESSION_NOT_FOUND", "Document agent session not found", HttpStatus.NOT_FOUND));
         DocumentAgentJobEntity job = jobs.findByJobKey(agent.runRef()).orElseThrow(() -> error("DOCUMENT_AGENT_JOB_NOT_FOUND", "Document agent job not found", HttpStatus.NOT_FOUND));

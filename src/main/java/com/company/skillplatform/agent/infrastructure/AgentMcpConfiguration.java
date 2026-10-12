@@ -18,7 +18,7 @@ import com.company.skillplatform.project.application.ProjectControlService;
 import com.company.skillplatform.project.application.DocumentAgentSessionService;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
 import com.company.skillplatform.knowledge.application.KnowledgeSearchService;
-import com.company.skillplatform.codegraph.application.CodeGraphQueryService;
+import com.company.skillplatform.codegraph.application.CodeGraphToolPolicyGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapper;
@@ -64,7 +64,7 @@ public class AgentMcpConfiguration {
     private final RestClient workflowGateway;
     private final String workflowServiceToken;
     private final KnowledgeSearchService knowledge;
-    private final CodeGraphQueryService codeGraphQueries;
+    private final CodeGraphToolPolicyGuard codeGraphPolicy;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
                                  ObjectStoragePort storage, AgentRunService runs, AgentRecommendationRepository recommendations,
@@ -73,11 +73,11 @@ public class AgentMcpConfiguration {
                                  JdbcTemplate jdbc, com.company.skillplatform.agentworkflow.application.WorkflowRuntimeEventService workflowEvents,
                                  com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse,
                                  RestClient.Builder restClientBuilder, KnowledgeSearchService knowledge,
-                                 CodeGraphQueryService codeGraphQueries,
+                                 CodeGraphToolPolicyGuard codeGraphPolicy,
                                  @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:18080}") String gatewayUrl,
                                  @Value("${skill-platform.internal-service-token:${SMS_SERVICE_TOKEN:local-sms-service-token}}") String workflowServiceToken,
                                  @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
-        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.knowledge=knowledge; this.codeGraphQueries=codeGraphQueries;
+        this.objectMapper = objectMapper; this.skills = skills; this.versions = versions; this.storage = storage; this.runs = runs; this.recommendations = recommendations;this.persistentRuns=persistentRuns;this.events=events; this.wiki=wiki; this.feishu=feishu; this.feishuGuard=feishuGuard; this.projectControl=projectControl; this.documentAgents=documentAgents; this.jdbc=jdbc; this.workflowEvents=workflowEvents; this.workflowSse=workflowSse; this.workflowGateway=restClientBuilder.baseUrl(gatewayUrl).build(); this.workflowServiceToken=workflowServiceToken; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.knowledge=knowledge; this.codeGraphPolicy=codeGraphPolicy;
     }
 
     @Bean
@@ -154,6 +154,7 @@ public class AgentMcpConfiguration {
         props.put("limit", Map.of("type", "integer", "minimum", 1, "maximum", 10));
         props.put("documentType", Map.of("type", "string", "enum", List.of("SKILL_README", "SKILL_GUIDE")));
         props.put("artifactId", Map.of("type", "integer", "minimum", 1));
+        props.put("revisionId", Map.of("type", "integer", "minimum", 1));
         props.put("artifactType", Map.of("type", "string", "enum", List.of("REQUIREMENT", "PRD", "ARCHITECTURE", "UI_DESIGN")));
         props.put("title", Map.of("type", "string", "minLength", 1, "maxLength", 255));
         props.put("content", Map.of("type", "string", "minLength", 1, "maxLength", 1000000));
@@ -311,7 +312,7 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult codeGraphOverview(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "code_graph.overview");
-        return ok(codeGraphQueries.overviewForAgent(requiredWorkflowAgentRunId(agent), agent.userId()));
+        return ok(codeGraphPolicy.execute(requiredWorkflowAgentRunId(agent), agent.userId(), "overview", null, Map.of()));
     }
     private McpSchema.CallToolResult codeGraphQuery(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         return codeGraph(ex, args, "query", "code_graph.query");
@@ -333,7 +334,7 @@ public class AgentMcpConfiguration {
         var agent = run(ex, capability);
         var parameters = new LinkedHashMap<String,Object>(args == null ? Map.of() : args);
         Object repository = parameters.remove("repository");
-        var result = codeGraphQueries.executeForAgent(requiredWorkflowAgentRunId(agent), agent.userId(), operation,
+        var result = codeGraphPolicy.execute(requiredWorkflowAgentRunId(agent), agent.userId(), operation,
                 repository == null ? null : String.valueOf(repository), parameters);
         return ok(result);
     }
@@ -363,7 +364,10 @@ public class AgentMcpConfiguration {
     private McpSchema.CallToolResult projectArtifact(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "project.artifact.read"); requireProject(agent);
         long id = longRequired(args, "artifactId");
-        return ok(projectControl.getDocument(agent.projectKey(), id, agent.userId()));
+        Object revision = args.get("revisionId");
+        if (revision == null) return ok(projectControl.getDocument(agent.projectKey(), id, agent.userId()));
+        return ok(Map.of("artifactId", id, "revision",
+                projectControl.getDocumentRevision(agent.projectKey(), id, Long.valueOf(String.valueOf(revision)), agent.userId())));
     }
     private McpSchema.CallToolResult saveProjectDraft(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "project.artifact.write"); requireProject(agent);

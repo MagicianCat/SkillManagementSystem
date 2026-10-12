@@ -1,5 +1,6 @@
 package com.company.skillplatform.agentworkflow.interfaces;
 import com.company.skillplatform.agentworkflow.application.ProjectAgentConfigurationService;
+import com.company.skillplatform.codegraph.application.CodeGraphPolicyResolver;
 import java.util.*;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -21,5 +22,10 @@ public class ProjectAgentConfigurationController {
  @PutMapping("/agent-configuration/contexts") public List<ProjectAgentConfigurationService.ContextView> replaceContexts(@PathVariable String projectKey,@RequestBody List<ProjectAgentConfigurationService.ContextRequest> r,Authentication a){return service.replaceContexts(projectKey,actor(a),r);}
  @PostMapping("/agent-configuration/contexts:append") public List<ProjectAgentConfigurationService.ContextView> appendContexts(@PathVariable String projectKey,@RequestBody List<ProjectAgentConfigurationService.ContextRequest> r,Authentication a){return service.appendContexts(projectKey,actor(a),r);}
  @GetMapping("/agent-configuration/reusable-projects") public List<ProjectAgentConfigurationService.ReusableProject> reusable(Authentication a){return service.reusable((Long)a.getPrincipal());}
+ @GetMapping("/agent-configuration/graph-policies") public List<CodeGraphPolicyResolver.PolicyView> graphPolicies(@PathVariable String projectKey,Authentication a){return service.graphPolicies(projectKey,actor(a));}
+ @GetMapping("/agent-configuration/nodes/{stageKey}/{nodeKey}/graph-policy") public CodeGraphPolicyResolver.PolicyView graphPolicy(@PathVariable String projectKey,@PathVariable String stageKey,@PathVariable String nodeKey,Authentication a){return service.graphPolicies(projectKey,actor(a)).stream().filter(x->x.stageKey().equals(stageKey)&&x.nodeKey().equals(nodeKey)).findFirst().orElseThrow();}
+ @PutMapping("/agent-configuration/nodes/{stageKey}/{nodeKey}/graph-policy") public CodeGraphPolicyResolver.PolicyView saveGraphPolicy(@PathVariable String projectKey,@PathVariable String stageKey,@PathVariable String nodeKey,@RequestBody CodeGraphPolicyResolver.NodePolicy policy,Authentication a){return service.saveGraphPolicy(projectKey,actor(a),stageKey,nodeKey,policy);}
+ @DeleteMapping("/agent-configuration/nodes/{stageKey}/{nodeKey}/graph-policy") public CodeGraphPolicyResolver.PolicyView resetGraphPolicy(@PathVariable String projectKey,@PathVariable String stageKey,@PathVariable String nodeKey,Authentication a){return service.resetGraphPolicy(projectKey,actor(a),stageKey,nodeKey);}
+ @PostMapping("/agent-configuration/graph-policies:validate") public ProjectAgentConfigurationService.ValidationView validateGraphPolicies(@PathVariable String projectKey,Authentication a){return service.validateGraphPolicies(projectKey,actor(a));}
  private Long actor(Authentication a){return (Long)a.getPrincipal();} public record Preset(Long presetVersionId){} public record Copy(String sourceProjectKey,String versionStrategy){} public record Node(Long agentProfileVersionId){} public record ResolveFeishu(String url){}
 }

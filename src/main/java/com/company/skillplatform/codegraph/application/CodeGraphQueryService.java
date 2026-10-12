@@ -86,6 +86,7 @@ public class CodeGraphQueryService {
         var result = new LinkedHashMap<String, Object>();
         // Only structured selector fields are accepted. Artifact, SQL/Cypher and URI fields never cross this boundary.
         switch (operation.toLowerCase()) {
+            case "overview" -> { }
             case "query", "search" -> putString(result, source, "query", 500);
             case "context", "node" -> putSelector(result, source, "target");
             case "impact" -> {

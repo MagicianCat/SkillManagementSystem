@@ -64,7 +64,6 @@ public class ProjectControlService {
         VirtualProjectEntity project = projects.save(new VirtualProjectEntity(validName(command.name()), trim(command.description(), 2000), actor));
         members.save(new VirtualProjectMemberEntity(project, actor, "OWNER", actor));
         workflow.initialize(project.getId(), command.enabledStages());
-        if (command.feishuWikiRootUrl() != null && !command.feishuWikiRootUrl().isBlank()) configureFeishuTarget(project.getProjectKey(), command.feishuWikiRootUrl(), actorId);
         audit.success("PROJECT_CREATED", actor, "VIRTUAL_PROJECT", project.getId(), requestId, Map.of(), Map.of("projectKey", project.getProjectKey()), Map.of());
         return projectView(project, actorId);
     }
@@ -172,6 +171,13 @@ public class ProjectControlService {
     @Transactional(readOnly = true)
     public DocumentView getDocument(String key, Long documentId, Long actorId) { return documentView(document(key, documentId, actorId)); }
 
+    @Transactional(readOnly = true)
+    public RevisionView getDocumentRevision(String key, Long documentId, Long revisionId, Long actorId) {
+        document(key, documentId, actorId);
+        return revisionView(revisions.findByIdAndDocumentId(revisionId, documentId)
+                .orElseThrow(() -> error("PROJECT_DOCUMENT_REVISION_NOT_FOUND", "Project document revision not found", HttpStatus.NOT_FOUND)));
+    }
+
     @Transactional
     public DocumentView saveDraft(String key, Long documentId, SaveDraft command, Long actorId, String requestId) {
         ProjectDocumentEntity document = document(key, documentId, actorId); requireMember(document.getProject(), actorId);
@@ -277,9 +283,8 @@ public class ProjectControlService {
     private BusinessException conflict() { return error("OPTIMISTIC_LOCK_CONFLICT", "Resource version is stale", HttpStatus.CONFLICT); }
     private BusinessException error(String code, String message, HttpStatus status) { return new BusinessException(code, message, status); }
 
-    public record CreateProject(String name, String description, List<String> enabledStages, String feishuWikiRootUrl) {
+    public record CreateProject(String name, String description, List<String> enabledStages) {
         public CreateProject(String name, String description) { this(name, description, null); }
-        public CreateProject(String name, String description, List<String> enabledStages) { this(name, description, enabledStages, null); }
     }
     public record UpdateProject(String name, String description, int versionNo) {}
     public record CreateDocument(String documentType, String title, String markdownContent, Object skillSnapshots, Object assumptions, Object openQuestions, List<Long> sourceDocumentIds) {}
