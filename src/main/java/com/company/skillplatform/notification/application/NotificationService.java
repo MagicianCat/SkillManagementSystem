@@ -29,6 +29,7 @@ public class NotificationService {
     private final IamUserRoleRepository userRoles;
     private final IamUserRepository users;
     private final Clock clock;
+    private com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository scopedRoles;
     private SkillOwnerRepository owners;
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -42,10 +43,16 @@ public class NotificationService {
         this.notifications = notifications; this.userRoles = userRoles; this.users = users; this.clock = clock;
     }
     @org.springframework.beans.factory.annotation.Autowired public void setOwners(SkillOwnerRepository owners) { this.owners = owners; }
+    @org.springframework.beans.factory.annotation.Autowired public void setScopedRoles(com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository value) { this.scopedRoles = value; }
 
     @Transactional
     public void reviewSubmitted(SkillVersionEntity version, Long reviewId) {
-        save(userRoles.findActiveUsersByPermission("skill:review"), NotificationType.REVIEW_SUBMITTED,
+        LinkedHashMap<Long,IamUserEntity> recipients = new LinkedHashMap<>();
+        userRoles.findActiveUsersByPermission("skill:review").forEach(user -> recipients.put(user.getId(), user));
+        if (scopedRoles != null && version.getSkill().getTeamId() != null) scopedRoles.findByTeamId(version.getSkill().getTeamId()).stream()
+                .filter(assignment -> "TEAM_ADMIN".equals(assignment.getRoleKey()))
+                .forEach(assignment -> recipients.put(assignment.getUser().getId(), assignment.getUser()));
+        save(recipients.values(), NotificationType.REVIEW_SUBMITTED,
                 "新的 Skill 审核任务", version.getSkill().getDisplayName() + " 已提交审核",
                 "REVIEW", reviewId, version);
     }

@@ -12,6 +12,7 @@ import com.company.skillplatform.user.infrastructure.repository.IamRolePermissio
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRoleRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamRoleRepository;
+import com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository;
 import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamUserRoleEntity;
 import com.company.skillplatform.user.domain.IdentityProviderType;
@@ -23,6 +24,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
+import java.util.HashSet;
 import org.springframework.http.HttpStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -39,18 +41,27 @@ public class AuthService {
     private final JwtTokenService jwt;
     private final Clock clock;
     private final SecureRandom random;
+    private final ScopedRoleAssignmentRepository scopedRoles;
 
     @Autowired
     public AuthService(IamUserRepository users,
                        IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
-                       AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt) {
-        this(users, userRoles, roles, rolePermissions, refreshTokens, jwt, Clock.systemUTC(), new SecureRandom());
+                       AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt,
+                       ScopedRoleAssignmentRepository scopedRoles) {
+        this(users, userRoles, roles, rolePermissions, refreshTokens, jwt, Clock.systemUTC(), new SecureRandom(), scopedRoles);
     }
     AuthService(IamUserRepository users,
                 IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
                 AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt, Clock clock, SecureRandom random) {
+        this(users, userRoles, roles, rolePermissions, refreshTokens, jwt, clock, random, null);
+    }
+    AuthService(IamUserRepository users,
+                IamUserRoleRepository userRoles, IamRoleRepository roles, IamRolePermissionRepository rolePermissions,
+                AuthRefreshTokenRepository refreshTokens, JwtTokenService jwt, Clock clock, SecureRandom random,
+                ScopedRoleAssignmentRepository scopedRoles) {
         this.users = users; this.userRoles = userRoles; this.roles=roles; this.rolePermissions = rolePermissions;
         this.refreshTokens = refreshTokens; this.jwt = jwt; this.clock = clock; this.random = random;
+        this.scopedRoles = scopedRoles;
     }
 
     @Transactional
@@ -136,9 +147,20 @@ public class AuthService {
     }
     private AuthenticatedUser loadActiveUser(Long userId) {
         IamUserEntity user = activeUser(userId);
+        var permissions = new HashSet<>(rolePermissions.findPermissionKeysByUserId(userId));
+        if (scopedRoles != null) scopedRoles.findByUserId(userId).forEach(assignment -> {
+            switch (assignment.getRoleKey()) {
+                case "TEAM_ADMIN" -> permissions.addAll(List.of("skill:browse", "skill:download", "skill:upload", "skill:edit", "skill:review", "admin:telemetry"));
+                case "TEAM_MAINTAINER", "PLATFORM_MAINTAINER" -> permissions.addAll(List.of("skill:browse", "skill:download", "skill:upload", "skill:edit"));
+                case "PROJECT_MANAGER" -> permissions.add("project:create");
+                default -> { }
+            }
+        });
+        var roleKeys = new java.util.LinkedHashSet<>(userRoles.findRoleKeysByUserId(userId));
+        if (scopedRoles != null) scopedRoles.findByUserId(userId).forEach(assignment -> roleKeys.add(assignment.getRoleKey()));
         return new AuthenticatedUser(user.getId(), user.getUsername(), user.getDisplayName(),
-                List.copyOf(userRoles.findRoleKeysByUserId(userId)),
-                List.copyOf(rolePermissions.findPermissionKeysByUserId(userId)));
+                List.copyOf(roleKeys),
+                permissions.stream().sorted().toList());
     }
     private IamUserEntity activeUser(Long userId) {
         IamUserEntity user = users.findById(userId)

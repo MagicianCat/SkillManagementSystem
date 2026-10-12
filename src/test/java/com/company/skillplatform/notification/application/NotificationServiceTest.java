@@ -31,6 +31,20 @@ class NotificationServiceTest {
 
     @Test void notifiesReviewersAndSubmitter(){when(roles.findActiveUsersByPermission("skill:review")).thenReturn(List.of(owner));when(users.findById(1L)).thenReturn(Optional.of(owner));service.reviewSubmitted(version,4L);service.reviewCompleted(version,4L,true,1L,"ok");service.reviewCompleted(version,4L,false,1L,"fix it");verify(repository,times(3)).saveAll(any());}
 
+    @Test void notifiesScopedTeamAdminsForTeamSkillReviews(){
+        var team=new com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity("FEISHU","team-1",null,"Team 1");
+        ReflectionTestUtils.setField(team,"id",10L);
+        var teamAdmin=new IamUserEntity(IdentityProviderType.MOCK,"admin","admin","h","Admin",null);
+        ReflectionTestUtils.setField(teamAdmin,"id",2L);version.getSkill().assignTeam(10L);
+        var assignment=new com.company.skillplatform.user.infrastructure.entity.ScopedRoleAssignmentEntity(teamAdmin,"TEAM_ADMIN","TEAM",team,owner);
+        var scoped=mock(com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository.class);
+        service.setScopedRoles(scoped);when(scoped.findByTeamId(10L)).thenReturn(List.of(assignment));
+        service.reviewSubmitted(version,4L);
+        var recipients=org.mockito.ArgumentCaptor.forClass(Collection.class);
+        verify(repository).saveAll(recipients.capture());
+        assertThat(recipients.getValue()).extracting(value -> ((UserNotificationEntity)value).getRecipient().getId()).contains(2L);
+    }
+
     @Test void readsInboxCountAndMarksOwnedNotification(){UserNotificationEntity entity=new UserNotificationEntity(owner,com.company.skillplatform.notification.domain.NotificationType.REVIEW_APPROVED,"title","content","REVIEW",4L,version);ReflectionTestUtils.setField(entity,"id",5L);when(repository.findInbox(1L,Pageable.unpaged())).thenReturn(new PageImpl<>(List.of(entity)));when(repository.findUnreadInbox(1L,Pageable.unpaged())).thenReturn(new PageImpl<>(List.of(entity)));when(repository.countByRecipientIdAndReadAtIsNull(1L)).thenReturn(1L);when(repository.findByIdAndRecipientId(5L,1L)).thenReturn(Optional.of(entity));assertThat(service.inbox(1L,false,Pageable.unpaged())).hasSize(1);assertThat(service.inbox(1L,true,Pageable.unpaged())).hasSize(1);assertThat(service.unreadCount(1L)).isOne();assertThat(service.markRead(5L,1L).readAt()).isNotNull();assertThatThrownBy(()->service.markRead(6L,1L)).hasMessageContaining("Notification not found");}
 
     @Test void reservesVersionUpdateRecipientExtension(){service.versionUpdated(version,v->List.of(owner));verify(repository).saveAll(any());}

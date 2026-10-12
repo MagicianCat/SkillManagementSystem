@@ -41,6 +41,9 @@ public class AuthController {
     @GetMapping("/feishu/callback") BrowserAuthResult feishuCallback(@RequestParam String code,@RequestParam String state,HttpServletRequest request, jakarta.servlet.http.HttpServletResponse response){return browserLogin(code,state,request,response);}
     @PostMapping("/oauth/feishu/callback") BrowserAuthResult feishuCallback(@Valid @RequestBody OAuthCallbackRequest request,HttpServletRequest servletRequest, jakarta.servlet.http.HttpServletResponse response){return browserLogin(request.code(),request.state(),servletRequest,response);}
     @GetMapping("/session") BrowserAuthResult session(@CookieValue(name=BROWSER_COOKIE, required=false) String cookie) { return toBrowserResult(browserSessions.restore(cookie)); }
+    @GetMapping("/me") com.company.skillplatform.auth.domain.AuthenticatedUser me(Authentication authentication) {
+        return service.currentUser((Long) authentication.getPrincipal());
+    }
     @PostMapping("/refresh")
     TokenResult refresh(@Valid @RequestBody RefreshRequest request, HttpServletRequest servletRequest) {
         return service.refresh(request.refreshToken(), servletRequest.getHeader(HttpHeaders.USER_AGENT));

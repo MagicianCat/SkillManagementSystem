@@ -13,10 +13,12 @@ import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.user.domain.IdentityProviderType;
 import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
+import com.company.skillplatform.user.infrastructure.entity.ScopedRoleAssignmentEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamRolePermissionRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamRoleRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRoleRepository;
+import com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
@@ -31,8 +33,20 @@ class AuthServiceTest {
     private final IamUserRepository users=mock(IamUserRepository.class); private final IamUserRoleRepository userRoles=mock(IamUserRoleRepository.class);
     private final IamRoleRepository roles=mock(IamRoleRepository.class); private final IamRolePermissionRepository permissions=mock(IamRolePermissionRepository.class);
     private final AuthRefreshTokenRepository tokens=mock(AuthRefreshTokenRepository.class); private final JwtTokenService jwt=mock(JwtTokenService.class);
+    private final ScopedRoleAssignmentRepository scopedRoles=mock(ScopedRoleAssignmentRepository.class);
     private final Instant now=Instant.parse("2026-09-01T08:00:00Z"); private AuthService service; private IamUserEntity user;
-    @BeforeEach void setUp(){service=new AuthService(users,userRoles,roles,permissions,tokens,jwt,Clock.fixed(now,ZoneOffset.UTC),new SecureRandom());user=new IamUserEntity(IdentityProviderType.FEISHU,"ou_1","feishu_ou_1","User",null);ReflectionTestUtils.setField(user,"id",1L);when(users.findById(1L)).thenReturn(Optional.of(user));when(userRoles.findRoleKeysByUserId(1L)).thenReturn(List.of("CONSUMER"));when(permissions.findPermissionKeysByUserId(1L)).thenReturn(List.of("skill:browse"));when(jwt.createAccessToken(any())).thenReturn("access");when(jwt.accessExpiresInSeconds()).thenReturn(1800L);when(jwt.refreshExpiresAt()).thenReturn(now.plusSeconds(3600));}
+    @BeforeEach void setUp(){service=new AuthService(users,userRoles,roles,permissions,tokens,jwt,Clock.fixed(now,ZoneOffset.UTC),new SecureRandom(),scopedRoles);user=new IamUserEntity(IdentityProviderType.FEISHU,"ou_1","feishu_ou_1","User",null);ReflectionTestUtils.setField(user,"id",1L);when(users.findById(1L)).thenReturn(Optional.of(user));when(userRoles.findRoleKeysByUserId(1L)).thenReturn(List.of("CONSUMER"));when(permissions.findPermissionKeysByUserId(1L)).thenReturn(List.of("skill:browse"));when(scopedRoles.findByUserId(1L)).thenReturn(List.of());when(jwt.createAccessToken(any())).thenReturn("access");when(jwt.accessExpiresInSeconds()).thenReturn(1800L);when(jwt.refreshExpiresAt()).thenReturn(now.plusSeconds(3600));}
+    @Test void scopedMaintainerIsVisibleInSessionAndRevocationTakesEffect(){
+        when(scopedRoles.findByUserId(1L)).thenReturn(List.of(new ScopedRoleAssignmentEntity(user,"TEAM_MAINTAINER","TEAM",null,user)));
+        assertThat(service.currentUser(1L).permissions()).contains("skill:upload","skill:edit");
+        assertThat(service.currentUser(1L).roles()).contains("TEAM_MAINTAINER");
+        when(scopedRoles.findByUserId(1L)).thenReturn(List.of());
+        assertThat(service.currentUser(1L).permissions()).doesNotContain("skill:upload","skill:edit");
+    }
+    @Test void teamAdminIncludesReviewAndSkillMaintenancePermissions(){
+        when(scopedRoles.findByUserId(1L)).thenReturn(List.of(new ScopedRoleAssignmentEntity(user,"TEAM_ADMIN","TEAM",null,user)));
+        assertThat(service.currentUser(1L).permissions()).contains("skill:upload","skill:edit","skill:review","admin:telemetry");
+    }
     @Test void feishuLoginCreatesUserAndIssuesTokens(){when(users.findByFeishuOpenId("ou_1")).thenReturn(Optional.empty());when(users.findByFeishuUserId(null)).thenReturn(Optional.empty());when(users.findByIdentityProviderAndExternalUserId(IdentityProviderType.FEISHU,"ou_1")).thenReturn(Optional.empty());when(users.save(any(IamUserEntity.class))).thenAnswer(i->{IamUserEntity u=i.getArgument(0);ReflectionTestUtils.setField(u,"id",1L);return u;});when(roles.findByRoleKey("CONSUMER")).thenReturn(Optional.of(new IamRoleEntity("CONSUMER","普通用户",null)));var result=service.loginFeishu("ou_1","feishu_ou_1","User",null,null);assertThat(result.accessToken()).isEqualTo("access");assertThat(result.user().permissions()).contains("skill:browse");}
     @Test void refreshRotatesUsableToken(){AuthRefreshTokenEntity stored=new AuthRefreshTokenEntity(user,AuthService.sha256("refresh"),now.plusSeconds(30),null);when(tokens.findByTokenHashForUpdate(AuthService.sha256("refresh"))).thenReturn(Optional.of(stored));assertThat(service.refresh("refresh",null).accessToken()).isEqualTo("access");assertThat(stored.getRevokedAt()).isEqualTo(now);}
     @Test void refreshRejectsMissingToken(){when(tokens.findByTokenHashForUpdate(any())).thenReturn(Optional.empty());assertThatThrownBy(()->service.refresh("missing",null)).isInstanceOf(BusinessException.class);}
