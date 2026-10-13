@@ -46,6 +46,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         .map(org.springframework.security.core.authority.SimpleGrantedAuthority::new).toList();
                 var authentication = new UsernamePasswordAuthenticationToken(userId, null, authorities);
                 SecurityContextHolder.getContext().setAuthentication(authentication);
+                request.setAttribute("sms.auth.verifiedBearer", Boolean.TRUE);
                 log.info("event=auth.jwt.accepted requestId={} actorId={}", LogContext.requestId(), userId);
             } catch (JwtException | IllegalArgumentException | BusinessException ex) {
                 try {

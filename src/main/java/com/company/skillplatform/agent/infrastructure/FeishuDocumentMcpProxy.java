@@ -18,7 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-/** Backend-owned, read-only facade for Feishu documents. Raw UAT never leaves this process. */
+/** Backend-owned Feishu document gateway. Raw UAT never leaves this process. */
 @Component
 public class FeishuDocumentMcpProxy {
     private static final Logger log = LoggerFactory.getLogger(FeishuDocumentMcpProxy.class);
@@ -200,6 +200,42 @@ public class FeishuDocumentMcpProxy {
             }
         }
         catch(BusinessException e){throw e;} catch(Exception e){throw new BusinessException("FEISHU_PUBLICATION_FAILED","Feishu DOCX block writing failed",HttpStatus.BAD_GATEWAY);}
+    }
+
+    /** Replaces the document's existing top-level blocks before writing a new artifact revision. */
+    public void replaceNativeDocx(Long userId, String documentToken, String markdown) {
+        try {
+            String base = apiBaseUrl.replaceAll("/$", "");
+            String encodedDocument = URLEncoder.encode(documentToken, StandardCharsets.UTF_8);
+            String parent = "/docx/v1/documents/" + encodedDocument + "/blocks/" + encodedDocument;
+            String pageToken = "";
+            int childCount = 0;
+            boolean hasMore;
+            do {
+                String url = base + parent + "/children?document_revision_id=-1&page_size=500"
+                        + (pageToken.isBlank() ? "" : "&page_token=" + URLEncoder.encode(pageToken, StandardCharsets.UTF_8));
+                JsonNode data = request("GET", url, null, userToken(userId)).path("data");
+                JsonNode items = data.path("items");
+                if (items.isArray()) childCount += items.size();
+                hasMore = data.path("has_more").asBoolean(false);
+                pageToken = data.path("page_token").asText("");
+                if (hasMore && pageToken.isBlank()) throw new IllegalStateException("Feishu returned a blank document page token");
+            } while (hasMore);
+
+            while (childCount > 0) {
+                int endIndex = Math.min(500, childCount);
+                String deleteUrl = base + parent + "/children/batch_delete?document_revision_id=-1&client_token="
+                        + URLEncoder.encode(UUID.randomUUID().toString(), StandardCharsets.UTF_8);
+                ObjectNode range = json.createObjectNode().put("start_index", 0).put("end_index", endIndex);
+                request("DELETE", deleteUrl, range, userToken(userId));
+                childCount -= endIndex;
+            }
+            writeNativeDocx(userId, documentToken, markdown);
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BusinessException("FEISHU_PUBLICATION_FAILED", "Feishu DOCX replacement failed", HttpStatus.BAD_GATEWAY);
+        }
     }
 
     /** Parses a small markdown subset into Feishu DOCX blocks so published documents render as

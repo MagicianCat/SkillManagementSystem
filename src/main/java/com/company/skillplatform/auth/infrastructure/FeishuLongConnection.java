@@ -18,6 +18,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
+import com.company.skillplatform.collabproject.application.CollabApprovalCardService;
+import java.util.Set;
 
 /**
  * Owns the Feishu SDK WebSocket connection for the lifetime of this service.
@@ -31,11 +33,17 @@ public class FeishuLongConnection implements SmartLifecycle {
 
     private final FeishuProperties properties;
     private final com.company.skillplatform.agent.application.FeishuBotMessageService botMessages;
+    private final CollabApprovalCardService collabApprovalCards;
+    private final com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards;
     private volatile Client client;
     private volatile boolean running;
 
-    public FeishuLongConnection(FeishuProperties properties, com.company.skillplatform.agent.application.FeishuBotMessageService botMessages) {
-        this.properties = properties; this.botMessages = botMessages;
+    public FeishuLongConnection(FeishuProperties properties,
+            com.company.skillplatform.agent.application.FeishuBotMessageService botMessages,
+            CollabApprovalCardService collabApprovalCards,
+            com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards) {
+        this.properties = properties; this.botMessages = botMessages; this.collabApprovalCards = collabApprovalCards;
+        this.collabStagePromptCards = collabStagePromptCards;
     }
 
     @Override
@@ -47,6 +55,18 @@ public class FeishuLongConnection implements SmartLifecycle {
         EventDispatcher dispatcher = EventDispatcher.newBuilder("", "")
                 .onP2CardActionTrigger(new P2CardActionTriggerHandler() {
                     @Override public P2CardActionTriggerResponse handle(P2CardActionTrigger event) {
+                        var action = event == null || event.getEvent() == null ? null : event.getEvent().getAction();
+                        var value = action == null ? null : action.getValue();
+                        Set<String> valueKeys = value == null ? Set.of() : value.keySet();
+                        log.info("event=feishu.card_action.received tag={} hasName={} valueKeys={} hasContextChat={} hasContextMessage={}",
+                                action == null ? "" : action.getTag(), action != null && action.getName() != null,
+                                valueKeys, event != null && event.getEvent() != null && event.getEvent().getContext() != null
+                                        && event.getEvent().getContext().getOpenChatId() != null,
+                                event != null && event.getEvent() != null && event.getEvent().getContext() != null
+                                        && event.getEvent().getContext().getOpenMessageId() != null);
+                        if (collabApprovalCards.handles(event)) return collabApprovalCards.handle(event);
+                        if (collabStagePromptCards.handles(event)) return collabStagePromptCards.handle(event);
+                        log.info("event=feishu.card_action.unmatched route=agent_fallback");
                         return botMessages.handleCardAction(event);
                     }
                 })

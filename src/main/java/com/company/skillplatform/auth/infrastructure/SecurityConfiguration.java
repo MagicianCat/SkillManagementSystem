@@ -19,13 +19,19 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.beans.factory.annotation.Value;
 import java.util.Arrays;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 
 @Configuration
 @EnableMethodSecurity
 @EnableConfigurationProperties({JwtProperties.class,FeishuProperties.class})
 public class SecurityConfiguration {
     private static final Logger log = LoggerFactory.getLogger(SecurityConfiguration.class);
-    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwt, BrowserSessionAuthenticationFilter browser, @Qualifier("corsConfigurationSource") CorsConfigurationSource corsSource,
+    @Bean FilterRegistrationBean<CollabProjectBearerWriteFilter> collabBearerFilterRegistration(CollabProjectBearerWriteFilter filter) {
+        FilterRegistrationBean<CollabProjectBearerWriteFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwt, BrowserSessionAuthenticationFilter browser, CollabProjectBearerWriteFilter collabBearerWrites, @Qualifier("corsConfigurationSource") CorsConfigurationSource corsSource,
                                                   SecurityErrorWriter errors) throws Exception {
         return http.cors(cors -> cors.configurationSource(corsSource)).csrf(csrf -> csrf.disable()).sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
@@ -53,11 +59,12 @@ public class SecurityConfiguration {
                                     "ACCESS_DENIED", "Access is denied", req.getRequestId());
                         }))
                 .addFilterBefore(jwt, UsernamePasswordAuthenticationFilter.class)
-                .addFilterAfter(browser, JwtAuthenticationFilter.class).build();
+                .addFilterAfter(browser, JwtAuthenticationFilter.class)
+                .addFilterAfter(collabBearerWrites, BrowserSessionAuthenticationFilter.class).build();
     }
     @Bean CorsConfigurationSource corsConfigurationSource(@Value("${auth.browser.allowed-origins:http://127.0.0.1:5173,http://localhost:5173}") String origins) {
         CorsConfiguration config = new CorsConfiguration(); config.setAllowedOrigins(Arrays.stream(origins.split(",")).map(String::trim).filter(s -> !s.isBlank()).toList());
-        config.setAllowedMethods(java.util.List.of("GET","POST","PUT","PATCH","DELETE","OPTIONS")); config.setAllowedHeaders(java.util.List.of("Authorization","Content-Type","Accept","X-Request-Id","Last-Event-ID")); config.setAllowCredentials(true); config.setMaxAge(3600L);
+        config.setAllowedMethods(java.util.List.of("GET","POST","PUT","PATCH","DELETE","OPTIONS")); config.setAllowedHeaders(java.util.List.of("Authorization","Content-Type","Accept","X-Request-Id","Last-Event-ID","Idempotency-Key")); config.setAllowCredentials(true); config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource(); source.registerCorsConfiguration("/api/**", config); return source;
     }
 }
