@@ -59,12 +59,6 @@ public class CollabFeishuOutbox {
                 Map.of("stageId", nextStageId, "submissionId", submissionId, "initial", false));
     }
 
-    public void enqueueStageAssignmentReminder(Long projectId, Long stageId, int assignmentVersion) {
-        enqueue(projectId, "STAGE_ASSIGNMENT", "STAGE", stageId,
-                "stage-assignment:" + stageId + ":" + assignmentVersion,
-                Map.of("stageId", stageId, "assignmentVersion", assignmentVersion));
-    }
-
     public void enqueueStageReworkReminder(Long projectId, Long stageId, Long submissionId) {
         enqueue(projectId, "STAGE_REWORK", "STAGE", stageId,
                 "stage-rework:" + submissionId,

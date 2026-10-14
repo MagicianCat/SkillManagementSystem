@@ -110,9 +110,6 @@ public class CollabProjectService {
         StageView current=jdbc.query("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no from collab_stage where project_id=? and stage_key=? for update",rs->rs.next()?stageView(rs):null,p.projectId(),stageKey);
         if(current==null)throw error("COLLAB_STAGE_NOT_FOUND","Stage not found",HttpStatus.NOT_FOUND);
         if(!List.of("WAITING","READY","NOT_STARTED").contains(current.status()))throw error("COLLAB_STAGE_ASSIGNMENT_LOCKED","Assignments can only be changed before the stage starts",HttpStatus.CONFLICT);
-        List<Long> previousReviewers=new ArrayList<>();
-        if(current.reviewerUserId()!=null)previousReviewers.add(current.reviewerUserId());
-        previousReviewers.addAll(stageAdditionalReviewerIds(current.stageId()));
         LinkedHashSet<Long> reviewers=new LinkedHashSet<>();
         if(reviewer!=null)reviewers.add(reviewer);
         if(additionalReviewerIds!=null)for(Long id:additionalReviewerIds){if(id==null)throw error("COLLAB_STAGE_REVIEWER_INVALID","Reviewers must be active project members",HttpStatus.UNPROCESSABLE_ENTITY);reviewers.add(id);}
@@ -120,12 +117,9 @@ public class CollabProjectService {
         if(requiresReviewer(p.approvalLevel(),stageKey)&&reviewers.isEmpty())throw error("COLLAB_STAGE_REVIEWER_REQUIRED","Manual stages require at least one active reviewer",HttpStatus.UNPROCESSABLE_ENTITY);
         Long primary=reviewer!=null?reviewer:reviewers.stream().findFirst().orElse(null);
         if(primary!=null)reviewers.remove(primary);
-        List<Long> nextReviewers=new ArrayList<>();if(primary!=null)nextReviewers.add(primary);nextReviewers.addAll(reviewers);
-        boolean changed=!Objects.equals(current.ownerUserId(),owner)||!new LinkedHashSet<>(previousReviewers).equals(new LinkedHashSet<>(nextReviewers));
         jdbc.update("update collab_stage set owner_user_id=?,reviewer_user_id=?,version_no=version_no+1,time_updated=now(3) where id=?",owner,primary,current.stageId());
         jdbc.update("delete from collab_stage_additional_reviewer where stage_id=?",current.stageId());
         for(Long id:reviewers)jdbc.update("insert into collab_stage_additional_reviewer(time_created,time_updated,stage_id,reviewer_user_id) values(now(3),now(3),?,?)",current.stageId(),id);
-        if(changed)feishuOutbox.enqueueStageAssignmentReminder(p.projectId(),current.stageId(),current.versionNo()+1);
         return jdbc.queryForObject("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no from collab_stage where project_id=? and stage_key=?",(rs,n)->stageView(rs),p.projectId(),stageKey);
     }
 

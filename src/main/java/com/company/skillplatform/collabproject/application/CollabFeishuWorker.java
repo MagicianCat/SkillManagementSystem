@@ -129,7 +129,7 @@ public class CollabFeishuWorker {
                 case "REMOVE_MEMBER" -> syncMember(projectId, aggregateId, false);
                 case "APPROVAL_REMINDER" -> approvalReminder(projectId, aggregateId, "APPROVAL".equals(row.get("aggregate_type")));
                 case "STAGE_HANDOFF" -> stageHandoff(projectId, aggregateId, id);
-                case "STAGE_ASSIGNMENT" -> stageAssignment(projectId, aggregateId, id);
+                case "STAGE_ASSIGNMENT" -> { /* Drain legacy assignment events without sending stale cards. */ }
                 case "STAGE_REWORK" -> stageRework(projectId, aggregateId, id);
                 case "CREATE_WIKI_FOLDER" -> createWikiFolder(projectId);
                 case "PUBLISH_ARTIFACT" -> publish(projectId, aggregateId);
@@ -278,29 +278,6 @@ public class CollabFeishuWorker {
         elements.add(Map.of("tag", "markdown", "content", "[打开阶段页面](" + stageUrl + ")"));
         chats.sendInteractive(chatId, Map.of("schema", "2.0", "body", Map.of("elements", elements)),
                 "collab-stage-handoff-" + outboxId);
-    }
-
-    private void stageAssignment(long projectId, long stageId, long outboxId) {
-        String chatId = chatId(projectId);
-        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,s.stage_key,s.title stage_title,s.stage_order,s.status,s.id stage_id "
-                + "FROM collab_stage s JOIN collab_project p ON p.id=s.project_id WHERE s.id=? AND p.id=?", stageId, projectId);
-        List<Map<String, Object>> people = jdbc.queryForList("SELECT DISTINCT u.display_name,u.feishu_open_id FROM iam_user u JOIN ("
-                + "SELECT owner_user_id user_id FROM collab_stage WHERE id=? UNION "
-                + "SELECT reviewer_user_id FROM collab_stage WHERE id=? AND reviewer_user_id IS NOT NULL UNION "
-                + "SELECT reviewer_user_id FROM collab_stage_additional_reviewer WHERE stage_id=?) assigned ON assigned.user_id=u.id ORDER BY u.display_name",
-                stageId, stageId, stageId);
-        String mentions = people.stream().map(person -> person.get("feishu_open_id") == null
-                || String.valueOf(person.get("feishu_open_id")).isBlank()
-                ? String.valueOf(person.get("display_name"))
-                : "<at id=" + person.get("feishu_open_id") + "></at>")
-                .collect(java.util.stream.Collectors.joining("、"));
-        String projectKey = String.valueOf(row.get("project_key"));
-        String stageKey = String.valueOf(row.get("stage_key"));
-        String stageUrl = webBaseUrl + "/collab-projects/" + projectKey + "/stages/" + stageKey;
-        String content = "项目 **" + row.get("name") + "** 的 **" + row.get("stage_title") + "** 阶段分工已更新。\n负责人及审批人："
-                + mentions + "\n阶段状态：" + row.get("status") + "\n[打开阶段页面](" + stageUrl + ")";
-        chats.sendInteractive(chatId, Map.of("schema", "2.0", "body", Map.of("elements", List.of(
-                Map.of("tag", "markdown", "content", content)))), "collab-stage-assignment-" + outboxId);
     }
 
     private void stageRework(long projectId, long stageId, long outboxId) {
