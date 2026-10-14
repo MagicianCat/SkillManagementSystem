@@ -50,13 +50,19 @@ public class CollabFeishuOutbox {
 
     public void enqueueInitialStageHandoff(Long projectId, Long stageId, String projectKey) {
         enqueue(projectId, "STAGE_HANDOFF", "STAGE", stageId,
-                "stage-handoff:first:" + projectKey, Map.of("stageId", stageId, "initial", true));
+                "stage-handoff:first:" + projectKey + ":" + stageId, Map.of("stageId", stageId, "initial", true));
     }
 
     public void enqueueStageHandoff(Long projectId, Long nextStageId, Long submissionId) {
         enqueue(projectId, "STAGE_HANDOFF", "STAGE", nextStageId,
                 "stage-handoff:submission:" + submissionId + ":" + nextStageId,
                 Map.of("stageId", nextStageId, "submissionId", submissionId, "initial", false));
+    }
+
+    public void enqueueStageActivation(Long projectId, Long stageId, int stageVersion) {
+        enqueue(projectId, "STAGE_HANDOFF", "STAGE", stageId,
+                "stage-handoff:activation:" + stageId + ":" + stageVersion,
+                Map.of("stageId", stageId, "initial", false));
     }
 
     public void enqueueStageReworkReminder(Long projectId, Long stageId, Long submissionId) {

@@ -27,6 +27,8 @@ public class CollabProjectFlowService {
     private static final Set<String> STAGE_KEYS = Set.of(
             "REQUIREMENT", "PRODUCT", "ARCHITECTURE_DESIGN", "UI_DESIGN",
             "FRONTEND_CODING", "BACKEND_CODING", "TESTING", "ACCEPTANCE");
+    private static final List<List<Integer>> STAGE_GROUPS = List.of(
+            List.of(1), List.of(2), List.of(3, 4), List.of(5, 6), List.of(7), List.of(8));
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -56,6 +58,8 @@ public class CollabProjectFlowService {
         lockProjectFlow(project.projectId());
         String key = normalizeStage(stageKey);
         StageRow stage = lockedStage(project.projectId(), key);
+        if ("SKIPPED".equals(stage.status()) || "COMPLETED".equals(stage.status()))
+            throw error("COLLAB_STAGE_NOT_SUBMITTABLE", "Skipped or completed stages do not accept artifacts", HttpStatus.CONFLICT);
         if (request.stageId() == null || !request.stageId().equals(stage.id()) || request.attemptNo() < 1)
             throw error("COLLAB_STAGE_VERSION_STALE", "Stage or attempt no longer matches", HttpStatus.CONFLICT);
         String kind = request.kind().trim().toUpperCase(Locale.ROOT);
@@ -199,26 +203,31 @@ public class CollabProjectFlowService {
     private StageRow readStage(Long projectId,String key){StageRow stage=jdbc.query("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no,started_at,completed_at from collab_stage where project_id=? and stage_key=?",rs->rs.next()?stage(rs):null,projectId,key);if(stage==null)throw error("COLLAB_STAGE_NOT_FOUND","Stage not found",HttpStatus.NOT_FOUND);return stage;}
     private StageRow stage(ResultSet rs)throws SQLException{return new StageRow(rs.getLong("id"),rs.getString("stage_key"),rs.getInt("stage_order"),rs.getString("title"),rs.getString("artifact_kind"),rs.getBoolean("git_required"),rs.getLong("owner_user_id"),(Long)rs.getObject("reviewer_user_id"),rs.getString("status"),rs.getInt("attempt_no"),rs.getInt("version_no"),instant(rs,"started_at"),instant(rs,"completed_at"));}
     private void completeStage(Long projectId,StageRow stage,Long actorId,Long submissionId,Instant now){
-        int groupStart=stageGroupStart(stage.order());
-        int groupEnd=stageGroupEnd(groupStart);
-        List<Integer> unfinished=jdbc.query("select stage_order from collab_stage where project_id=? and stage_order between ? and ? and status<>'COMPLETED' for update",(rs,n)->rs.getInt(1),projectId,groupStart,groupEnd);
+        int currentGroup=stageGroupIndex(stage.order());
+        List<Integer> unfinished=jdbc.query("select stage_order from collab_stage where project_id=? and stage_order in ("+placeholders(STAGE_GROUPS.get(currentGroup).size())+") and status not in ('COMPLETED','SKIPPED') for update",
+                (rs,n)->rs.getInt(1),concat(projectId,STAGE_GROUPS.get(currentGroup)));
         if(!unfinished.isEmpty())return;
-        int nextOrder=groupEnd+1;
-        if(nextOrder>8){
-            int completed=jdbc.update("update collab_project set status='COMPLETED',version_no=version_no+1,time_updated=? where id=? and status<>'COMPLETED'",now,projectId);
-            if(completed==1)feishuOutbox.enqueueProjectCompleted(projectId);
+        for(int groupIndex=currentGroup+1;groupIndex<STAGE_GROUPS.size();groupIndex++){
+            List<Integer> orders=STAGE_GROUPS.get(groupIndex);
+            List<StageActivation> nextStages=jdbc.query("select id,stage_order,status from collab_stage where project_id=? and stage_order in ("+placeholders(orders.size())+") and status not in ('COMPLETED','SKIPPED') order by stage_order",
+                    (rs,n)->new StageActivation(rs.getLong("id"),rs.getInt("stage_order"),rs.getString("status")),concat(projectId,orders));
+            if(nextStages.isEmpty())continue;
+            int nextOrder=nextStages.get(0).order();
+            jdbc.update("update collab_project set current_stage_order=?,version_no=version_no+1,time_updated=? where id=?",nextOrder,now,projectId);
+            for(StageActivation next:nextStages){
+                int changed=jdbc.update("update collab_stage set status='IN_PROGRESS',started_at=coalesce(started_at,?),version_no=version_no+1,time_updated=? where id=? and status in ('WAITING','READY','NOT_STARTED')",now,now,next.id());
+                if(changed==1)feishuOutbox.enqueueStageHandoff(projectId,next.id(),submissionId);
+            }
             return;
         }
-        int nextEnd=stageGroupEnd(nextOrder);
-        jdbc.update("update collab_project set current_stage_order=?,version_no=version_no+1,time_updated=? where id=?",nextOrder,now,projectId);
-        List<Long> nextStageIds=jdbc.query("select id from collab_stage where project_id=? and stage_order between ? and ? order by stage_order",(rs,n)->rs.getLong(1),projectId,nextOrder,nextEnd);
-        for(Long nextStageId:nextStageIds){
-            jdbc.update("update collab_stage set status='IN_PROGRESS',started_at=coalesce(started_at,?),time_updated=? where id=? and status='WAITING'",now,now,nextStageId);
-            feishuOutbox.enqueueStageHandoff(projectId,nextStageId,submissionId);
-        }
+        int completed=jdbc.update("update collab_project set status='COMPLETED',version_no=version_no+1,time_updated=? where id=? and status<>'COMPLETED'",now,projectId);
+        if(completed==1)feishuOutbox.enqueueProjectCompleted(projectId);
     }
     private int stageGroupStart(int order){return order==4?3:order==6?5:order;}
     private int stageGroupEnd(int start){return start==3||start==5?start+1:start;}
+    private int stageGroupIndex(int order){for(int i=0;i<STAGE_GROUPS.size();i++)if(STAGE_GROUPS.get(i).contains(order))return i;throw new IllegalArgumentException("Unsupported stage order: "+order);}
+    private String placeholders(int count){return String.join(",",Collections.nCopies(count,"?"));}
+    private Object[] concat(Object first,List<Integer> rest){Object[] args=new Object[rest.size()+1];args[0]=first;for(int i=0;i<rest.size();i++)args[i+1]=rest.get(i);return args;}
     private void lockProjectFlow(Long projectId){jdbc.queryForObject("select id from collab_project where id=? for update",Long.class,projectId);}
     private void addEvent(Long projectId,StageRow stage,String event,Long actor,String from,String to,Long reference,Object payload){jdbc.update("insert into collab_stage_event(time_created,time_updated,project_id,stage_id,attempt_no,event_type,actor_user_id,from_status,to_status,reference_id,payload_json,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",Instant.now(),Instant.now(),projectId,stage.id(),stage.attemptNo(),event,actor,from,to,reference,json(payload),Instant.now());}
     private List<Long> additionalReviewerIds(Long stageId){return jdbc.query("select reviewer_user_id from collab_stage_additional_reviewer where stage_id=? order by id",(rs,n)->rs.getLong(1),stageId);}
@@ -240,6 +249,7 @@ public class CollabProjectFlowService {
     private BusinessException error(String code,String message,HttpStatus status){return new BusinessException(code,message,status);}
 
     private record StageRow(Long id,String stageKey,int order,String title,String artifactKind,boolean gitRequired,Long ownerUserId,Long reviewerUserId,String status,int attemptNo,int versionNo,Instant startedAt,Instant completedAt){}
+    private record StageActivation(Long id,int order,String status){}
     public record WorkflowView(String projectKey,String approvalLevel,String projectStatus,int currentStageOrder,List<StageWorkflowView> stages){}
     public record StageWorkflowView(Long stageId,String stageKey,int order,String title,String artifactKind,boolean gitRequired,Long ownerUserId,Long reviewerUserId,List<Long> additionalReviewerUserIds,String status,int attemptNo,int versionNo,Long submissionId,String submissionStatus,Long artifactVersionId,Instant submittedAt,String approvalState,Long frozenReviewerUserId,Integer approvalVersionNo){}
     public record ArtifactView(Long artifactVersionId,Long artifactId,int versionNo,int attemptNo,String stageKey,String kind,String title,String sha256,long sizeBytes,String feishuUrl,String contentUrl,String repositoryUrl,String commitOrPullRequestUrl,boolean pendingApproval){}
