@@ -37,6 +37,7 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(auth -> auth
                         .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.POST,"/api/v1/auth/ide/authorizations","/api/v1/auth/ide/token").permitAll()
+                        .requestMatchers(HttpMethod.POST,"/api/integration/v1/resources/push").permitAll()
                         .requestMatchers("/api/v1/auth/refresh",
                                 "/api/v1/auth/oauth/feishu/authorize", "/api/v1/auth/oauth/feishu/callback",
                                 "/api/v1/auth/feishu/authorize", "/api/v1/auth/feishu/callback",

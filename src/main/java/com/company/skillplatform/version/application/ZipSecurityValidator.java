@@ -7,17 +7,36 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.zip.*;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 @Component
 public class ZipSecurityValidator {
     private static final Set<String> RESERVED = Set.of("skill.yaml", "overlays", "manifest.json", "install.txt", "sha256sums");
-    private static final long MAX_EXPANDED = 200L * 1024 * 1024; private static final int MAX_FILES = 2000;
+    private static final long MAX_EXPANDED = 200L * 1024 * 1024; private static final long MAX_COMPRESSED = 50L * 1024 * 1024; private static final int MAX_FILES = 2000;
     public ValidatedArchive validate(InputStream input) {
         Map<String, byte[]> raw = new LinkedHashMap<>(); long expanded = 0;
-        try (ZipInputStream zip = new ZipInputStream(input, StandardCharsets.UTF_8)) {
-            ZipEntry entry; while ((entry = zip.getNextEntry()) != null) {
+        long started = System.nanoTime();
+        Path archivePath = null;
+        try {
+            archivePath = Files.createTempFile("skill-zip-validation-", ".zip");
+            long compressed=0;
+            try (InputStream source=input; OutputStream sink=Files.newOutputStream(archivePath)) {
+                byte[] chunk=new byte[8192]; int copied;
+                while ((copied=source.read(chunk))!=-1) {
+                    compressed+=copied;
+                    if (compressed>MAX_COMPRESSED) throw invalid("ZIP_COMPRESSED_SIZE_LIMIT");
+                    sink.write(chunk,0,copied);
+                }
+            }
+            try (ZipFile zip = ZipFile.builder().setPath(archivePath).setCharset(StandardCharsets.UTF_8).get()) {
+            Enumeration<ZipArchiveEntry> entries=zip.getEntries();
+            while (entries.hasMoreElements()) {
+                ZipArchiveEntry entry=entries.nextElement();
+                if (entry.isUnixSymlink()) throw invalid("ZIP_SYMLINK_FORBIDDEN");
+                if (System.nanoTime() - started > 15_000_000_000L) throw invalid("ZIP_PARSE_TIMEOUT");
                 if (entry.isDirectory()) continue; String name = normalize(entry.getName());
                 if (name == null || name.isBlank()) throw invalid("ZIP_PATH_INVALID");
                 if (name.startsWith("/") || name.contains("..") || name.contains("\\") || name.indexOf('\0') >= 0) throw invalid("ZIP_PATH_TRAVERSAL");
@@ -26,10 +45,15 @@ public class ZipSecurityValidator {
                 if (entry.getMethod() != ZipEntry.STORED && entry.getMethod() != ZipEntry.DEFLATED) throw invalid("ZIP_COMPRESSION_UNSUPPORTED");
                 if (raw.containsKey(name)) throw invalid("ZIP_DUPLICATE_PATH");
                 ByteArrayOutputStream out = new ByteArrayOutputStream(); byte[] buffer = new byte[8192]; int n;
-                while ((n = zip.read(buffer)) >= 0) { expanded += n; if (expanded > MAX_EXPANDED) throw invalid("ZIP_EXPANDED_SIZE_LIMIT"); out.write(buffer, 0, n); }
+                try (InputStream file=zip.getInputStream(entry)) {
+                    while ((n = file.read(buffer)) >= 0) { expanded += n; if (expanded > MAX_EXPANDED || out.size()+n > 50L*1024*1024) throw invalid("ZIP_EXPANDED_SIZE_LIMIT"); if (System.nanoTime() - started > 15_000_000_000L) throw invalid("ZIP_PARSE_TIMEOUT"); out.write(buffer, 0, n); }
+                }
+                if (entry.getCompressedSize() > 0 && out.size() / entry.getCompressedSize() > 200) throw invalid("ZIP_COMPRESSION_RATIO_LIMIT");
                 raw.put(name, out.toByteArray()); if (raw.size() > MAX_FILES) throw invalid("ZIP_FILE_COUNT_LIMIT");
             }
+            }
         } catch (BusinessException ex) { throw ex; } catch (Exception ex) { throw invalid("ZIP_INVALID"); }
+        finally { if (archivePath != null) try { Files.deleteIfExists(archivePath); } catch (IOException ignored) { } }
         String root = commonRoot(raw.keySet()); Map<String, byte[]> files = new LinkedHashMap<>();
         raw.forEach((path, bytes) -> files.put(root == null ? path : path.substring(root.length() + 1), bytes));
         if (!files.containsKey("SKILL.md")) throw invalid("SKILL_MD_REQUIRED");

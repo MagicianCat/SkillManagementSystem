@@ -41,6 +41,13 @@ server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
 
+integration:
+  external:
+    api-keys-json: '${EXTERNAL_RESOURCE_API_KEYS_JSON:{}}'
+    max-file-bytes: ${INTEGRATION_EXTERNAL_MAX_FILE_BYTES:52428800}
+    requests-per-minute: ${INTEGRATION_EXTERNAL_REQUESTS_PER_MINUTE:60}
+    orphan-sweep-ms: ${INTEGRATION_EXTERNAL_ORPHAN_SWEEP_MS:3600000}
+
 auth:
   browser:
     cookie-secure: ${AUTH_BROWSER_COOKIE_SECURE:false}
