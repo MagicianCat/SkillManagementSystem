@@ -44,7 +44,10 @@ public class CollabProjectService {
     }
 
     @Transactional
-    public ProjectView create(CreateCommand command, Long actorId, boolean admin) {
+    public ProjectView create(CreateCommand command, Long actorId, boolean admin, CollabFeishuBindingService.WikiTarget wikiTarget) {
+        if (wikiTarget == null || wikiTarget.spaceId() == null || wikiTarget.spaceId().isBlank()
+                || wikiTarget.nodeToken() == null || wikiTarget.nodeToken().isBlank())
+            throw error("COLLAB_WIKI_ROOT_REQUIRED", "A valid Feishu Wiki root is required to create a project", HttpStatus.BAD_REQUEST);
         validateApproval(command.approvalLevel());
         if(command.includedStageKeys()!=null&&new HashSet<>(command.includedStageKeys()).size()!=command.includedStageKeys().size())
             throw error("COLLAB_STAGE_SELECTION_INVALID", "Stage selection cannot contain duplicates", HttpStatus.BAD_REQUEST);
@@ -87,6 +90,7 @@ public class CollabProjectService {
         int currentOrder = initialStages.stream().mapToInt(stage -> jdbc.queryForObject("select stage_order from collab_stage_definition where stage_key=? and active=1", Integer.class, stage)).min().orElse(firstOrder);
         jdbc.update("insert into collab_project(time_created,time_updated,project_key,home_team_id,name,description,owner_user_id,approval_level,status,current_stage_order,version_no,created_by) values(?,?,?,?,?,?,?,?,'ACTIVE',?,0,?)",now,now,key,command.homeTeamId(),command.name().trim(),command.description(),actorId,command.approvalLevel(),currentOrder,actorId);
         Long projectId=jdbc.queryForObject("select id from collab_project where project_key=?",Long.class,key);
+        jdbc.update("insert into collab_feishu_binding(project_id,wiki_space_id,wiki_root_node_token,publish_actor_user_id,status,time_created,time_updated) values(?,?,?,?,'PENDING',?,?)",projectId,wikiTarget.spaceId(),wikiTarget.nodeToken(),actorId,now,now);
         for(Long id:memberIds) jdbc.update("insert into collab_project_member(time_created,time_updated,project_id,user_id,project_role,status,joined_at,updated_by) values(?,?,?,?,?,'ACTIVE',?,?)",now,now,projectId,id,id.equals(actorId)?"OWNER":"MEMBER",now,actorId);
         for(String stage:STAGES){ Assignment a=assignments.get(stage); StageDef def=jdbc.queryForObject("select stage_order,title,artifact_kind,git_required from collab_stage_definition where stage_key=? and active=1",(rs,n)->new StageDef(rs.getInt(1),rs.getString(2),rs.getString(3),rs.getBoolean(4)),stage);
             boolean included = includedStages.contains(stage);
@@ -96,6 +100,7 @@ public class CollabProjectService {
             jdbc.update("insert into collab_stage(time_created,time_updated,project_id,stage_key,stage_order,title,artifact_kind,git_required,definition_snapshot_json,owner_user_id,reviewer_user_id,status,attempt_no,version_no,started_at) values(?,?,?,?,?,?,?,?,?,?,?,?,1,0,?)",now,now,projectId,stage,def.order(),def.title(),def.artifactKind(),def.gitRequired(),json(Map.of("key",stage,"order",def.order(),"title",def.title(),"artifactKind",def.artifactKind(),"gitRequired",def.gitRequired())),stageOwner,stageReviewer,stageStatus,initialStages.contains(stage)?now:null);
         }
         feishuOutbox.enqueueCreateChat(projectId,key);
+        feishuOutbox.enqueueWikiFolder(projectId);
         for(String stage:initialStages){
             Long firstStageId=jdbc.queryForObject("select id from collab_stage where project_id=? and stage_key=?",Long.class,projectId,stage);
             feishuOutbox.enqueueInitialStageHandoff(projectId,firstStageId,key);

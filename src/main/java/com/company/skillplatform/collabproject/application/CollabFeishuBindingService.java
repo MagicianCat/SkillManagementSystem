@@ -34,19 +34,24 @@ public class CollabFeishuBindingService {
 
     public BindingView configureWikiRoot(String key, Long actor, String url) {
         long id = auth.requireOwner(key, actor).projectId();
+        WikiTarget target = validateWikiRoot(actor, url);
+        return transactions.execute(status -> {
+            Map<String, Object> previous = jdbc.queryForMap("SELECT wiki_parent_node_token,wiki_root_node_token FROM collab_feishu_binding WHERE project_id=? FOR UPDATE", id);
+            if (previous.get("wiki_parent_node_token") != null && !target.nodeToken().equals(previous.get("wiki_root_node_token")))
+                throw new BusinessException("COLLAB_WIKI_TARGET_LOCKED", "Project Wiki is already provisioned", HttpStatus.CONFLICT);
+            jdbc.update("UPDATE collab_feishu_binding SET wiki_space_id=?,wiki_root_node_token=?,publish_actor_user_id=?,last_error=NULL,time_updated=NOW(3) WHERE project_id=?",
+                    target.spaceId(), target.nodeToken(), actor, id);
+            outbox.enqueueWikiFolder(id);
+            return view(id);
+        });
+    }
+
+    public WikiTarget validateWikiRoot(Long actor, String url) {
         JsonNode target = documents.validatePublishTarget(actor, url);
         String space = target.path("spaceId").asText("");
         String root = target.path("nodeToken").asText("");
         if (space.isBlank() || root.isBlank()) throw new BusinessException("COLLAB_WIKI_TARGET_INVALID", "Wiki target is missing identifiers", HttpStatus.BAD_REQUEST);
-        return transactions.execute(status -> {
-            Map<String, Object> previous = jdbc.queryForMap("SELECT wiki_parent_node_token,wiki_root_node_token FROM collab_feishu_binding WHERE project_id=? FOR UPDATE", id);
-            if (previous.get("wiki_parent_node_token") != null && !root.equals(previous.get("wiki_root_node_token")))
-                throw new BusinessException("COLLAB_WIKI_TARGET_LOCKED", "Project Wiki is already provisioned", HttpStatus.CONFLICT);
-            jdbc.update("UPDATE collab_feishu_binding SET wiki_space_id=?,wiki_root_node_token=?,publish_actor_user_id=?,last_error=NULL,time_updated=NOW(3) WHERE project_id=?",
-                    space, root, actor, id);
-            outbox.enqueueWikiFolder(id);
-            return view(id);
-        });
+        return new WikiTarget(space, root);
     }
 
     public BindingView retry(String key, Long actor) {
@@ -74,4 +79,5 @@ public class CollabFeishuBindingService {
 
     public record BindingView(String status, String chatId, String wikiSpaceId, String wikiParentNodeToken,
                               String lastError, int pendingTasks) {}
+    public record WikiTarget(String spaceId, String nodeToken) {}
 }

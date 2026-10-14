@@ -1,6 +1,7 @@
 package com.company.skillplatform.collabproject.interfaces;
 
 import com.company.skillplatform.collabproject.application.CollabProjectService;
+import com.company.skillplatform.collabproject.application.CollabFeishuBindingService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import java.util.List;
@@ -12,14 +13,15 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/v1/collab-projects")
 public class CollabProjectController {
     private final CollabProjectService service;
-    public CollabProjectController(CollabProjectService service){this.service=service;}
+    private final CollabFeishuBindingService feishuBinding;
+    public CollabProjectController(CollabProjectService service,CollabFeishuBindingService feishuBinding){this.service=service;this.feishuBinding=feishuBinding;}
 
     @GetMapping("/creation-options")
     public CollabProjectService.CreationOptions creationOptions(Authentication auth){return new CollabProjectService.CreationOptions(service.creationOptions(actor(auth),hasAdmin(auth)));}
     @GetMapping("/users:search")
     public List<CollabProjectService.UserOption> users(@RequestParam(required=false) String q,Authentication auth){return service.searchUsers(q);}
     @PostMapping @ResponseStatus(HttpStatus.CREATED)
-    public CollabProjectService.ProjectView create(@Valid @RequestBody CreateRequest request,Authentication auth){return service.create(new CollabProjectService.CreateCommand(request.homeTeamId(),request.name(),request.description(),request.approvalLevel(),request.stageAssignments()==null?null:request.stageAssignments().stream().map(a->new CollabProjectService.Assignment(a.stageKey(),a.ownerUserId(),a.reviewerUserId())).toList(),request.memberUserIds(),request.includedStageKeys()),actor(auth),hasAdmin(auth));}
+    public CollabProjectService.ProjectView create(@Valid @RequestBody CreateRequest request,Authentication auth){Long actorId=actor(auth);var wikiTarget=feishuBinding.validateWikiRoot(actorId,request.wikiRootUrl());return service.create(new CollabProjectService.CreateCommand(request.homeTeamId(),request.name(),request.description(),request.approvalLevel(),request.stageAssignments()==null?null:request.stageAssignments().stream().map(a->new CollabProjectService.Assignment(a.stageKey(),a.ownerUserId(),a.reviewerUserId())).toList(),request.memberUserIds(),request.includedStageKeys()),actorId,hasAdmin(auth),wikiTarget);}
     @GetMapping public List<CollabProjectService.ProjectView> list(Authentication auth){return service.list(actor(auth));}
     @GetMapping("/{projectKey}") public CollabProjectService.ProjectView get(@PathVariable String projectKey,Authentication auth){return service.project(projectKey,actor(auth));}
     @GetMapping("/{projectKey}/members") public List<CollabProjectService.MemberView> members(@PathVariable String projectKey,Authentication auth){return service.members(projectKey,actor(auth));}
@@ -33,7 +35,7 @@ public class CollabProjectController {
     private Long actor(Authentication auth){return (Long)auth.getPrincipal();}
     private boolean hasAdmin(Authentication auth){return auth.getAuthorities().stream().anyMatch(a->"admin:identity".equals(a.getAuthority()));}
 
-    public record CreateRequest(@NotNull Long homeTeamId,@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@NotBlank String approvalLevel,List<@Valid CreateAssignmentRequest> stageAssignments,List<Long> memberUserIds,List<String> includedStageKeys){}
+    public record CreateRequest(@NotNull Long homeTeamId,@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@NotBlank String approvalLevel,@NotBlank @Size(max=2048) String wikiRootUrl,List<@Valid CreateAssignmentRequest> stageAssignments,List<Long> memberUserIds,List<String> includedStageKeys){}
     public record CreateAssignmentRequest(@NotBlank String stageKey,@NotNull Long ownerUserId,Long reviewerUserId){}
     public record AssignmentRequest(@NotNull Long ownerUserId,Long reviewerUserId,List<Long> additionalReviewerUserIds){}
     public record StageInclusionRequest(boolean included){}

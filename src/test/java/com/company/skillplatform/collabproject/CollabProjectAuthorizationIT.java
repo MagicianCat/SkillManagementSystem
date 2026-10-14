@@ -86,9 +86,9 @@ class CollabProjectAuthorizationIT {
 
     @Test void creationRequiresExactHomeTeamScopeAndOptionsAreScoped() {
         assertThat(projects.creationOptions(owner,false)).extracting(CollabProjectService.TeamOption::id).containsExactly(teamA);
-        assertThatThrownBy(()->projects.create(command(teamB,"L1",List.of(owner,reviewer)),owner,false))
+        assertThatThrownBy(()->createProject(command(teamB,"L1",List.of(owner,reviewer)),owner,false))
                 .isInstanceOf(BusinessException.class).hasMessageContaining("selected team");
-        var created=projects.create(command(teamA,"L1",List.of(owner,reviewer)),owner,false);
+        var created=createProject(command(teamA,"L1",List.of(owner,reviewer)),owner,false);
         assertThat(created.homeTeamId()).isEqualTo(teamA);
         assertThat(created.stages()).hasSize(8);
     }
@@ -97,7 +97,7 @@ class CollabProjectAuthorizationIT {
         var source=command(teamA,"L1",List.of(owner));
         var selfReviewed=source.stageAssignments().stream()
                 .map(a->new CollabProjectService.Assignment(a.stageKey(),owner,owner)).toList();
-        var project=projects.create(new CollabProjectService.CreateCommand(teamA,"Solo project","","L1",selfReviewed,List.of(owner)),owner,false);
+        var project=createProject(new CollabProjectService.CreateCommand(teamA,"Solo project","","L1",selfReviewed,List.of(owner)),owner,false);
         var stage=projects.stages(project.projectKey(),owner).get(0);
         String content="## 需求范围\n单人项目\n## 验收标准\nOwner 可以审批自己的阶段";
         var artifact=flow.upload(project.projectKey(),"REQUIREMENT",
@@ -110,8 +110,8 @@ class CollabProjectAuthorizationIT {
     }
 
     @Test void projectAccessIsIsolatedAndRemovedMemberLosesAccessImmediately() {
-        var first=projects.create(command(teamA,"L3",List.of(owner,reviewer)),owner,false);
-        var second=projects.create(command(teamA,"L3",List.of(owner)),owner,false);
+        var first=createProject(command(teamA,"L3",List.of(owner,reviewer)),owner,false);
+        var second=createProject(command(teamA,"L3",List.of(owner)),owner,false);
         assertThat(authorization.requireMemberOrThrow(first.projectKey(),reviewer).projectId()).isNotNull();
         assertThatThrownBy(()->authorization.requireMemberOrThrow(second.projectKey(),reviewer))
                 .isInstanceOf(BusinessException.class).hasMessageContaining("Project not found");
@@ -122,7 +122,7 @@ class CollabProjectAuthorizationIT {
 
     @Test void approvalLevelsSelectManualStagesAndUploadRetryIsIdempotent() {
         for(String level:List.of("L1","L2","L3")){
-            var project=projects.create(command(teamA,level,List.of(owner,reviewer)),owner,false);
+            var project=createProject(command(teamA,level,List.of(owner,reviewer)),owner,false);
             var stage=projects.stages(project.projectKey(),owner).get(0);
             String content="## 需求范围\nMVP 范围\n## 验收标准\n通过验收";
             String hash=sha256(content);
@@ -155,7 +155,7 @@ class CollabProjectAuthorizationIT {
     }
 
     @Test void completedL3ProjectRemainsReadableAfterAcceptance() {
-        var project=projects.create(command(teamA,"L3",List.of(owner)),owner,false);
+        var project=createProject(command(teamA,"L3",List.of(owner)),owner,false);
         List<String> required=List.of(
                 "需求范围\n验收标准",
                 "功能清单\n边界",
@@ -190,6 +190,9 @@ class CollabProjectAuthorizationIT {
         assertThat(flow.context(project.projectKey(),"ACCEPTANCE",false,owner).approvedArtifacts()).hasSize(7);
     }
 
+    private CollabProjectService.ProjectView createProject(CollabProjectService.CreateCommand command,Long actor,boolean admin){
+        return projects.create(command,actor,admin,new com.company.skillplatform.collabproject.application.CollabFeishuBindingService.WikiTarget("integration-test-space","integration-test-root"));
+    }
     private CollabProjectService.CreateCommand command(Long team,String level,List<Long> members){
         List<CollabProjectService.Assignment> assignments=new ArrayList<>();
         for(String key:List.of("REQUIREMENT","PRODUCT","ARCHITECTURE_DESIGN","UI_DESIGN","FRONTEND_CODING","BACKEND_CODING","TESTING","ACCEPTANCE")){

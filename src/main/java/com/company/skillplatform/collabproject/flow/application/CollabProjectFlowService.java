@@ -56,6 +56,7 @@ public class CollabProjectFlowService {
         idempotencyKey=validateIdempotencyKey(idempotencyKey);
         var project = authorization.requireMemberOrThrow(projectKey, actorId);
         lockProjectFlow(project.projectId());
+        requireWikiRootConfigured(project.projectId());
         String key = normalizeStage(stageKey);
         StageRow stage = lockedStage(project.projectId(), key);
         if ("SKIPPED".equals(stage.status()) || "COMPLETED".equals(stage.status()))
@@ -97,6 +98,7 @@ public class CollabProjectFlowService {
         idempotencyKey=validateIdempotencyKey(idempotencyKey);
         var project=authorization.requireMemberOrThrow(projectKey,actorId); String key=normalizeStage(stageKey);
         lockProjectFlow(project.projectId());
+        requireWikiRootConfigured(project.projectId());
         StageRow stage=lockedStage(project.projectId(),key);
         if (!Objects.equals(stage.id(),request.stageId()) || request.attemptNo()<1) throw error("COLLAB_STAGE_VERSION_STALE","Stage or attempt no longer matches",HttpStatus.CONFLICT);
         String fingerprint=sha256(json(Map.of("stageId",stage.id(),"attemptNo",request.attemptNo(),"artifactVersionId",request.artifactVersionId(),"expectedStageVersion",request.expectedStageVersion())));
@@ -235,6 +237,7 @@ public class CollabProjectFlowService {
     private void validateArtifact(StageRow stage,ArtifactUpload r){if(r.title().isBlank()||r.markdownContent().isBlank())throw error("COLLAB_ARTIFACT_EMPTY","Title and Markdown content are required",HttpStatus.BAD_REQUEST);byte[] bytes=r.markdownContent().getBytes(StandardCharsets.UTF_8);if(bytes.length>MAX_MARKDOWN_BYTES)throw error("COLLAB_ARTIFACT_TOO_LARGE","Markdown content must not exceed 1 MB",HttpStatus.PAYLOAD_TOO_LARGE);if(!r.markdownContent().equals(new String(bytes,StandardCharsets.UTF_8)))throw error("COLLAB_ARTIFACT_ENCODING_INVALID","Markdown must be valid UTF-8",HttpStatus.BAD_REQUEST);String actual=sha256(r.markdownContent());if(!actual.equalsIgnoreCase(r.sha256()))throw error("COLLAB_ARTIFACT_HASH_MISMATCH","SHA-256 does not match the Markdown content",HttpStatus.UNPROCESSABLE_ENTITY);if(stage.gitRequired()){if(r.gitEvidence()==null)throw error("COLLAB_GIT_EVIDENCE_REQUIRED","Repository and commit/PR URLs are required",HttpStatus.UNPROCESSABLE_ENTITY);validateGitUrl(r.gitEvidence().repositoryUrl());validateGitUrl(r.gitEvidence().commitOrPullRequestUrl());}}
     private void validateGitUrl(String value){try{java.net.URI uri=java.net.URI.create(value);String host=uri.getHost()==null?"":uri.getHost().toLowerCase(Locale.ROOT);if(!"https".equalsIgnoreCase(uri.getScheme())||!(host.equals("github.com")||host.endsWith(".github.com")||host.equals("gitlab.com")||host.endsWith(".gitlab.com")||host.equals("gitlab.it.taikang.com"))||uri.getUserInfo()!=null)throw new IllegalArgumentException();}catch(RuntimeException ex){throw error("COLLAB_GIT_URL_INVALID","Git evidence must use an HTTPS GitHub or GitLab URL",HttpStatus.UNPROCESSABLE_ENTITY);}}
     private void requireStageOwner(StageRow s,Long actor){if(!s.ownerUserId().equals(actor))throw error("COLLAB_STAGE_OWNER_REQUIRED","Only the current stage owner may perform this operation",HttpStatus.FORBIDDEN);}
+    private void requireWikiRootConfigured(Long projectId){Integer configured=jdbc.queryForObject("select count(*) from collab_feishu_binding where project_id=? and wiki_space_id is not null and wiki_root_node_token is not null and publish_actor_user_id is not null",Integer.class,projectId);if(configured==null||configured==0)throw error("COLLAB_WIKI_ROOT_REQUIRED","Configure the project Feishu Wiki root before submitting an artifact",HttpStatus.CONFLICT);}
     private void requireCurrentStage(int order,StageRow stage){boolean current=stage.order()==order||((order==3||order==5)&&stage.order()==order+1);if(!current)throw error("COLLAB_STAGE_NOT_CURRENT","Only a stage in the current project stage group can be submitted",HttpStatus.CONFLICT);}
     private String normalizeStage(String key){String k=key==null?"":key.trim().toUpperCase(Locale.ROOT);if(!STAGE_KEYS.contains(k))throw error("COLLAB_STAGE_NOT_FOUND","Stage not found",HttpStatus.NOT_FOUND);return k;}
     private String validateIdempotencyKey(String key){if(key==null||key.isBlank()||key.length()>128)throw error("IDEMPOTENCY_KEY_INVALID","Idempotency-Key must contain 1 to 128 characters",HttpStatus.BAD_REQUEST);return key.trim();}
