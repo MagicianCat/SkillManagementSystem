@@ -16,7 +16,6 @@ public final class CollabStagePromptFactory {
         return "请使用 Skill key " + tick + "project-artifact-submit" + tick + "，为项目 " + tick + projectKey
                 + tick + " 的阶段 " + tick + stageTitle + tick + "（stageId=" + stageId + "，attemptNo=" + attemptNo
                 + "）提交本阶段已完成的交付物。交付物在本地的地址为：{local file}。"
-                + (gitRequired ? "该编码阶段还需同时提供 Git 仓库 URL 与 commit/PR URL。" : "")
-                + "提交后等待指定审核人处理，不要声称平台已批准。";
+                + (gitRequired ? "该编码阶段还需同时提供 Git 仓库 URL 与 commit/PR URL。" : "");
     }
 }
