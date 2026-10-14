@@ -316,8 +316,9 @@ public class CollabFeishuWorker {
     }
 
     private Map<String, Object> promptButton(String projectKey, long stageId, int attemptNo, String promptType) {
-        return Map.of("tag", "button", "type", "default", "element_id", "collab_prompt_send_" + promptType.toLowerCase(),
-                "name", "collab_send_prompt|" + projectKey + "|" + stageId + "|" + attemptNo + "|" + promptType,
+        String callbackName = "collab_send_prompt|" + projectKey + "|" + stageId + "|" + attemptNo + "|" + promptType;
+        return Map.of("tag", "button", "type", "default", "element_id", callbackName,
+                "name", callbackName,
                 "text", Map.of("tag", "plain_text", "content", "单独发送"),
                 "behaviors", List.of(Map.of("type", "callback", "value", Map.of("action", "collab_send_prompt",
                         "projectKey", projectKey, "stageId", stageId, "attemptNo", attemptNo, "promptType", promptType))));
