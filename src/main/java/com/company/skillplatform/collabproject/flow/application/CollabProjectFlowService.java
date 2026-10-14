@@ -204,7 +204,11 @@ public class CollabProjectFlowService {
         List<Integer> unfinished=jdbc.query("select stage_order from collab_stage where project_id=? and stage_order between ? and ? and status<>'COMPLETED' for update",(rs,n)->rs.getInt(1),projectId,groupStart,groupEnd);
         if(!unfinished.isEmpty())return;
         int nextOrder=groupEnd+1;
-        if(nextOrder>8){jdbc.update("update collab_project set status='COMPLETED',version_no=version_no+1,time_updated=? where id=?",now,projectId);return;}
+        if(nextOrder>8){
+            int completed=jdbc.update("update collab_project set status='COMPLETED',version_no=version_no+1,time_updated=? where id=? and status<>'COMPLETED'",now,projectId);
+            if(completed==1)feishuOutbox.enqueueProjectCompleted(projectId);
+            return;
+        }
         int nextEnd=stageGroupEnd(nextOrder);
         jdbc.update("update collab_project set current_stage_order=?,version_no=version_no+1,time_updated=? where id=?",nextOrder,now,projectId);
         List<Long> nextStageIds=jdbc.query("select id from collab_stage where project_id=? and stage_order between ? and ? order by stage_order",(rs,n)->rs.getLong(1),projectId,nextOrder,nextEnd);

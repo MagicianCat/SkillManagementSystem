@@ -133,6 +133,7 @@ public class CollabFeishuWorker {
                 case "STAGE_REWORK" -> stageRework(projectId, aggregateId, id);
                 case "CREATE_WIKI_FOLDER" -> createWikiFolder(projectId);
                 case "PUBLISH_ARTIFACT" -> publish(projectId, aggregateId);
+                case "PROJECT_COMPLETED" -> projectCompleted(projectId, id);
                 default -> throw new IllegalArgumentException("Unknown collaboration event");
             }
             jdbc.update("UPDATE collab_outbox SET status='DONE',last_error=NULL,time_updated=NOW(3) WHERE id=?", id);
@@ -182,6 +183,14 @@ public class CollabFeishuWorker {
         String openId = jdbc.queryForObject("SELECT feishu_open_id FROM iam_user WHERE id=?", String.class, userId);
         if (openId == null || openId.isBlank()) throw new IllegalStateException("Member has no Feishu open ID");
         if (add) chats.addMember(chatId, openId); else chats.removeMember(chatId, openId);
+    }
+
+    private void projectCompleted(long projectId, long outboxId) {
+        String chatId = chatId(projectId);
+        String projectName = jdbc.queryForObject("SELECT name FROM collab_project WHERE id=? AND status='COMPLETED'",
+                String.class, projectId);
+        chats.sendText(chatId, "项目「" + projectName + "」的全部阶段已完成。<at user_id=\"all\">所有人</at>",
+                "collab-project-completed-" + outboxId);
     }
 
     private void approvalReminder(long projectId, long aggregateId, boolean aggregateIsApproval) {

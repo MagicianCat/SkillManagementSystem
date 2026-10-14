@@ -65,6 +65,11 @@ public class CollabFeishuOutbox {
                 Map.of("stageId", stageId, "submissionId", submissionId));
     }
 
+    public void enqueueProjectCompleted(Long projectId) {
+        enqueue(projectId, "PROJECT_COMPLETED", "PROJECT", projectId,
+                "project-completed:" + projectId, Map.of("projectId", projectId));
+    }
+
     private void enqueue(Long projectId, String type, String aggregateType, Long aggregateId,
                          String key, Map<String, ?> payload) {
         try {
