@@ -5,6 +5,8 @@ import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.common.interfaces.PageResponse;
 import com.company.skillplatform.notification.application.NotificationService;
 import com.company.skillplatform.skill.domain.SkillStatus;
+import com.company.skillplatform.skill.infrastructure.repository.SkillRepository;
+import com.company.skillplatform.version.domain.LifecycleStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.*;
 import com.company.skillplatform.wiki.domain.WikiReviewStatus;
@@ -26,6 +28,8 @@ public class WikiDocumentReviewService {
     private final WikiDocumentReviewRepository reviews;
     private final WikiDocumentRepository documents;
     private final WikiDocumentSkillRepository links;
+    private final SkillRepository skills;
+    private final org.springframework.context.ApplicationEventPublisher events;
     private final OrgTeamRepository teams;
     private final ScopedRoleAssignmentRepository scopedRoles;
     private final IamUserRepository users;
@@ -36,17 +40,19 @@ public class WikiDocumentReviewService {
     @org.springframework.beans.factory.annotation.Autowired
     public WikiDocumentReviewService(WikiDocumentReviewRepository reviews, WikiDocumentRepository documents,
                                      WikiDocumentSkillRepository links, OrgTeamRepository teams,
-                                     ScopedRoleAssignmentRepository scopedRoles, IamUserRepository users,
+                                     SkillRepository skills, ScopedRoleAssignmentRepository scopedRoles, IamUserRepository users,
+                                     org.springframework.context.ApplicationEventPublisher events,
                                      AuditService audit) {
-        this(reviews, documents, links, teams, scopedRoles, users, audit, Clock.systemUTC());
+        this(reviews, documents, links, teams, skills, scopedRoles, users, events, audit, Clock.systemUTC());
     }
 
     WikiDocumentReviewService(WikiDocumentReviewRepository reviews, WikiDocumentRepository documents,
                               WikiDocumentSkillRepository links, OrgTeamRepository teams,
-                              ScopedRoleAssignmentRepository scopedRoles, IamUserRepository users,
+                              SkillRepository skills, ScopedRoleAssignmentRepository scopedRoles, IamUserRepository users,
+                              org.springframework.context.ApplicationEventPublisher events,
                               AuditService audit, Clock clock) {
-        this.reviews = reviews; this.documents = documents; this.links = links; this.teams = teams;
-        this.scopedRoles = scopedRoles; this.users = users; this.audit = audit; this.clock = clock;
+        this.reviews = reviews; this.documents = documents; this.links = links; this.teams = teams; this.skills = skills;
+        this.scopedRoles = scopedRoles; this.users = users; this.events = events; this.audit = audit; this.clock = clock;
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -99,8 +105,10 @@ public class WikiDocumentReviewService {
         IamUserEntity actor = user(actorId);
         review.approve(actor, comment.trim(), clock.instant());
         document.publishToPlatform(actor);
+        promoteLinkedTeamSkills(document, actor);
         documents.saveAndFlush(document);
         reviews.save(review);
+        events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(document.getId(), com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         audit.success("WIKI_PLATFORM_REVIEW_APPROVED", actor, "WIKI_DOCUMENT", document.getId(), requestId,
                 Map.of("platformVisible", false), Map.of("platformVisible", true, "reviewId", id), Map.of());
         if (notifications != null) notifications.wikiReviewCompleted(document, review.getId(), true, review.getSubmitter().getId(), comment);
@@ -153,7 +161,27 @@ public class WikiDocumentReviewService {
         if (document.isPlatformVisible()) throw conflict("WIKI_ALREADY_PLATFORM_VISIBLE");
         if (!"ACTIVE".equals(document.getStatus()) || document.getCurrentRevision() == null) throw conflict("WIKI_DOCUMENT_INVALID");
         if (links.findByDocumentIdOrderBySortOrderAsc(document.getId()).isEmpty()) throw error("WIKI_SKILLS_REQUIRED", "Wiki must link at least one Skill", HttpStatus.BAD_REQUEST);
-        if (links.findByDocumentIdOrderBySortOrderAsc(document.getId()).stream().anyMatch(link -> link.getSkill().getStatus() != SkillStatus.ACTIVE || !"PLATFORM".equals(link.getSkill().getScopeType()))) throw error("WIKI_PRIVATE_SKILL_LINK", "A platform Wiki cannot expose a private or inactive Skill", HttpStatus.BAD_REQUEST);
+        List<WikiDocumentSkillEntity> linkedSkills = links.findByDocumentIdOrderBySortOrderAsc(document.getId());
+        if (linkedSkills.isEmpty()) throw error("WIKI_SKILLS_REQUIRED", "Wiki must link at least one Skill", HttpStatus.BAD_REQUEST);
+        for (WikiDocumentSkillEntity link : linkedSkills) {
+            var skill = link.getSkill();
+            if (skill.getStatus() != SkillStatus.ACTIVE) throw error("WIKI_INACTIVE_SKILL_LINK", "A platform Wiki cannot expose an inactive Skill", HttpStatus.BAD_REQUEST);
+            if ("TEAM".equals(skill.getScopeType())) {
+                if (!Objects.equals(skill.getTeamId(), document.getTeamId())) throw error("WIKI_PRIVATE_SKILL_LINK", "Linked team Skills must belong to the same team as the Wiki", HttpStatus.BAD_REQUEST);
+                if (skill.getLatestPublishedVersion() == null || skill.getLatestPublishedVersion().getLifecycleStatus() != LifecycleStatus.PUBLISHED) throw error("WIKI_SKILL_NOT_PUBLISHED", "Every linked team Skill must have a published version before Wiki promotion", HttpStatus.BAD_REQUEST);
+            } else if (!"PLATFORM".equals(skill.getScopeType())) {
+                throw error("WIKI_PRIVATE_SKILL_LINK", "A platform Wiki cannot expose a private Skill", HttpStatus.BAD_REQUEST);
+            }
+        }
+    }
+
+    private void promoteLinkedTeamSkills(WikiDocumentEntity document, IamUserEntity actor) {
+        List<com.company.skillplatform.skill.infrastructure.entity.SkillEntity> changed = links.findByDocumentIdOrderBySortOrderAsc(document.getId()).stream()
+                .map(WikiDocumentSkillEntity::getSkill)
+                .filter(skill -> "TEAM".equals(skill.getScopeType()))
+                .toList();
+        changed.forEach(skill -> skill.promoteToPlatform(actor));
+        if (!changed.isEmpty()) skills.saveAll(changed);
     }
 
     private boolean canManage(WikiDocumentEntity document, Long userId) {
