@@ -39,6 +39,9 @@ public class ExternalResourceService {
         int created = 0, updated = 0, unchanged = 0;
         List<Failure> failures = new ArrayList<>();
         List<Success> successes = new ArrayList<>();
+        // Role state is committed independently from resource processing, so partial resource
+        // failures (or a state-only request with resources=[]) cannot roll it back.
+        persistRole(request);
         for (ResourceInput input : request.resources()) {
             String resourceId = input == null ? null : input.resourceId();
             String fileKey = input == null ? null : input.fileKey();
@@ -109,7 +112,6 @@ public class ExternalResourceService {
     }
 
     private Receipt persist(PushRequest request, ResourceInput input, String filename, long size, String sha, String objectKey) {
-        db.update("INSERT INTO external_role(source_system,external_role_id,role_name) VALUES(?,?,?) ON DUPLICATE KEY UPDATE role_name=VALUES(role_name)", request.sourceSystem(), request.role().roleId(), request.role().roleName());
         Long roleId = db.queryForObject("SELECT id FROM external_role WHERE source_system=? AND external_role_id=?", Long.class, request.sourceSystem(), request.role().roleId());
         List<Map<String,Object>> existing = db.queryForList("SELECT id,resource_type,current_version_id FROM external_resource WHERE source_system=? AND external_resource_id=? FOR UPDATE", request.sourceSystem(), input.resourceId());
         boolean isNew = existing.isEmpty();
@@ -130,6 +132,20 @@ public class ExternalResourceService {
         return new Receipt(isNew ? "CREATED" : "UPDATED", versionId);
     }
 
+    private void persistRole(PushRequest request) {
+        RoleInput role = request.role();
+        if (role.status() == null) {
+            // On insert the DB default initializes ACTIVE; on update an omitted status is preserved.
+            db.update("INSERT INTO external_role(source_system,external_role_id,role_name) VALUES(?,?,?) " +
+                            "ON DUPLICATE KEY UPDATE role_name=VALUES(role_name)",
+                    request.sourceSystem(), role.roleId(), role.roleName());
+        } else {
+            db.update("INSERT INTO external_role(source_system,external_role_id,role_name,status) VALUES(?,?,?,?) " +
+                            "ON DUPLICATE KEY UPDATE role_name=VALUES(role_name),status=VALUES(status),updated_at=CURRENT_TIMESTAMP",
+                    request.sourceSystem(), role.roleId(), role.roleName(), role.status());
+        }
+    }
+
     private static boolean blank(String value) { return value == null || value.isBlank(); }
 
     /** Recovers objects left behind when the process exits between MinIO and the database commit. */
@@ -144,7 +160,7 @@ public class ExternalResourceService {
         }
     }
     private record Receipt(String status, Long versionId) {}
-    public record RoleInput(String roleId, String roleName) {}
+    public record RoleInput(String roleId, String roleName, String status) {}
     public record ResourceInput(String resourceId, String resourceName, String resourceType, String version, String description, String fileKey) {}
     public record PushRequest(String sourceSystem, RoleInput role, List<ResourceInput> resources) {}
     public record Failure(String resourceId, String fileKey, String errorCode, String reason) {}

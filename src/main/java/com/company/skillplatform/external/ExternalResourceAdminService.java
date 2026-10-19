@@ -52,7 +52,7 @@ public class ExternalResourceAdminService {
     }
 
     public List<Map<String,Object>> roles() {
-        return db.queryForList("SELECT id,source_system AS sourceSystem,external_role_id AS externalRoleId,role_name AS roleName,updated_at AS updatedAt FROM external_role ORDER BY updated_at DESC");
+        return db.queryForList("SELECT id,source_system AS sourceSystem,external_role_id AS externalRoleId,role_name AS roleName,status,updated_at AS updatedAt FROM external_role ORDER BY updated_at DESC");
     }
 
     public List<Map<String,Object>> resources(Long roleId, String type, String keyword, int page, int size) {

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.company.skillplatform.common.application.BusinessException;
@@ -26,6 +27,13 @@ class ExternalResourceAdminServiceTest {
     private final JdbcTemplate db=mock(JdbcTemplate.class);
     private final ObjectStoragePort storage=mock(ObjectStoragePort.class);
     private final ExternalResourceAdminService service=new ExternalResourceAdminService(db,storage,null,null,null,null,null,null);
+
+    @Test void exposesRoleStatusToAdminRoleList() {
+        String query="SELECT id,source_system AS sourceSystem,external_role_id AS externalRoleId,role_name AS roleName,status,updated_at AS updatedAt FROM external_role ORDER BY updated_at DESC";
+        when(db.queryForList(eq(query))).thenReturn(List.of(Map.of("id",1,"status","INACTIVE")));
+        assertEquals("INACTIVE",service.roles().get(0).get("status"));
+        verify(db).queryForList(eq(query));
+    }
 
     @Test void listsNestedMarkdownButNotOtherFiles() throws Exception {
         when(db.queryForList(eq("SELECT v.*,r.resource_type FROM external_resource_version v JOIN external_resource r ON r.id=v.resource_id WHERE v.id=? AND v.storage_status='AVAILABLE'"),eq(7L)))

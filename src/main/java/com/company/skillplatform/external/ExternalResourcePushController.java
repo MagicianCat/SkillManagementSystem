@@ -53,7 +53,8 @@ public class ExternalResourcePushController {
                 || body.role().roleId().length() > 255
                 || body.role().roleName() == null || body.role().roleName().isBlank()
                 || body.role().roleName().length() > 512
-                || body.resources() == null || body.resources().isEmpty() || body.resources().size() > 20) {
+                || !validRoleStatus(body.role().status())
+                || body.resources() == null || body.resources().size() > 20) {
             return ResponseEntity.badRequest().body(new ApiResponse(4001, "invalid_metadata", null));
         }
         String expected = keys.get(body.sourceSystem());
@@ -71,6 +72,9 @@ public class ExternalResourcePushController {
     }
 
     public record ApiResponse(int code, String message, ExternalResourceService.PushResult data) {}
+    private static boolean validRoleStatus(String status) {
+        return status == null || "ACTIVE".equals(status) || "INACTIVE".equals(status);
+    }
     private static final class Window {
         private long minute = -1;
         private int count;

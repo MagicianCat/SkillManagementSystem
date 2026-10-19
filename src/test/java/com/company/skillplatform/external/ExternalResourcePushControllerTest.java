@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -11,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.web.multipart.MultipartFile;
@@ -44,5 +46,40 @@ class ExternalResourcePushControllerTest {
         assertEquals(HttpStatus.OK,response.getStatusCode());
         assertEquals(1001,response.getBody().code());
         assertEquals(1,response.getBody().data().failed());
+    }
+
+    @Test void acceptsStateOnlyRequestAndReturnsZeroResourceCounts() {
+        var files=new LinkedMultiValueMap<String,MultipartFile>();
+        var request=mock(HttpServletRequest.class);
+        when(request.getRequestId()).thenReturn("req-state");
+        when(service.push(any(),eq(files),eq("req-state"))).thenReturn(new ExternalResourceService.PushResult(0,0,0,0,0,List.of(),List.of(),"req-state"));
+        String metadata="{\"sourceSystem\":\"platform-a\",\"role\":{\"roleId\":\"r\",\"roleName\":\"R\",\"status\":\"INACTIVE\"},\"resources\":[]}";
+        var response=controller.push("secret",metadata,files,request);
+        assertEquals(HttpStatus.OK,response.getStatusCode());
+        assertEquals(0,response.getBody().code());
+        assertEquals(0,response.getBody().data().total());
+        ArgumentCaptor<ExternalResourceService.PushRequest> captured=ArgumentCaptor.forClass(ExternalResourceService.PushRequest.class);
+        verify(service).push(captured.capture(),eq(files),eq("req-state"));
+        assertEquals("INACTIVE",captured.getValue().role().status());
+    }
+
+    @Test void rejectsInvalidRoleStatusBeforeCallingService() {
+        var files=new LinkedMultiValueMap<String,MultipartFile>();
+        var request=mock(HttpServletRequest.class);
+        String metadata="{\"sourceSystem\":\"platform-a\",\"role\":{\"roleId\":\"r\",\"roleName\":\"R\",\"status\":\"DISABLED\"},\"resources\":[]}";
+        var response=controller.push("secret",metadata,files,request);
+        assertEquals(HttpStatus.BAD_REQUEST,response.getStatusCode());
+        assertEquals(4001,response.getBody().code());
+        verifyNoInteractions(service);
+    }
+
+    @Test void rejectsEmptyRoleStatusRatherThanDefaultingIt() {
+        var files=new LinkedMultiValueMap<String,MultipartFile>();
+        var request=mock(HttpServletRequest.class);
+        String metadata="{\"sourceSystem\":\"platform-a\",\"role\":{\"roleId\":\"r\",\"roleName\":\"R\",\"status\":\"\"},\"resources\":[]}";
+        var response=controller.push("secret",metadata,files,request);
+        assertEquals(HttpStatus.BAD_REQUEST,response.getStatusCode());
+        assertEquals(4001,response.getBody().code());
+        verifyNoInteractions(service);
     }
 }
