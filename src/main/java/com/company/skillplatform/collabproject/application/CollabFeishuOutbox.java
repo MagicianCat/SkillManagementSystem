@@ -38,9 +38,9 @@ public class CollabFeishuOutbox {
                 "publish:" + artifactVersionId, Map.of("artifactVersionId", artifactVersionId));
     }
 
-    public void enqueueApprovalReminder(Long projectId, Long approvalId) {
-        enqueue(projectId, "APPROVAL_REMINDER", "APPROVAL", approvalId,
-                "approval-reviewer:" + approvalId, Map.of("approvalId", approvalId));
+    public void enqueueApprovalReminder(Long projectId, Long submissionId) {
+        enqueue(projectId, "APPROVAL_REMINDER", "SUBMISSION", submissionId,
+                "approval-submission:" + submissionId, Map.of("submissionId", submissionId));
     }
 
     public void enqueueWikiFolder(Long projectId) {

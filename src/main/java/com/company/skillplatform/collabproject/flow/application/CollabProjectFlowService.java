@@ -3,6 +3,7 @@ package com.company.skillplatform.collabproject.flow.application;
 import com.company.skillplatform.collabproject.application.CollabProjectAuthorizationService;
 import com.company.skillplatform.collabproject.application.CollabFeishuOutbox;
 import com.company.skillplatform.collabproject.application.CollabStagePromptFactory;
+import com.company.skillplatform.collabproject.application.CollabGitlabRootValidator;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.ArtifactUpload;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.DecisionRequest;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.SubmissionRequest;
@@ -34,20 +35,23 @@ public class CollabProjectFlowService {
     private final ObjectMapper mapper;
     private final CollabProjectAuthorizationService authorization;
     private final CollabFeishuOutbox feishuOutbox;
+    private final CollabGitlabRootValidator gitlabRootValidator;
 
     public CollabProjectFlowService(JdbcTemplate jdbc, ObjectMapper mapper,
-            CollabProjectAuthorizationService authorization, CollabFeishuOutbox feishuOutbox) {
+            CollabProjectAuthorizationService authorization, CollabFeishuOutbox feishuOutbox,
+            CollabGitlabRootValidator gitlabRootValidator) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.authorization = authorization;
         this.feishuOutbox = feishuOutbox;
+        this.gitlabRootValidator = gitlabRootValidator;
     }
 
     @Transactional(readOnly = true)
     public WorkflowView workflow(String projectKey, Long actorId) {
         var project = authorization.requireMemberOrThrow(projectKey, actorId);
         List<StageWorkflowView> stages = jdbc.query("select s.id,s.stage_key,s.stage_order,s.title,s.artifact_kind,s.git_required,s.owner_user_id,s.reviewer_user_id,s.status,s.attempt_no,s.version_no,sub.id submission_id,sub.status submission_status,sub.artifact_version_id,sub.submitted_at,ap.state approval_state,ap.reviewer_user_id frozen_reviewer_id,ap.version_no approval_version_no from collab_stage s left join collab_submission sub on sub.id=(select max(s2.id) from collab_submission s2 where s2.stage_id=s.id) left join collab_approval ap on ap.id=(select a0.id from collab_approval a0 where a0.submission_id=sub.id and a0.reviewer_user_id=? order by a0.id desc limit 1) where s.project_id=? order by s.stage_order",
-                (rs,n)->new StageWorkflowView(rs.getLong("id"),rs.getString("stage_key"),rs.getInt("stage_order"),rs.getString("title"),rs.getString("artifact_kind"),rs.getBoolean("git_required"),rs.getLong("owner_user_id"),(Long)rs.getObject("reviewer_user_id"),additionalReviewerIds(rs.getLong("id")),rs.getString("status"),rs.getInt("attempt_no"),rs.getInt("version_no"),(Long)rs.getObject("submission_id"),rs.getString("submission_status"),(Long)rs.getObject("artifact_version_id"),instant(rs,"submitted_at"),rs.getString("approval_state"),(Long)rs.getObject("frozen_reviewer_id"),(Integer)rs.getObject("approval_version_no")),actorId,project.projectId());
+                (rs,n)->new StageWorkflowView(rs.getLong("id"),rs.getString("stage_key"),rs.getInt("stage_order"),rs.getString("title"),rs.getString("artifact_kind"),rs.getBoolean("git_required"),rs.getLong("owner_user_id"),(Long)rs.getObject("reviewer_user_id"),additionalReviewerIds(rs.getLong("id")),rs.getString("status"),rs.getInt("attempt_no"),rs.getInt("version_no"),(Long)rs.getObject("submission_id"),rs.getString("submission_status"),(Long)rs.getObject("artifact_version_id"),instant(rs,"submitted_at"),rs.getString("approval_state"),(Long)rs.getObject("frozen_reviewer_id"),(Integer)rs.getObject("approval_version_no"),stageRoleName(rs.getLong("id"),"OWNER"),stageRoleName(rs.getLong("id"),"REVIEWER"),pendingReviewerStateIds((Long)rs.getObject("submission_id")),reviewerStateIds((Long)rs.getObject("submission_id"),"APPROVED"),reviewerRoleProgress((Long)rs.getObject("submission_id"))),actorId,project.projectId());
         return new WorkflowView(project.projectKey(),project.approvalLevel(),project.status(),project.currentStageOrder(),stages);
     }
 
@@ -55,6 +59,7 @@ public class CollabProjectFlowService {
     public ArtifactView upload(String projectKey, String stageKey, ArtifactUpload request, String idempotencyKey, Long actorId) {
         idempotencyKey=validateIdempotencyKey(idempotencyKey);
         var project = authorization.requireMemberOrThrow(projectKey, actorId);
+        authorization.requireWritable(project);
         lockProjectFlow(project.projectId());
         requireWikiRootConfigured(project.projectId());
         String key = normalizeStage(stageKey);
@@ -65,7 +70,8 @@ public class CollabProjectFlowService {
             throw error("COLLAB_STAGE_VERSION_STALE", "Stage or attempt no longer matches", HttpStatus.CONFLICT);
         String kind = request.kind().trim().toUpperCase(Locale.ROOT);
         if (!stage.artifactKind().equals(kind)) throw error("COLLAB_ARTIFACT_KIND_INVALID", "Artifact kind does not match this stage", HttpStatus.UNPROCESSABLE_ENTITY);
-        validateArtifact(stage, request);
+        requireStageOwner(project, stage, actorId);
+        validateArtifact(project, stage, request);
         String fingerprint = sha256(json(Map.of("stageId",stage.id(),"attemptNo",request.attemptNo(),"kind",kind,"title",request.title().trim(),"sha256",request.sha256().toLowerCase(Locale.ROOT),"content",request.markdownContent(),"gitEvidence",request.gitEvidence()==null?Map.of():request.gitEvidence())));
         Map<String,Object> existing = jdbc.query("select v.id,v.artifact_id,v.version_no,v.attempt_no,v.sha256,v.size_bytes,v.request_fingerprint,v.uploaded_by,a.kind,a.title,s.stage_key,pv.url from collab_artifact_version v join collab_artifact a on a.id=v.artifact_id join collab_stage s on s.id=v.stage_id left join collab_feishu_publication pv on pv.artifact_version_id=v.id where v.stage_id=? and v.upload_idempotency_key=?", rs -> rs.next()?row(rs):null, stage.id(), idempotencyKey);
         if (existing != null) {
@@ -73,7 +79,6 @@ public class CollabProjectFlowService {
             if (!fingerprint.equals(existing.get("request_fingerprint"))) throw error("IDEMPOTENCY_KEY_REUSED", "Idempotency key was already used for different content", HttpStatus.CONFLICT);
             return artifactView(existing);
         }
-        requireStageOwner(stage, actorId);
         requireCurrentStage(project.currentStageOrder(), stage);
         if (request.attemptNo() != stage.attemptNo())
             throw error("COLLAB_STAGE_VERSION_STALE", "Stage or attempt no longer matches", HttpStatus.CONFLICT);
@@ -96,7 +101,7 @@ public class CollabProjectFlowService {
     @Transactional
     public SubmissionView submit(String projectKey,String stageKey,SubmissionRequest request,String idempotencyKey,Long actorId) {
         idempotencyKey=validateIdempotencyKey(idempotencyKey);
-        var project=authorization.requireMemberOrThrow(projectKey,actorId); String key=normalizeStage(stageKey);
+        var project=authorization.requireMemberOrThrow(projectKey,actorId); authorization.requireWritable(project); String key=normalizeStage(stageKey);
         lockProjectFlow(project.projectId());
         requireWikiRootConfigured(project.projectId());
         StageRow stage=lockedStage(project.projectId(),key);
@@ -104,30 +109,47 @@ public class CollabProjectFlowService {
         String fingerprint=sha256(json(Map.of("stageId",stage.id(),"attemptNo",request.attemptNo(),"artifactVersionId",request.artifactVersionId(),"expectedStageVersion",request.expectedStageVersion())));
         Map<String,Object> prior=jdbc.query("select id,submitted_by,request_fingerprint from collab_submission where stage_id=? and idempotency_key=?",rs->rs.next()?Map.of("id",rs.getLong("id"),"submitted_by",rs.getLong("submitted_by"),"request_fingerprint",rs.getString("request_fingerprint")):null,stage.id(),idempotencyKey);
         if(prior!=null){if(!Objects.equals(((Number)prior.get("submitted_by")).longValue(),actorId)||!fingerprint.equals(prior.get("request_fingerprint")))throw error("IDEMPOTENCY_KEY_REUSED","Idempotency key was already used by another actor or for a different submission",HttpStatus.CONFLICT);return submission(projectKey,(Long)prior.get("id"),actorId);}
-        requireStageOwner(stage,actorId); requireCurrentStage(project.currentStageOrder(),stage);
+        requireStageOwner(project,stage,actorId); requireCurrentStage(project.currentStageOrder(),stage);
         if(stage.attemptNo()!=request.attemptNo()) throw error("COLLAB_STAGE_VERSION_STALE","Stage or attempt no longer matches",HttpStatus.CONFLICT);
         if(stage.versionNo()!=request.expectedStageVersion()) throw error("COLLAB_STAGE_VERSION_STALE","Stage changed; reload and retry",HttpStatus.CONFLICT);
         if(!Set.of("WAITING","IN_PROGRESS","REWORK").contains(stage.status()))throw error("COLLAB_STAGE_NOT_SUBMITTABLE","Stage is not accepting submissions",HttpStatus.CONFLICT);
         Map<String,Object> artifact=jdbc.query("select v.id,v.stage_id,v.attempt_no,v.artifact_id,a.kind,a.title,v.sha256 from collab_artifact_version v join collab_artifact a on a.id=v.artifact_id where v.id=?",rs->rs.next()?Map.of("id",rs.getLong("id"),"stage_id",rs.getLong("stage_id"),"attempt_no",rs.getInt("attempt_no"),"artifact_id",rs.getLong("artifact_id"),"kind",rs.getString("kind"),"title",rs.getString("title"),"sha256",rs.getString("sha256")):null,request.artifactVersionId());
         if(artifact==null||!Objects.equals(((Number)artifact.get("stage_id")).longValue(),stage.id())||((Number)artifact.get("attempt_no")).intValue()!=stage.attemptNo())throw error("COLLAB_ARTIFACT_NOT_CURRENT","Artifact version does not belong to the current stage attempt",HttpStatus.UNPROCESSABLE_ENTITY);
-        boolean manual=requiresReviewer(project.approvalLevel(),key);
-        List<Long> reviewers=reviewerIds(project.projectId(),stage);
+        List<ReviewerRoleRoster> roleRosters=project.groupId()!=null?reviewerRoleRosters(stage.id()):List.of();
+        boolean manual=project.groupId()==null?requiresReviewer(project.approvalLevel(),key):
+                "L1".equals(project.approvalLevel())||"L2".equals(project.approvalLevel())&&
+                        (roleRosters.stream().anyMatch(roster->!roster.userIds().isEmpty())||roleRosters.isEmpty()&&!reviewerIds(project,stage).isEmpty());
+        if(manual&&project.groupId()!=null&&roleRosters.isEmpty()) {
+            Integer boundRoles=jdbc.queryForObject("select count(*) from collab_requirement_stage_reviewer_role where stage_id=?",Integer.class,stage.id());
+            if(boundRoles!=null&&boundRoles>0) throw error("COLLAB_REVIEWER_UNAVAILABLE","Reviewer role members have not been configured for this stage",HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        if(manual&&project.groupId()!=null&&!roleRosters.isEmpty()) for(ReviewerRoleRoster roster:roleRosters)
+            if(roster.userIds().isEmpty()) throw error("COLLAB_REVIEWER_UNAVAILABLE","Every bound reviewer role needs at least one active reviewer",HttpStatus.UNPROCESSABLE_ENTITY);
+        List<Long> reviewers=roleRosters.isEmpty()?reviewerIds(project,stage):roleRosters.stream().flatMap(r->r.userIds().stream()).distinct().sorted().toList();
         if(manual&&reviewers.isEmpty())throw error("COLLAB_REVIEWER_UNAVAILABLE","At least one active reviewer is required",HttpStatus.UNPROCESSABLE_ENTITY);
         if(manual)for(Long reviewerId:reviewers)authorization.requireActiveMember(project.projectId(),reviewerId);
         String nextStatus=manual?"PENDING_APPROVAL":"COMPLETED";
         Instant now=Instant.now();
         jdbc.update("update collab_stage set status=?,version_no=version_no+1,completed_at=?,started_at=coalesce(started_at,?),time_updated=? where id=? and version_no=?",nextStatus,manual?null:now,now,now,stage.id(),stage.versionNo());
         int nextVersion=stage.versionNo()+1;
-        Map<String,Object> policy=Map.of("approvalLevel",project.approvalLevel(),"approvalMode",manual?"MANUAL":"AUTOMATIC","reviewerUserIds",manual?reviewers:List.of());
+        Map<String,Object> policy=Map.of("approvalLevel",project.approvalLevel(),"approvalMode",manual?"MANUAL":"AUTOMATIC","reviewerUserIds",manual?reviewers:List.of(),"reviewerRoleKeys",roleRosters.stream().map(ReviewerRoleRoster::roleKey).toList());
         jdbc.update("insert into collab_submission(time_created,time_updated,stage_id,attempt_no,artifact_version_id,submitted_by,policy_snapshot,status,idempotency_key,request_fingerprint,submitted_at,decided_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",now,now,stage.id(),stage.attemptNo(),request.artifactVersionId(),actorId,json(policy),manual?"PENDING_APPROVAL":"APPROVED",idempotencyKey,fingerprint,now,manual?null:now);
         Long submissionId=jdbc.queryForObject("select id from collab_submission where stage_id=? and idempotency_key=?",Long.class,stage.id(),idempotencyKey);
         feishuOutbox.enqueuePublish(project.projectId(),request.artifactVersionId());
+        Map<Long,Long> approvalIds=new HashMap<>();
         if(manual) for(Long reviewerId:reviewers){
             jdbc.update("insert into collab_approval(time_created,time_updated,submission_id,reviewer_user_id,state,version_no) values(?,?,?,?,'PENDING',0)",now,now,submissionId,reviewerId);
             Long approvalId=jdbc.queryForObject("select id from collab_approval where submission_id=? and reviewer_user_id=?",Long.class,submissionId,reviewerId);
-            feishuOutbox.enqueueApprovalReminder(project.projectId(),approvalId);
+            approvalIds.put(reviewerId,approvalId);
         }
-        else completeStage(project.projectId(),stage,actorId,submissionId,now);
+        if(manual&&!roleRosters.isEmpty()) {
+            for(ReviewerRoleRoster roster:roleRosters){
+                jdbc.update("insert into collab_submission_reviewer_role(submission_id,requirement_role_id,role_key_snapshot,role_name_snapshot) values(?,?,?,?)",submissionId,roster.roleId(),roster.roleKey(),roster.roleName());
+                for(Long reviewerId:roster.userIds()) jdbc.update("insert into collab_submission_reviewer_assignment(submission_id,requirement_role_id,reviewer_user_id,approval_id) values(?,?,?,?)",submissionId,roster.roleId(),reviewerId,approvalIds.get(reviewerId));
+            }
+        }
+        if(manual) feishuOutbox.enqueueApprovalReminder(project.projectId(),submissionId);
+        if(!manual) completeStage(project.projectId(),stage,actorId,submissionId,now);
         addEvent(project.projectId(),stage,"SUBMITTED",actorId,stage.status(),nextStatus,submissionId,Map.of("artifactVersionId",request.artifactVersionId(),"approvalMode",manual?"MANUAL":"AUTOMATIC","stageVersion",nextVersion));
         return submission(projectKey,submissionId,actorId);
     }
@@ -135,6 +157,7 @@ public class CollabProjectFlowService {
     @Transactional
     public SubmissionView decide(String projectKey,Long submissionId,DecisionRequest request,Long actorId){
         var project=authorization.requireMemberOrThrow(projectKey,actorId);
+        authorization.requireWritable(project);
         lockProjectFlow(project.projectId());
         Map<String,Object> row=jdbc.query("select sub.id,sub.stage_id,sub.attempt_no,sub.status,sub.artifact_version_id,ap.id approval_id,ap.reviewer_user_id,ap.state,ap.version_no approval_version,s.stage_key,s.status stage_status,s.version_no stage_version,s.owner_user_id,s.attempt_no current_attempt from collab_submission sub join collab_approval ap on ap.submission_id=sub.id join collab_stage s on s.id=sub.stage_id where sub.id=? and s.project_id=? and ap.reviewer_user_id=? for update",rs->rs.next()?row(rs):null,submissionId,project.projectId(),actorId);
         if(row==null)throw error("COLLAB_SUBMISSION_NOT_FOUND","Submission not found",HttpStatus.NOT_FOUND);
@@ -150,8 +173,16 @@ public class CollabProjectFlowService {
         if(changed!=1)throw error("COLLAB_SUBMISSION_ALREADY_DECIDED","Submission was decided concurrently",HttpStatus.CONFLICT);
         StageRow stage=lockedStage(project.projectId(),(String)row.get("stage_key"));
         boolean rejected="REJECT".equals(decision);
+        Integer roleCount=jdbc.queryForObject("select count(*) from collab_submission_reviewer_role where submission_id=?",Integer.class,submissionId);
+        boolean roleBased=roleCount!=null&&roleCount>0;
+        // Rejection remains immediately terminal, independent of role progress.
+        boolean allRolesSatisfied=roleBased&&Boolean.TRUE.equals(jdbc.queryForObject("select not exists (select 1 from collab_submission_reviewer_role r where r.submission_id=? and not exists (select 1 from collab_submission_reviewer_assignment a join collab_approval ap on ap.id=a.approval_id where a.submission_id=r.submission_id and a.requirement_role_id=r.requirement_role_id and ap.state='APPROVED'))",Boolean.class,submissionId));
         Integer remaining=jdbc.queryForObject("select count(*) from collab_approval where submission_id=? and state='PENDING'",Integer.class,submissionId);
-        boolean allApproved=!rejected&&(remaining==null||remaining==0);
+        boolean allApproved=!rejected&&(roleBased?allRolesSatisfied:remaining==null||remaining==0);
+        if(!rejected&&roleBased) {
+            List<Long> satisfiedRoleApprovalIds=jdbc.query("select ap.id from collab_approval ap where ap.submission_id=? and ap.state='PENDING' and not exists (select 1 from collab_submission_reviewer_assignment a join collab_submission_reviewer_role r on r.submission_id=a.submission_id and r.requirement_role_id=a.requirement_role_id where a.approval_id=ap.id and not exists (select 1 from collab_submission_reviewer_assignment aa join collab_approval approved on approved.id=aa.approval_id where aa.submission_id=a.submission_id and aa.requirement_role_id=a.requirement_role_id and approved.state='APPROVED'))",(rs,n)->rs.getLong(1),submissionId);
+            for(Long approvalId:satisfiedRoleApprovalIds) jdbc.update("update collab_approval set state='CANCELLED',time_updated=? where id=? and state='PENDING'",now,approvalId);
+        }
         if(rejected){
             jdbc.update("update collab_submission set status='REJECTED',decided_at=?,time_updated=? where id=? and status='PENDING_APPROVAL'",now,now,submissionId);
             jdbc.update("update collab_approval set state='CANCELLED',time_updated=? where submission_id=? and state='PENDING'",now,submissionId);
@@ -169,12 +200,13 @@ public class CollabProjectFlowService {
     @Transactional(readOnly=true)
     public ContextView context(String projectKey,String stageKey,boolean includeHistory,Long actorId){
         var project=authorization.requireMemberOrThrow(projectKey,actorId); String key=normalizeStage(stageKey);
-        StageRow current=readStage(project.projectId(),key); boolean mayReadHistory=Objects.equals(project.ownerUserId(),actorId)||current.ownerUserId().equals(actorId)||Objects.equals(current.reviewerUserId(),actorId)||additionalReviewerIds(current.id()).contains(actorId);
+        StageRow current=readStage(project.projectId(),key); boolean mayReadHistory=Objects.equals(project.ownerUserId(),actorId)||Objects.equals(project.groupOwnerUserId(),actorId)||stageActorIds(project,current,"OWNER",false).contains(actorId)||stageActorIds(project,current,"REVIEWER",false).contains(actorId);
         if(includeHistory&&!mayReadHistory)throw error("COLLAB_HISTORY_FORBIDDEN","History is limited to the project owner and current stage assignees",HttpStatus.FORBIDDEN);
         List<ArtifactView> approved=jdbc.query("select v.id,v.artifact_id,v.version_no,v.attempt_no,v.sha256,v.size_bytes,v.git_evidence_json,a.kind,a.title,s.stage_key,pv.url feishu_url from collab_submission sub join collab_artifact_version v on v.id=sub.artifact_version_id join collab_artifact a on a.id=v.artifact_id join collab_stage s on s.id=v.stage_id left join collab_feishu_publication pv on pv.artifact_version_id=v.id where s.project_id=? and sub.status='APPROVED' and s.stage_order<? and sub.id=(select max(x.id) from collab_submission x where x.stage_id=sub.stage_id and x.status='APPROVED') order by s.stage_order",
                 (rs,n)->artifactView(rs,rs.getString("stage_key"),projectKey,false),project.projectId(),current.order());
         List<ArtifactView> history=includeHistory?jdbc.query("select v.id,v.artifact_id,v.version_no,v.attempt_no,v.sha256,v.size_bytes,v.git_evidence_json,a.kind,a.title,s.stage_key,pv.url feishu_url,sub.status submission_status from collab_artifact_version v join collab_artifact a on a.id=v.artifact_id join collab_stage s on s.id=v.stage_id join collab_project p on p.id=s.project_id left join collab_submission sub on sub.artifact_version_id=v.id left join collab_feishu_publication pv on pv.artifact_version_id=v.id where s.project_id=? and (sub.status='APPROVED' or p.owner_user_id=? or v.uploaded_by=? or (sub.status='PENDING_APPROVAL' and exists(select 1 from collab_approval ap where ap.submission_id=sub.id and ap.reviewer_user_id=?))) order by s.stage_order,v.attempt_no,v.version_no",(rs,n)->artifactView(rs,rs.getString("stage_key"),projectKey,"PENDING_APPROVAL".equals(rs.getString("submission_status"))),project.projectId(),actorId,actorId,actorId):List.of();
-        return new ContextView(project.projectKey(),new CurrentStage(current.stageKey(),current.attemptNo(),current.status()),actorId,approved,includeHistory,history,new NextArtifact(current.artifactKind(),"[]",current.gitRequired()));
+        Map<String,Object> names=jdbc.queryForMap("select p.name requirement_name,g.name group_name from collab_project p join collab_group g on g.id=p.group_id where p.id=?",project.projectId());
+        return new ContextView(project.projectKey(),new CurrentStage(current.stageKey(),current.attemptNo(),current.status()),actorId,approved,includeHistory,history,new NextArtifact(current.artifactKind(),"[]",current.gitRequired()),project.groupKey(),(String)names.get("group_name"),project.projectKey(),(String)names.get("requirement_name"),project.gitlabRootSnapshot(),current.id(),current.attemptNo());
     }
 
     @Transactional(readOnly=true)
@@ -197,13 +229,13 @@ public class CollabProjectFlowService {
     public List<EventView> events(String projectKey,Long actorId){var p=authorization.requireMemberOrThrow(projectKey,actorId);return jdbc.query("select e.id,e.stage_id,s.stage_key,e.attempt_no,e.event_type,e.actor_user_id,u.display_name actor_name,e.from_status,e.to_status,e.reference_id,e.created_at from collab_stage_event e left join collab_stage s on s.id=e.stage_id left join iam_user u on u.id=e.actor_user_id where e.project_id=? order by e.created_at desc,e.id desc limit 300",(rs,n)->new EventView(rs.getLong("id"),(Long)rs.getObject("stage_id"),rs.getString("stage_key"),(Integer)rs.getObject("attempt_no"),rs.getString("event_type"),(Long)rs.getObject("actor_user_id"),rs.getString("actor_name"),rs.getString("from_status"),rs.getString("to_status"),(Long)rs.getObject("reference_id"),instant(rs,"created_at")),p.projectId());}
 
     @Transactional(readOnly=true)
-    public TaskPromptView taskPrompt(String projectKey,String stageKey,Long actorId){var p=authorization.requireMemberOrThrow(projectKey,actorId);StageRow s=readStage(p.projectId(),normalizeStage(stageKey));if(!s.ownerUserId().equals(actorId))throw error("COLLAB_STAGE_OWNER_REQUIRED","Only the current stage owner may generate its task prompt",HttpStatus.FORBIDDEN);String contextPrompt=s.order()>1?CollabStagePromptFactory.context(p.projectKey(),s.title()):null;String submitPrompt=CollabStagePromptFactory.submit(p.projectKey(),s.title(),s.id(),s.attemptNo(),s.gitRequired());return new TaskPromptView(p.projectKey(),s.stageKey(),s.attemptNo(),submitPrompt,contextPrompt);}
+    public TaskPromptView taskPrompt(String projectKey,String stageKey,Long actorId){var p=authorization.requireMemberOrThrow(projectKey,actorId);StageRow s=readStage(p.projectId(),normalizeStage(stageKey));requireStageOwner(p,s,actorId);String contextPrompt=s.order()>1?CollabStagePromptFactory.context(p.projectKey(),s.title()):null;String submitPrompt=CollabStagePromptFactory.submit(p.projectKey(),s.title(),s.id(),s.attemptNo(),s.gitRequired());return new TaskPromptView(p.projectKey(),s.stageKey(),s.attemptNo(),submitPrompt,contextPrompt);}
 
     private ArtifactView artifact(String projectKey,Long versionId,Long actorId){return jdbc.queryForObject("select v.id,v.artifact_id,v.version_no,v.attempt_no,v.sha256,v.size_bytes,v.git_evidence_json,a.kind,a.title,s.stage_key,pv.url feishu_url from collab_artifact_version v join collab_artifact a on a.id=v.artifact_id join collab_stage s on s.id=v.stage_id left join collab_feishu_publication pv on pv.artifact_version_id=v.id where v.id=?",(rs,n)->artifactView(rs,rs.getString("stage_key"),projectKey,false),versionId);}
-    private SubmissionView submission(String projectKey,Long id,Long actor){var p=authorization.requireMemberOrThrow(projectKey,actor);return jdbc.queryForObject("select sub.id,sub.stage_id,s.stage_key,sub.attempt_no,sub.artifact_version_id,sub.status,s.status stage_status,coalesce((select ap.state from collab_approval ap where ap.submission_id=sub.id order by ap.id limit 1),'') approval_state,sub.submitted_at,sub.decided_at from collab_submission sub join collab_stage s on s.id=sub.stage_id where sub.id=? and s.project_id=?",(rs,n)->new SubmissionView(rs.getLong("id"),rs.getLong("stage_id"),rs.getString("stage_key"),rs.getInt("attempt_no"),rs.getLong("artifact_version_id"),rs.getString("status"),rs.getString("stage_status"),rs.getString("approval_state"),"PENDING_APPROVAL".equals(rs.getString("status"))?"WAIT_REVIEW":"NEXT_STAGE",instant(rs,"submitted_at"),instant(rs,"decided_at")),id,p.projectId());}
-    private StageRow lockedStage(Long projectId,String key){return jdbc.query("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no,started_at,completed_at from collab_stage where project_id=? and stage_key=? for update",rs->rs.next()?stage(rs):null,projectId,key);}
-    private StageRow readStage(Long projectId,String key){StageRow stage=jdbc.query("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no,started_at,completed_at from collab_stage where project_id=? and stage_key=?",rs->rs.next()?stage(rs):null,projectId,key);if(stage==null)throw error("COLLAB_STAGE_NOT_FOUND","Stage not found",HttpStatus.NOT_FOUND);return stage;}
-    private StageRow stage(ResultSet rs)throws SQLException{return new StageRow(rs.getLong("id"),rs.getString("stage_key"),rs.getInt("stage_order"),rs.getString("title"),rs.getString("artifact_kind"),rs.getBoolean("git_required"),rs.getLong("owner_user_id"),(Long)rs.getObject("reviewer_user_id"),rs.getString("status"),rs.getInt("attempt_no"),rs.getInt("version_no"),instant(rs,"started_at"),instant(rs,"completed_at"));}
+    private SubmissionView submission(String projectKey,Long id,Long actor){var p=authorization.requireMemberOrThrow(projectKey,actor);return jdbc.queryForObject("select sub.id,sub.stage_id,s.stage_key,sub.attempt_no,sub.artifact_version_id,sub.status,s.status stage_status,coalesce((select ap.state from collab_approval ap where ap.submission_id=sub.id order by ap.id limit 1),'') approval_state,sub.submitted_at,sub.decided_at from collab_submission sub join collab_stage s on s.id=sub.stage_id where sub.id=? and s.project_id=?",(rs,n)->new SubmissionView(rs.getLong("id"),rs.getLong("stage_id"),rs.getString("stage_key"),rs.getInt("attempt_no"),rs.getLong("artifact_version_id"),rs.getString("status"),rs.getString("stage_status"),rs.getString("approval_state"),"PENDING_APPROVAL".equals(rs.getString("status"))?"WAIT_REVIEW":"NEXT_STAGE",instant(rs,"submitted_at"),instant(rs,"decided_at"),reviewerRoleProgress(rs.getLong("id"))),id,p.projectId());}
+    private StageRow lockedStage(Long projectId,String key){return jdbc.query("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no,started_at,completed_at,actors_frozen_at from collab_stage where project_id=? and stage_key=? for update",rs->rs.next()?stage(rs):null,projectId,key);}
+    private StageRow readStage(Long projectId,String key){StageRow stage=jdbc.query("select id,stage_key,stage_order,title,artifact_kind,git_required,owner_user_id,reviewer_user_id,status,attempt_no,version_no,started_at,completed_at,actors_frozen_at from collab_stage where project_id=? and stage_key=?",rs->rs.next()?stage(rs):null,projectId,key);if(stage==null)throw error("COLLAB_STAGE_NOT_FOUND","Stage not found",HttpStatus.NOT_FOUND);return stage;}
+    private StageRow stage(ResultSet rs)throws SQLException{return new StageRow(rs.getLong("id"),rs.getString("stage_key"),rs.getInt("stage_order"),rs.getString("title"),rs.getString("artifact_kind"),rs.getBoolean("git_required"),rs.getLong("owner_user_id"),(Long)rs.getObject("reviewer_user_id"),rs.getString("status"),rs.getInt("attempt_no"),rs.getInt("version_no"),instant(rs,"started_at"),instant(rs,"completed_at"),instant(rs,"actors_frozen_at"));}
     private void completeStage(Long projectId,StageRow stage,Long actorId,Long submissionId,Instant now){
         int currentGroup=stageGroupIndex(stage.order());
         List<Integer> unfinished=jdbc.query("select stage_order from collab_stage where project_id=? and stage_order in ("+placeholders(STAGE_GROUPS.get(currentGroup).size())+") and status not in ('COMPLETED','SKIPPED') for update",
@@ -211,15 +243,20 @@ public class CollabProjectFlowService {
         if(!unfinished.isEmpty())return;
         for(int groupIndex=currentGroup+1;groupIndex<STAGE_GROUPS.size();groupIndex++){
             List<Integer> orders=STAGE_GROUPS.get(groupIndex);
-            List<StageActivation> nextStages=jdbc.query("select id,stage_order,status from collab_stage where project_id=? and stage_order in ("+placeholders(orders.size())+") and status not in ('COMPLETED','SKIPPED') order by stage_order",
-                    (rs,n)->new StageActivation(rs.getLong("id"),rs.getInt("stage_order"),rs.getString("status")),concat(projectId,orders));
+            List<StageActivation> nextStages=jdbc.query("select id,stage_order,status,stage_key from collab_stage where project_id=? and stage_order in ("+placeholders(orders.size())+") and status not in ('COMPLETED','SKIPPED') order by stage_order",
+                    (rs,n)->new StageActivation(rs.getLong("id"),rs.getInt("stage_order"),rs.getString("status"),rs.getString("stage_key")),concat(projectId,orders));
             if(nextStages.isEmpty())continue;
             int nextOrder=nextStages.get(0).order();
-            jdbc.update("update collab_project set current_stage_order=?,version_no=version_no+1,time_updated=? where id=?",nextOrder,now,projectId);
             for(StageActivation next:nextStages){
-                int changed=jdbc.update("update collab_stage set status='IN_PROGRESS',started_at=coalesce(started_at,?),version_no=version_no+1,time_updated=? where id=? and status in ('WAITING','READY','NOT_STARTED')",now,now,next.id());
-                if(changed==1)feishuOutbox.enqueueStageHandoff(projectId,next.id(),submissionId);
+                if(!stageHasRequiredActiveActors(projectId,next.id(),next.order())){
+                    int blocked=jdbc.update("update collab_stage set status='READY_BLOCKED',actors_frozen_at=null,version_no=version_no+1,time_updated=? where id=? and status in ('WAITING','READY','NOT_STARTED','READY_BLOCKED')",now,next.id());
+                    if(blocked==1){StageRow blockedStage=readStage(projectId,next.stageKey());addEvent(projectId,blockedStage,"ASSIGNMENT_BLOCKED",actorId,next.status(),"READY_BLOCKED",submissionId,Map.of("reason","NEXT_STAGE_ACTORS_REQUIRED"));}
+                    continue;
+                }
+                int changed=jdbc.update("update collab_stage set actors_frozen_at=coalesce(actors_frozen_at,?),status='IN_PROGRESS',started_at=coalesce(started_at,?),version_no=version_no+1,time_updated=? where id=? and status in ('WAITING','READY','NOT_STARTED','READY_BLOCKED')",now,now,now,next.id());
+                if(changed==1){freezeStageActorRows(next.id(), now);if("READY_BLOCKED".equals(next.status()))feishuOutbox.enqueueStageActivation(projectId,next.id(),jdbc.queryForObject("select version_no from collab_stage where id=?",Integer.class,next.id()));else feishuOutbox.enqueueStageHandoff(projectId,next.id(),submissionId);}
             }
+            jdbc.update("update collab_project set current_stage_order=?,version_no=version_no+1,time_updated=? where id=?",nextOrder,now,projectId);
             return;
         }
         int completed=jdbc.update("update collab_project set status='COMPLETED',version_no=version_no+1,time_updated=? where id=? and status<>'COMPLETED'",now,projectId);
@@ -233,10 +270,39 @@ public class CollabProjectFlowService {
     private void lockProjectFlow(Long projectId){jdbc.queryForObject("select id from collab_project where id=? for update",Long.class,projectId);}
     private void addEvent(Long projectId,StageRow stage,String event,Long actor,String from,String to,Long reference,Object payload){jdbc.update("insert into collab_stage_event(time_created,time_updated,project_id,stage_id,attempt_no,event_type,actor_user_id,from_status,to_status,reference_id,payload_json,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",Instant.now(),Instant.now(),projectId,stage.id(),stage.attemptNo(),event,actor,from,to,reference,json(payload),Instant.now());}
     private List<Long> additionalReviewerIds(Long stageId){return jdbc.query("select reviewer_user_id from collab_stage_additional_reviewer where stage_id=? order by id",(rs,n)->rs.getLong(1),stageId);}
-    private List<Long> reviewerIds(Long projectId,StageRow stage){List<Long> ids=new ArrayList<>();if(stage.reviewerUserId()!=null)ids.add(stage.reviewerUserId());ids.addAll(additionalReviewerIds(stage.id()));return ids.stream().distinct().toList();}
-    private void validateArtifact(StageRow stage,ArtifactUpload r){if(r.title().isBlank()||r.markdownContent().isBlank())throw error("COLLAB_ARTIFACT_EMPTY","Title and Markdown content are required",HttpStatus.BAD_REQUEST);byte[] bytes=r.markdownContent().getBytes(StandardCharsets.UTF_8);if(bytes.length>MAX_MARKDOWN_BYTES)throw error("COLLAB_ARTIFACT_TOO_LARGE","Markdown content must not exceed 1 MB",HttpStatus.PAYLOAD_TOO_LARGE);if(!r.markdownContent().equals(new String(bytes,StandardCharsets.UTF_8)))throw error("COLLAB_ARTIFACT_ENCODING_INVALID","Markdown must be valid UTF-8",HttpStatus.BAD_REQUEST);String actual=sha256(r.markdownContent());if(!actual.equalsIgnoreCase(r.sha256()))throw error("COLLAB_ARTIFACT_HASH_MISMATCH","SHA-256 does not match the Markdown content",HttpStatus.UNPROCESSABLE_ENTITY);if(stage.gitRequired()){if(r.gitEvidence()==null)throw error("COLLAB_GIT_EVIDENCE_REQUIRED","Repository and commit/PR URLs are required",HttpStatus.UNPROCESSABLE_ENTITY);validateGitUrl(r.gitEvidence().repositoryUrl());validateGitUrl(r.gitEvidence().commitOrPullRequestUrl());}}
+    private String stageRoleName(Long stageId,String duty){
+        if("REVIEWER".equals(duty)){
+            List<String> names=jdbc.query("select rr.role_name_snapshot from collab_requirement_stage_reviewer_role sr join collab_requirement_role rr on rr.id=sr.requirement_role_id where sr.stage_id=? order by rr.role_name_snapshot",(rs,n)->rs.getString(1),stageId);
+            if(!names.isEmpty()){
+                String legacy=jdbc.query("select rr.role_name_snapshot from collab_requirement_stage_role sr join collab_requirement_role rr on rr.id=sr.requirement_role_id where sr.stage_id=? and sr.duty='REVIEWER'",rs->rs.next()?rs.getString(1):null,stageId);
+                if(legacy!=null){List<String> ordered=new ArrayList<>();ordered.add(legacy);names.stream().filter(name->!name.equals(legacy)).forEach(ordered::add);names=ordered;}
+                return String.join("、",names);
+            }
+        }
+        return jdbc.query("select rr.role_name_snapshot from collab_requirement_stage_role sr join collab_requirement_role rr on rr.id=sr.requirement_role_id where sr.stage_id=? and sr.duty=?",rs->rs.next()?rs.getString(1):null,stageId,duty);
+    }
+    private List<Long> reviewerIds(CollabProjectAuthorizationService.ProjectRef project,StageRow stage){if(project.groupId()!=null)return stageActorIds(project,stage,"REVIEWER",true);List<Long> ids=new ArrayList<>();if(stage.reviewerUserId()!=null)ids.add(stage.reviewerUserId());ids.addAll(additionalReviewerIds(stage.id()));return ids.stream().distinct().toList();}
+    private List<Long> stageActorIds(CollabProjectAuthorizationService.ProjectRef project,StageRow stage,String duty,boolean frozenOnly){if(project.groupId()==null){if("OWNER".equals(duty))return stage.ownerUserId()==null?List.of():List.of(stage.ownerUserId());List<Long> ids=new ArrayList<>();if(stage.reviewerUserId()!=null)ids.add(stage.reviewerUserId());ids.addAll(additionalReviewerIds(stage.id()));return ids.stream().distinct().toList();}if(frozenOnly&&stage.actorsFrozenAt()==null)return List.of();String sql="select a.user_id from collab_requirement_stage_actor a join iam_user u on u.id=a.user_id and u.status='ACTIVE' where a.stage_id=? and a.duty=?"+(frozenOnly?" and a.frozen_at is not null":"")+" order by a.user_id";return jdbc.query(sql,(rs,n)->rs.getLong(1),stage.id(),duty);}
+    private void requireStageOwner(CollabProjectAuthorizationService.ProjectRef project,StageRow stage,Long actor){if(project.groupId()!=null&&stage.actorsFrozenAt()==null)throw error("REQUIREMENT_STAGE_ACTORS_NOT_FROZEN","Stage actors must be frozen before work starts",HttpStatus.CONFLICT);if(!stageActorIds(project,stage,"OWNER",true).contains(actor))throw error("COLLAB_STAGE_OWNER_REQUIRED","Only a frozen current stage owner may perform this operation",HttpStatus.FORBIDDEN);authorization.requireActiveMember(project.projectId(),actor);}
+    private void freezeStageActorRows(Long stageId,Instant now){jdbc.update("update collab_requirement_stage_actor set frozen_at=coalesce(frozen_at,?) where stage_id=?",now,stageId);}
+    private boolean stageHasRequiredActiveActors(Long projectId,Long stageId,int order){
+        String stageKey=jdbc.queryForObject("select stage_key from collab_stage where id=?",String.class,stageId);
+        Long groupId=jdbc.queryForObject("select group_id from collab_project where id=?",Long.class,projectId);
+        if(groupId==null){Integer owners=jdbc.queryForObject("select count(*) from collab_stage s join collab_project_member m on m.project_id=s.project_id and m.user_id=s.owner_user_id and m.status='ACTIVE' join iam_user u on u.id=m.user_id and u.status='ACTIVE' where s.id=?",Integer.class,stageId);if(owners==null||owners==0)return false;if(requiresReviewer(jdbc.queryForObject("select approval_level from collab_project where id=?",String.class,projectId),stageKey)){Integer reviewers=jdbc.queryForObject("select (select count(*) from collab_stage s join collab_project_member m on m.project_id=s.project_id and m.user_id=s.reviewer_user_id and m.status='ACTIVE' join iam_user u on u.id=m.user_id and u.status='ACTIVE' where s.id=?)+(select count(*) from collab_stage_additional_reviewer ar join collab_project_member m on m.project_id=? and m.user_id=ar.reviewer_user_id and m.status='ACTIVE' join iam_user u on u.id=m.user_id and u.status='ACTIVE' where ar.stage_id=?)",Integer.class,stageId,projectId,stageId);return reviewers!=null&&reviewers>0;}return true;}
+        Integer owners=jdbc.queryForObject("select count(*) from collab_requirement_stage_actor a join collab_group_member gm on gm.group_id=? and gm.user_id=a.user_id and gm.status='ACTIVE' join iam_user u on u.id=a.user_id and u.status='ACTIVE' where a.stage_id=? and a.duty='OWNER'",Integer.class,groupId,stageId);if(owners==null||owners==0)return false;
+        String level=jdbc.queryForObject("select approval_level from collab_project where id=?",String.class,projectId);if("L3".equals(level))return true;
+        Integer assignedReviewers=jdbc.queryForObject("select count(*) from collab_requirement_stage_reviewer_role_actor a join collab_group_member gm on gm.group_id=? and gm.user_id=a.user_id and gm.status='ACTIVE' join iam_user u on u.id=a.user_id and u.status='ACTIVE' where a.stage_id=?",Integer.class,groupId,stageId);
+        if("L2".equals(level)&&(assignedReviewers==null||assignedReviewers==0))return true;
+        Integer roleCount=jdbc.queryForObject("select count(*) from collab_requirement_stage_reviewer_role where stage_id=?",Integer.class,stageId);
+        if(roleCount!=null&&roleCount>0){Integer missing=jdbc.queryForObject("select count(*) from collab_requirement_stage_reviewer_role rr where rr.stage_id=? and not exists(select 1 from collab_requirement_stage_reviewer_role_actor a join collab_group_member gm on gm.group_id=? and gm.user_id=a.user_id and gm.status='ACTIVE' join iam_user u on u.id=a.user_id and u.status='ACTIVE' where a.stage_id=rr.stage_id and a.requirement_role_id=rr.requirement_role_id)",Integer.class,stageId,groupId);return missing!=null&&missing==0;}
+        Integer reviewers=jdbc.queryForObject("select count(*) from collab_requirement_stage_actor a join collab_group_member gm on gm.group_id=? and gm.user_id=a.user_id and gm.status='ACTIVE' join iam_user u on u.id=a.user_id and u.status='ACTIVE' where a.stage_id=? and a.duty='REVIEWER'",Integer.class,groupId,stageId);return reviewers!=null&&reviewers>0;
+    }
+    private List<Long> reviewerStateIds(Long submissionId,String state){if(submissionId==null)return List.of();return jdbc.query("select reviewer_user_id from collab_approval where submission_id=? and state=? order by reviewer_user_id",(rs,n)->rs.getLong(1),submissionId,state);}
+    private List<Long> pendingReviewerStateIds(Long submissionId){if(submissionId==null)return List.of();return jdbc.query("select ap.reviewer_user_id from collab_approval ap where ap.submission_id=? and ap.state='PENDING' and (not exists(select 1 from collab_submission_reviewer_role r where r.submission_id=ap.submission_id) or exists(select 1 from collab_submission_reviewer_assignment a where a.approval_id=ap.id and exists(select 1 from collab_submission_reviewer_role r where r.submission_id=a.submission_id and r.requirement_role_id=a.requirement_role_id and not exists(select 1 from collab_submission_reviewer_assignment aa join collab_approval approved on approved.id=aa.approval_id where aa.submission_id=r.submission_id and aa.requirement_role_id=r.requirement_role_id and approved.state='APPROVED')))) order by ap.reviewer_user_id",(rs,n)->rs.getLong(1),submissionId);}
+    private List<ReviewerRoleProgress> reviewerRoleProgress(Long submissionId){if(submissionId==null)return List.of();return jdbc.query("select r.role_key_snapshot,r.role_name_snapshot,sub.status submission_status,case when exists(select 1 from collab_submission_reviewer_assignment a join collab_approval ap on ap.id=a.approval_id where a.submission_id=r.submission_id and a.requirement_role_id=r.requirement_role_id and ap.state='APPROVED') then 1 else 0 end approved_count from collab_submission_reviewer_role r join collab_submission sub on sub.id=r.submission_id where r.submission_id=? order by r.role_name_snapshot,r.role_key_snapshot",(rs,n)->{int count=rs.getInt("approved_count");String status="REJECTED".equals(rs.getString("submission_status"))?"REJECTED":count==1?"SATISFIED":"PENDING";return new ReviewerRoleProgress(rs.getString("role_key_snapshot"),rs.getString("role_name_snapshot"),count,1,status);},submissionId);}
+    private List<ReviewerRoleRoster> reviewerRoleRosters(Long stageId){return jdbc.query("select rr.id,rr.source_group_role_key,rr.role_name_snapshot,a.user_id,u.status user_status from collab_requirement_stage_reviewer_role sr join collab_requirement_role rr on rr.id=sr.requirement_role_id left join collab_requirement_stage_reviewer_role_actor a on a.stage_id=sr.stage_id and a.requirement_role_id=sr.requirement_role_id left join iam_user u on u.id=a.user_id where sr.stage_id=? order by rr.role_name_snapshot,rr.source_group_role_key,a.user_id",rs-> {Map<Long,ReviewerRoleRosterBuilder> map=new LinkedHashMap<>();while(rs.next()){long id=rs.getLong("id");ReviewerRoleRosterBuilder b=map.get(id);if(b==null){b=new ReviewerRoleRosterBuilder(id,rs.getString("source_group_role_key"),rs.getString("role_name_snapshot"));map.put(id,b);}Object userValue=rs.getObject("user_id");if(userValue!=null&&"ACTIVE".equals(rs.getString("user_status")))b.users.add(((Number)userValue).longValue());}return map.values().stream().map(b->new ReviewerRoleRoster(b.id,b.key,b.name,List.copyOf(b.users))).toList();},stageId);}
+    private void validateArtifact(CollabProjectAuthorizationService.ProjectRef project,StageRow stage,ArtifactUpload r){if(r.title().isBlank()||r.markdownContent().isBlank())throw error("COLLAB_ARTIFACT_EMPTY","Title and Markdown content are required",HttpStatus.BAD_REQUEST);byte[] bytes=r.markdownContent().getBytes(StandardCharsets.UTF_8);if(bytes.length>MAX_MARKDOWN_BYTES)throw error("COLLAB_ARTIFACT_TOO_LARGE","Markdown content must not exceed 1 MB",HttpStatus.PAYLOAD_TOO_LARGE);if(!r.markdownContent().equals(new String(bytes,StandardCharsets.UTF_8)))throw error("COLLAB_ARTIFACT_ENCODING_INVALID","Markdown must be valid UTF-8",HttpStatus.BAD_REQUEST);String actual=sha256(r.markdownContent());if(!actual.equalsIgnoreCase(r.sha256()))throw error("COLLAB_ARTIFACT_HASH_MISMATCH","SHA-256 does not match the Markdown content",HttpStatus.UNPROCESSABLE_ENTITY);if(stage.gitRequired()){if(r.gitEvidence()==null)throw error("COLLAB_GIT_EVIDENCE_REQUIRED","Repository and commit/PR URLs are required",HttpStatus.UNPROCESSABLE_ENTITY);if(project.gitlabRootSnapshot()!=null&&!project.gitlabRootSnapshot().isBlank())gitlabRootValidator.validateEvidence(project.gitlabRootSnapshot(),r.gitEvidence().repositoryUrl(),r.gitEvidence().commitOrPullRequestUrl());else{validateGitUrl(r.gitEvidence().repositoryUrl());validateGitUrl(r.gitEvidence().commitOrPullRequestUrl());}}}
     private void validateGitUrl(String value){try{java.net.URI uri=java.net.URI.create(value);String host=uri.getHost()==null?"":uri.getHost().toLowerCase(Locale.ROOT);if(!"https".equalsIgnoreCase(uri.getScheme())||!(host.equals("github.com")||host.endsWith(".github.com")||host.equals("gitlab.com")||host.endsWith(".gitlab.com")||host.equals("gitlab.it.taikang.com"))||uri.getUserInfo()!=null)throw new IllegalArgumentException();}catch(RuntimeException ex){throw error("COLLAB_GIT_URL_INVALID","Git evidence must use an HTTPS GitHub or GitLab URL",HttpStatus.UNPROCESSABLE_ENTITY);}}
-    private void requireStageOwner(StageRow s,Long actor){if(!s.ownerUserId().equals(actor))throw error("COLLAB_STAGE_OWNER_REQUIRED","Only the current stage owner may perform this operation",HttpStatus.FORBIDDEN);}
     private void requireWikiRootConfigured(Long projectId){Integer configured=jdbc.queryForObject("select count(*) from collab_feishu_binding where project_id=? and wiki_space_id is not null and wiki_root_node_token is not null and publish_actor_user_id is not null",Integer.class,projectId);if(configured==null||configured==0)throw error("COLLAB_WIKI_ROOT_REQUIRED","Configure the project Feishu Wiki root before submitting an artifact",HttpStatus.CONFLICT);}
     private void requireCurrentStage(int order,StageRow stage){boolean current=stage.order()==order||((order==3||order==5)&&stage.order()==order+1);if(!current)throw error("COLLAB_STAGE_NOT_CURRENT","Only a stage in the current project stage group can be submitted",HttpStatus.CONFLICT);}
     private String normalizeStage(String key){String k=key==null?"":key.trim().toUpperCase(Locale.ROOT);if(!STAGE_KEYS.contains(k))throw error("COLLAB_STAGE_NOT_FOUND","Stage not found",HttpStatus.NOT_FOUND);return k;}
@@ -251,16 +317,19 @@ public class CollabProjectFlowService {
     private Instant instant(ResultSet rs,String column)throws SQLException{java.sql.Timestamp t=rs.getTimestamp(column);return t==null?null:t.toInstant();}
     private BusinessException error(String code,String message,HttpStatus status){return new BusinessException(code,message,status);}
 
-    private record StageRow(Long id,String stageKey,int order,String title,String artifactKind,boolean gitRequired,Long ownerUserId,Long reviewerUserId,String status,int attemptNo,int versionNo,Instant startedAt,Instant completedAt){}
-    private record StageActivation(Long id,int order,String status){}
+    private record StageRow(Long id,String stageKey,int order,String title,String artifactKind,boolean gitRequired,Long ownerUserId,Long reviewerUserId,String status,int attemptNo,int versionNo,Instant startedAt,Instant completedAt,Instant actorsFrozenAt){}
+    private record StageActivation(Long id,int order,String status,String stageKey){}
     public record WorkflowView(String projectKey,String approvalLevel,String projectStatus,int currentStageOrder,List<StageWorkflowView> stages){}
-    public record StageWorkflowView(Long stageId,String stageKey,int order,String title,String artifactKind,boolean gitRequired,Long ownerUserId,Long reviewerUserId,List<Long> additionalReviewerUserIds,String status,int attemptNo,int versionNo,Long submissionId,String submissionStatus,Long artifactVersionId,Instant submittedAt,String approvalState,Long frozenReviewerUserId,Integer approvalVersionNo){}
+    public record StageWorkflowView(Long stageId,String stageKey,int order,String title,String artifactKind,boolean gitRequired,Long ownerUserId,Long reviewerUserId,List<Long> additionalReviewerUserIds,String status,int attemptNo,int versionNo,Long submissionId,String submissionStatus,Long artifactVersionId,Instant submittedAt,String approvalState,Long frozenReviewerUserId,Integer approvalVersionNo,String ownerRoleName,String reviewerRoleName,List<Long> pendingReviewerUserIds,List<Long> approvedReviewerUserIds,List<ReviewerRoleProgress> reviewerRoleProgress){}
     public record ArtifactView(Long artifactVersionId,Long artifactId,int versionNo,int attemptNo,String stageKey,String kind,String title,String sha256,long sizeBytes,String feishuUrl,String contentUrl,String repositoryUrl,String commitOrPullRequestUrl,boolean pendingApproval){}
     public record ArtifactContentView(Long artifactVersionId,String stageKey,String title,String sha256,long sizeBytes,String markdownContent){}
-    public record SubmissionView(Long submissionId,Long stageId,String stageKey,int attemptNo,Long artifactVersionId,String submissionStatus,String stageStatus,String approvalState,String nextAction,Instant submittedAt,Instant decidedAt){}
+    public record SubmissionView(Long submissionId,Long stageId,String stageKey,int attemptNo,Long artifactVersionId,String submissionStatus,String stageStatus,String approvalState,String nextAction,Instant submittedAt,Instant decidedAt,List<ReviewerRoleProgress> reviewerRoleProgress){}
+    public record ReviewerRoleProgress(String roleKey,String roleName,int approvedCount,int requiredCount,String status){}
+    private record ReviewerRoleRoster(Long roleId,String roleKey,String roleName,List<Long> userIds){}
+    private static final class ReviewerRoleRosterBuilder { final Long id; final String key,name; final List<Long> users=new ArrayList<>(); ReviewerRoleRosterBuilder(Long id,String key,String name){this.id=id;this.key=key;this.name=name;} }
     public record CurrentStage(String key,int attemptNo,String status){}
     public record NextArtifact(String kind,String requiredFields,boolean gitEvidenceRequired){}
-    public record ContextView(String projectKey,CurrentStage currentStage,Long actorUserId,List<ArtifactView> approvedArtifacts,boolean historyIncluded,List<ArtifactView> history,NextArtifact nextExpectedArtifact){}
+    public record ContextView(String projectKey,CurrentStage currentStage,Long actorUserId,List<ArtifactView> approvedArtifacts,boolean historyIncluded,List<ArtifactView> history,NextArtifact nextExpectedArtifact,String groupKey,String groupName,String requirementKey,String requirementName,String gitlabRootUrl,Long stageId,int attemptNo){}
     public record EventView(Long id,Long stageId,String stageKey,Integer attemptNo,String eventType,Long actorUserId,String actorName,String fromStatus,String toStatus,Long referenceId,Instant createdAt){}
     public record TaskPromptView(String projectKey,String stageKey,int attemptNo,String prompt,String contextPrompt){}
 }

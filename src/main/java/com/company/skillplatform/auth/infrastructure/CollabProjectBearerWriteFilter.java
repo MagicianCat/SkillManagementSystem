@@ -21,7 +21,9 @@ public class CollabProjectBearerWriteFilter extends OncePerRequestFilter {
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
         String method = request.getMethod();
-        return path == null || !(path.equals("/api/v1/collab-projects") || path.startsWith("/api/v1/collab-projects/"))
+        return path == null || !(path.equals("/api/v1/collab-projects") || path.startsWith("/api/v1/collab-projects/")
+                || path.equals("/api/v1/collab-groups") || path.startsWith("/api/v1/collab-groups/")
+                || path.equals("/api/v1/collab-requirements") || path.startsWith("/api/v1/collab-requirements/"))
                 || !("POST".equals(method) || "PUT".equals(method)
                 || "PATCH".equals(method) || "DELETE".equals(method));
     }

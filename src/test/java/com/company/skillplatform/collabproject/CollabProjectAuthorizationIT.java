@@ -4,13 +4,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.company.skillplatform.collabproject.application.CollabFeishuOutbox;
+import com.company.skillplatform.collabproject.application.CollabGitlabRootValidator;
 import com.company.skillplatform.collabproject.application.CollabProjectAuthorizationService;
 import com.company.skillplatform.collabproject.application.CollabProjectService;
+import com.company.skillplatform.collabproject.application.CollabRequirementService;
 import com.company.skillplatform.collabproject.flow.application.CollabProjectFlowService;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.ArtifactUpload;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.DecisionRequest;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.SubmissionRequest;
+import com.company.skillplatform.collabproject.group.application.CollabGroupService;
+import com.company.skillplatform.collabproject.application.GroupFeishuOutbox;
 import com.company.skillplatform.common.application.BusinessException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mysql.cj.jdbc.MysqlDataSource;
@@ -40,10 +44,15 @@ class CollabProjectAuthorizationIT {
     private static CollabProjectService projects;
     private static CollabProjectAuthorizationService authorization;
     private static CollabProjectFlowService flow;
+    private static CollabGroupService groups;
     private Long owner;
     private Long reviewer;
+    private Long outsider;
     private Long teamA;
     private Long teamB;
+    private String groupKey;
+    private Long ownerRoleId;
+    private Long reviewerRoleId;
 
     @BeforeAll static void migrate() {
         String host=System.getProperty("it.collab.mysql.host","127.0.0.1");
@@ -59,23 +68,26 @@ class CollabProjectAuthorizationIT {
         authorization=new CollabProjectAuthorizationService(jdbc);
         CollabFeishuOutbox outbox=new CollabFeishuOutbox(jdbc,mapper);
         projects=new CollabProjectService(jdbc,mapper,authorization,outbox);
-        flow=new CollabProjectFlowService(jdbc,mapper,authorization,outbox);
+        flow=new CollabProjectFlowService(jdbc,mapper,authorization,outbox,new CollabGitlabRootValidator());
+        groups=new CollabGroupService(jdbc,mapper,null,outbox,new GroupFeishuOutbox(jdbc,mapper));
     }
 
     @BeforeEach void resetAndSeed() throws SQLException {
         clearFixture();
-        owner=insertUser("owner"); reviewer=insertUser("reviewer");
+        owner=insertUser("owner"); reviewer=insertUser("reviewer"); outsider=insertUser("outsider");
         teamA=insertTeam("team-a"); teamB=insertTeam("team-b");
         addTeamMember(teamA,owner); addTeamMember(teamA,reviewer); addTeamMember(teamB,owner); addTeamMember(teamB,reviewer);
         grantProjectManager(teamA,owner);
+        seedGroup();
     }
 
     @AfterAll static void cleanTestData() throws SQLException { clearFixture(); }
 
     private static void clearFixture() throws SQLException {
+        if(jdbc==null)return;
         try(Connection c=jdbc.getDataSource().getConnection();var s=c.createStatement()){
             s.execute("SET FOREIGN_KEY_CHECKS=0");
-            for(String table:List.of("collab_outbox","collab_feishu_publication","collab_feishu_binding","collab_stage_event","collab_approval","collab_submission","collab_artifact_version","collab_artifact","collab_stage","collab_project_member","collab_project"))s.execute("TRUNCATE TABLE "+table);
+            for(String table:List.of("collab_group_outbox","collab_group_template_audit","collab_requirement_stage_actor","collab_requirement_stage_reviewer_role","collab_requirement_stage_role","collab_requirement_role","collab_group_role_member","collab_group_stage_reviewer_role","collab_group_stage_template","collab_group_role","collab_group_member","collab_group_feishu_binding","collab_group","collab_outbox","collab_feishu_publication","collab_feishu_binding","collab_stage_event","collab_approval","collab_submission","collab_artifact_version","collab_artifact","collab_stage","collab_project_member","collab_project"))s.execute("TRUNCATE TABLE "+table);
             s.execute("DELETE FROM iam_scoped_role_assignment WHERE role_key='PROJECT_MANAGER' AND scope_type='TEAM'");
             s.execute("DELETE FROM org_team_member WHERE user_id IN (SELECT id FROM iam_user WHERE external_user_id LIKE 'collab-it-%')");
             s.execute("DELETE FROM org_team WHERE external_department_id LIKE 'collab-it-%'");
@@ -86,8 +98,8 @@ class CollabProjectAuthorizationIT {
 
     @Test void creationRequiresExactHomeTeamScopeAndOptionsAreScoped() {
         assertThat(projects.creationOptions(owner,false)).extracting(CollabProjectService.TeamOption::id).containsExactly(teamA);
-        assertThatThrownBy(()->createProject(command(teamB,"L1",List.of(owner,reviewer)),owner,false))
-                .isInstanceOf(BusinessException.class).hasMessageContaining("selected team");
+        assertThatThrownBy(()->groups.create(new CollabGroupService.CreateGroup(teamB,"Forbidden","","https://gitlab.it.taikang.com/ai_coding/it"),owner))
+                .isInstanceOf(BusinessException.class).hasMessageContaining("PROJECT_MANAGER");
         var created=createProject(command(teamA,"L1",List.of(owner,reviewer)),owner,false);
         assertThat(created.homeTeamId()).isEqualTo(teamA);
         assertThat(created.stages()).hasSize(8);
@@ -109,15 +121,48 @@ class CollabProjectAuthorizationIT {
         assertThat(decision.submissionStatus()).isEqualTo("APPROVED");
     }
 
-    @Test void projectAccessIsIsolatedAndRemovedMemberLosesAccessImmediately() {
+    @Test void requirementReviewerRoleMembershipIsAUnionAcrossBoundRoles() {
+        String altKey="IT_REVIEWER_ALT";
+        jdbc.update("insert into collab_group_role(group_id,role_key,role_name,status,version_no,time_created,time_updated) values((select id from collab_group where group_key=?),?,'Alternate reviewer','ACTIVE',0,now(3),now(3))",groupKey,altKey);
+        Long altRoleId=jdbc.queryForObject("select id from collab_group_role where group_id=(select id from collab_group where group_key=?) and role_key=?",Long.class,groupKey,altKey);
+        jdbc.update("insert into collab_group_role_member(role_id,user_id) values(?,?)",altRoleId,owner);
+        jdbc.update("insert into collab_group_stage_reviewer_role(group_id,stage_key,role_id) values((select id from collab_group where group_key=?),'PRODUCT',?)",groupKey,altRoleId);
+
+        var base=command(teamA,"L3",List.of(owner,reviewer));
+        List<CollabProjectService.Assignment> assignments=base.stageAssignments().stream()
+                .map(a->new CollabProjectService.Assignment(a.stageKey(),a.ownerUserId(),"PRODUCT".equals(a.stageKey())?reviewer:null)).toList();
+        var project=createProject(new CollabProjectService.CreateCommand(teamA,"Multi reviewer requirement","","L3",assignments,List.of(owner,reviewer)),owner,false);
+        var product=projects.stages(project.projectKey(),owner).stream().filter(s->s.stageKey().equals("PRODUCT")).findFirst().orElseThrow();
+        CollabRequirementService requirementRoles=new CollabRequirementService(jdbc,authorization,new CollabFeishuOutbox(jdbc,new ObjectMapper()));
+        var roleView=requirementRoles.roles(project.projectKey(),owner);
+        var productActors=roleView.stages().stream().filter(s->s.stageKey().equals("PRODUCT")).findFirst().orElseThrow();
+        assertThat(productActors.reviewerRoleKeys()).containsExactlyInAnyOrder("IT_REVIEWER",altKey);
+        assertThat(productActors.reviewerRoleNames()).containsExactlyInAnyOrder("Reviewer", "Alternate reviewer");
+        assertThat(productActors.reviewerUserIds()).containsExactlyInAnyOrder(owner,reviewer);
+        assertThat(flow.workflow(project.projectKey(),owner).stages().stream().filter(s->s.stageKey().equals("PRODUCT")).findFirst().orElseThrow().reviewerRoleName())
+                .isEqualTo("Alternate reviewer、Reviewer");
+
+        var edited=requirementRoles.replaceActors(project.projectKey(),"PRODUCT","REVIEWER",altKey,List.of(reviewer),product.versionNo(),owner);
+        assertThat(edited.reviewerUserIds()).containsExactly(reviewer);
+        var preview=requirementRoles.syncPreview(project.projectKey(),"PRODUCT",owner);
+        var reviewerDiff=preview.duties().stream().filter(d->d.duty().equals("REVIEWER")).findFirst().orElseThrow();
+        assertThat(reviewerDiff.roleKeys()).containsExactlyInAnyOrder("IT_REVIEWER",altKey);
+        assertThat(reviewerDiff.desiredUserIds()).containsExactlyInAnyOrder(owner,reviewer);
+        var synced=requirementRoles.syncMembers(project.projectKey(),"PRODUCT",new CollabRequirementService.SyncRequest(
+                preview.expectedStageVersion(),preview.groupTemplateVersion(),"REPLACE",true),owner);
+        assertThat(synced.appliedDuties().stream().filter(d->d.duty().equals("REVIEWER")).findFirst().orElseThrow().desiredUserIds())
+                .containsExactlyInAnyOrder(owner,reviewer);
+    }
+
+    @Test void requirementAccessFollowsGroupMembershipAndCannotRemoveMemberPerRequirement() {
         var first=createProject(command(teamA,"L3",List.of(owner,reviewer)),owner,false);
         var second=createProject(command(teamA,"L3",List.of(owner)),owner,false);
         assertThat(authorization.requireMemberOrThrow(first.projectKey(),reviewer).projectId()).isNotNull();
-        assertThatThrownBy(()->authorization.requireMemberOrThrow(second.projectKey(),reviewer))
-                .isInstanceOf(BusinessException.class).hasMessageContaining("Project not found");
-        projects.removeMember(first.projectKey(),owner,reviewer);
-        assertThatThrownBy(()->authorization.requireMemberOrThrow(first.projectKey(),reviewer))
-                .isInstanceOf(BusinessException.class).hasMessageContaining("Project not found");
+        assertThat(authorization.requireMemberOrThrow(second.projectKey(),reviewer).projectId()).isNotNull();
+        assertThatThrownBy(()->authorization.requireMemberOrThrow(second.projectKey(),outsider))
+                .isInstanceOf(BusinessException.class).hasMessageContaining("Requirement not found");
+        assertThatThrownBy(()->projects.removeMember(first.projectKey(),owner,reviewer))
+                .isInstanceOf(BusinessException.class).hasMessageContaining("Manage people through the parent project group");
     }
 
     @Test void approvalLevelsSelectManualStagesAndUploadRetryIsIdempotent() {
@@ -141,7 +186,8 @@ class CollabProjectAuthorizationIT {
             boolean manual=level.equals("L1");
             assertThat(submitted.submissionStatus()).isEqualTo(manual?"PENDING_APPROVAL":"APPROVED");
             if(manual) flow.decide(project.projectKey(),submitted.submissionId(),new DecisionRequest("APPROVE","ok",0L),reviewer);
-            assertThat(flow.upload(project.projectKey(),"REQUIREMENT",upload,"upload-"+level,owner).artifactVersionId()).isEqualTo(first.artifactVersionId());
+            assertThatThrownBy(()->flow.upload(project.projectKey(),"REQUIREMENT",upload,"upload-"+level,owner))
+                    .isInstanceOf(BusinessException.class).hasMessageContaining("completed stages do not accept artifacts");
             assertThat(projects.project(project.projectKey(),owner).currentStageOrder()).isEqualTo(2);
 
             if(level.equals("L2")){
@@ -171,7 +217,7 @@ class CollabProjectAuthorizationIT {
             var stage=projects.stages(project.projectKey(),owner).get(i);
             String content="## 交付内容\n"+required.get(i);
             CollabProjectFlowController.GitEvidence git=stage.gitRequired()
-                    ?new CollabProjectFlowController.GitEvidence("https://github.com/example/repo","https://github.com/example/repo/commit/0123456789abcdef")
+                    ?new CollabProjectFlowController.GitEvidence("https://gitlab.it.taikang.com/ai_coding/it/repo","https://gitlab.it.taikang.com/ai_coding/it/repo/-/commit/0123456789abcdef")
                     :null;
             var artifact=flow.upload(project.projectKey(),stageKey,
                     new ArtifactUpload(stage.stageId(),stage.attemptNo(),stage.artifactKind(),stage.title(),sha256(content),content,git),
@@ -191,7 +237,15 @@ class CollabProjectAuthorizationIT {
     }
 
     private CollabProjectService.ProjectView createProject(CollabProjectService.CreateCommand command,Long actor,boolean admin){
-        return projects.create(command,actor,admin,new com.company.skillplatform.collabproject.application.CollabFeishuBindingService.WikiTarget("integration-test-space","integration-test-root"));
+        List<String> included=command.includedStageKeys()==null?List.of("REQUIREMENT","PRODUCT","ARCHITECTURE_DESIGN","UI_DESIGN","FRONTEND_CODING","BACKEND_CODING","TESTING","ACCEPTANCE"):command.includedStageKeys();
+        Long stageOwner=command.stageAssignments().stream().map(CollabProjectService.Assignment::ownerUserId).filter(java.util.Objects::nonNull).findFirst().orElse(owner);
+        List<Long> reviewerIds=command.stageAssignments().stream().map(CollabProjectService.Assignment::reviewerUserId).filter(java.util.Objects::nonNull).distinct().toList();
+        jdbc.update("delete from collab_group_role_member where role_id in (?,?)",ownerRoleId,reviewerRoleId);
+        jdbc.update("insert into collab_group_role_member(role_id,user_id) values(?,?)",ownerRoleId,stageOwner);
+        for(Long id:reviewerIds)jdbc.update("insert into collab_group_role_member(role_id,user_id) values(?,?)",reviewerRoleId,id);
+        groups.createRequirement(groupKey,actor,new CollabGroupService.CreateRequirement(command.name(),command.description(),command.approvalLevel(),included,1));
+        String key=jdbc.queryForObject("select project_key from collab_project where group_id=(select id from collab_group where group_key=?) and name=? order by id desc limit 1",String.class,groupKey,command.name());
+        return projects.project(key,actor);
     }
     private CollabProjectService.CreateCommand command(Long team,String level,List<Long> members){
         List<CollabProjectService.Assignment> assignments=new ArrayList<>();
@@ -205,5 +259,19 @@ class CollabProjectAuthorizationIT {
     private Long insertTeam(String key){jdbc.update("insert into org_team(time_created,time_updated,provider,external_department_id,parent_id,team_name,status,version_no) values(now(3),now(3),'FEISHU',?,null,?,'ACTIVE',0)","collab-it-"+key,key);return jdbc.queryForObject("select id from org_team where external_department_id=?",Long.class,"collab-it-"+key);}
     private void addTeamMember(Long team,Long user){jdbc.update("insert into org_team_member(time_created,time_updated,team_id,user_id,membership_type,status) values(now(3),now(3),?,?,'MEMBER','ACTIVE')",team,user);}
     private void grantProjectManager(Long team,Long user){jdbc.update("insert into iam_scoped_role_assignment(time_created,time_updated,user_id,role_key,scope_type,team_id,granted_by,version_no) values(now(3),now(3),?,'PROJECT_MANAGER','TEAM',?,?,0)",user,team,user);}
+    private void seedGroup(){
+        jdbc.update("insert into collab_group(group_key,home_team_id,name,description,owner_user_id,gitlab_root_url,gitlab_root_normalized,status,template_version,version_no,legacy_import,published_at,created_by,time_created,time_updated) values(?,?,?,'IT fixture',?,'https://gitlab.it.taikang.com/ai_coding/it','https://gitlab.it.taikang.com/ai_coding/it','PUBLISHED',1,0,false,now(3),?,now(3),now(3))",java.util.UUID.randomUUID().toString(),teamA,"Authorization IT",owner,owner);
+        groupKey=jdbc.queryForObject("select group_key from collab_group where owner_user_id=? and name='Authorization IT' order by id desc limit 1",String.class,owner);
+        Long groupId=jdbc.queryForObject("select id from collab_group where group_key=?",Long.class,groupKey);
+        jdbc.update("insert into collab_group_member(group_id,user_id,member_type,status,updated_by,time_created,time_updated) values(?,?,'OWNER','ACTIVE',?,now(3),now(3)),(?,?,'MEMBER','ACTIVE',?,now(3),now(3))",groupId,owner,owner,groupId,reviewer,owner);
+        jdbc.update("insert into collab_group_feishu_binding(group_id,wiki_space_id,wiki_root_node_token,wiki_group_node_token,status,time_created,time_updated) values(?,'it-space','it-root','it-group-root','READY',now(3),now(3))",groupId);
+        jdbc.update("insert into collab_group_role(group_id,role_key,role_name,status,version_no,time_created,time_updated) values(?,'IT_OWNER','Owner','ACTIVE',0,now(3),now(3)),(?,'IT_REVIEWER','Reviewer','ACTIVE',0,now(3),now(3))",groupId,groupId);
+        ownerRoleId=jdbc.queryForObject("select id from collab_group_role where group_id=? and role_key='IT_OWNER'",Long.class,groupId);
+        reviewerRoleId=jdbc.queryForObject("select id from collab_group_role where group_id=? and role_key='IT_REVIEWER'",Long.class,groupId);
+        for(String stage:List.of("REQUIREMENT","PRODUCT","ARCHITECTURE_DESIGN","UI_DESIGN","FRONTEND_CODING","BACKEND_CODING","TESTING","ACCEPTANCE")) {
+            jdbc.update("insert into collab_group_stage_template(group_id,stage_key,owner_role_id,reviewer_role_id,default_included,version_no) values(?,?,?,?,true,0)",groupId,stage,ownerRoleId,reviewerRoleId);
+            jdbc.update("insert into collab_group_stage_reviewer_role(group_id,stage_key,role_id) values(?,?,?)",groupId,stage,reviewerRoleId);
+        }
+    }
     private String sha256(String value){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));}catch(Exception ex){throw new IllegalStateException(ex);}}
 }

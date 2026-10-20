@@ -89,7 +89,9 @@ public class CollabStagePromptCardService {
                 default -> null;
             };
             if (prompt == null) return result(response, toast, "error", "提示词卡片已失效，请刷新项目页面");
-            String chatId = jdbc.query("select chat_id from collab_feishu_binding where project_id=?",
+            String chatId = jdbc.query("SELECT CASE WHEN p.inherited_template_version IS NOT NULL THEN gb.chat_id ELSE b.chat_id END "
+                            + "FROM collab_project p LEFT JOIN collab_group_feishu_binding gb ON gb.group_id=p.group_id "
+                            + "LEFT JOIN collab_feishu_binding b ON b.project_id=p.id WHERE p.id=?",
                     rs -> rs.next() ? rs.getString(1) : null, project.projectId());
             if (blank(chatId)) return result(response, toast, "error", "项目群暂不可用，请稍后重试");
             chats.sendText(chatId, prompt, "collab-prompt-" + UUID.randomUUID());
