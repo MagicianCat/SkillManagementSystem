@@ -76,6 +76,24 @@ public class CollabFeishuOutbox {
                 "project-completed:" + projectId, Map.of("projectId", projectId));
     }
 
+    public void enqueueAsdmPublishCandidate(Long projectId, Long candidateId, int revision) {
+        enqueue(projectId, "ASDM_PUBLISH_CANDIDATE", "CANDIDATE", candidateId,
+                "asdm:candidate:" + candidateId + ":revision:" + revision,
+                Map.of("candidateId", candidateId, "candidateRevision", revision));
+    }
+
+    public void enqueueAsdmConfirmPublish(Long projectId, Long candidateId, int revision, Long actorId) {
+        enqueue(projectId, "ASDM_CONFIRM_PUBLISH", "CANDIDATE", candidateId,
+                "asdm:confirm:" + candidateId + ":revision:" + revision,
+                Map.of("candidateId", candidateId, "candidateRevision", revision, "actorId", actorId));
+    }
+
+    public void enqueueAsdmTokenInvalid(Long projectId, Long groupId, String errorCode, int credentialVersion) {
+        enqueue(projectId, "ASDM_TOKEN_INVALID", "GROUP", groupId,
+                "asdm:credential:" + groupId + ":failure:" + credentialVersion,
+                Map.of("groupId", groupId, "errorCode", errorCode));
+    }
+
     private void enqueue(Long projectId, String type, String aggregateType, Long aggregateId,
                          String key, Map<String, ?> payload) {
         try {

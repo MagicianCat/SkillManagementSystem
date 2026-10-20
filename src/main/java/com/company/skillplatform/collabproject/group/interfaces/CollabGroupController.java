@@ -17,7 +17,7 @@ public class CollabGroupController {
     @GetMapping("/creation-options")
     public List<CollabGroupService.TeamOption> creationOptions(Authentication auth){return service.creationOptions(actor(auth));}
     @PostMapping @ResponseStatus(HttpStatus.CREATED)
-    public CollabGroupService.GroupView create(@Valid @RequestBody CreateRequest request,Authentication auth){return service.create(new CollabGroupService.CreateGroup(request.homeTeamId(),request.name(),request.description(),request.gitlabRootUrl()),actor(auth));}
+    public CollabGroupService.GroupView create(@Valid @RequestBody CreateRequest request,Authentication auth){return service.create(new CollabGroupService.CreateGroup(request.homeTeamId(),request.name(),request.description(),request.gitlabRootUrl(),request.asdmRepositoryUrl()),actor(auth));}
     @GetMapping public List<CollabGroupService.GroupView> list(Authentication auth){return service.list(actor(auth));}
     @GetMapping("/{groupKey}") public CollabGroupService.GroupView get(@PathVariable String groupKey,Authentication auth){return service.get(groupKey,actor(auth));}
     @PatchMapping("/{groupKey}") public CollabGroupService.GroupView update(@PathVariable String groupKey,@Valid @RequestBody UpdateRequest request,Authentication auth){return service.update(groupKey,actor(auth),new CollabGroupService.UpdateGroup(request.name(),request.description(),request.gitlabRootUrl(),request.expectedVersion()));}
@@ -48,10 +48,10 @@ public class CollabGroupController {
 
     @GetMapping("/{groupKey}/requirements") public List<CollabGroupService.RequirementView> requirements(@PathVariable String groupKey,Authentication auth){return service.requirements(groupKey,actor(auth));}
     @PostMapping("/{groupKey}/requirements") @ResponseStatus(HttpStatus.CREATED)
-    public CollabGroupService.RequirementView createRequirement(@PathVariable String groupKey,@Valid @RequestBody RequirementRequest request,Authentication auth){return service.createRequirement(groupKey,actor(auth),new CollabGroupService.CreateRequirement(request.name(),request.description(),request.approvalLevel(),request.includedStageKeys(),request.stagesWithoutApproval(),request.expectedTemplateVersion()));}
+    public CollabGroupService.RequirementView createRequirement(@PathVariable String groupKey,@Valid @RequestBody RequirementRequest request,Authentication auth){return service.createRequirement(groupKey,actor(auth),new CollabGroupService.CreateRequirement(request.name(),request.description(),request.approvalLevel(),request.includedStageKeys(),request.stagesWithoutApproval(),request.expectedTemplateVersion(),request.asdmBranch()));}
 
     private long actor(Authentication auth){return ((Number)auth.getPrincipal()).longValue();}
-    public record CreateRequest(@NotNull Long homeTeamId,@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@NotBlank @Size(max=2048) String gitlabRootUrl){}
+    public record CreateRequest(@NotNull Long homeTeamId,@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@Size(max=2048) String gitlabRootUrl,@Size(max=2048) String asdmRepositoryUrl){}
     public record UpdateRequest(@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@Size(max=2048) String gitlabRootUrl,@Min(0) int expectedVersion){}
     public record MemberRequest(@NotNull Long userId){}
     public record RoleRequest(@NotBlank @Size(max=100) String roleName){}
@@ -59,5 +59,5 @@ public class CollabGroupController {
     public record StageTemplateRequest(String ownerRoleKey,String reviewerRoleKey,List<String> reviewerRoleKeys,boolean included,@Min(0) int expectedVersion){}
     public record PublishRequest(@Min(0) int expectedVersion){}
     public record WikiRootRequest(@NotBlank @Size(max=2048) String url){}
-    public record RequirementRequest(@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@NotBlank String approvalLevel,@NotEmpty List<String> includedStageKeys,List<String> stagesWithoutApproval,@Min(1) int expectedTemplateVersion){}
+    public record RequirementRequest(@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@NotBlank String approvalLevel,@NotEmpty List<String> includedStageKeys,List<String> stagesWithoutApproval,@Min(1) int expectedTemplateVersion,String asdmBranch){}
 }

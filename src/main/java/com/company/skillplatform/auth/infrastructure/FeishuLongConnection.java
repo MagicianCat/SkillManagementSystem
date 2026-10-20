@@ -35,15 +35,17 @@ public class FeishuLongConnection implements SmartLifecycle {
     private final com.company.skillplatform.agent.application.FeishuBotMessageService botMessages;
     private final CollabApprovalCardService collabApprovalCards;
     private final com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards;
+    private final com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards;
     private volatile Client client;
     private volatile boolean running;
 
     public FeishuLongConnection(FeishuProperties properties,
             com.company.skillplatform.agent.application.FeishuBotMessageService botMessages,
             CollabApprovalCardService collabApprovalCards,
-            com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards) {
+            com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards,
+            com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards) {
         this.properties = properties; this.botMessages = botMessages; this.collabApprovalCards = collabApprovalCards;
-        this.collabStagePromptCards = collabStagePromptCards;
+        this.collabStagePromptCards = collabStagePromptCards; this.collabAsdmPublishCards = collabAsdmPublishCards;
     }
 
     @Override
@@ -66,6 +68,7 @@ public class FeishuLongConnection implements SmartLifecycle {
                                         && event.getEvent().getContext().getOpenMessageId() != null);
                         if (collabApprovalCards.handles(event)) return collabApprovalCards.handle(event);
                         if (collabStagePromptCards.handles(event)) return collabStagePromptCards.handle(event);
+                        if (collabAsdmPublishCards.handles(event)) return collabAsdmPublishCards.handle(event);
                         log.info("event=feishu.card_action.unmatched route=agent_fallback");
                         return botMessages.handleCardAction(event);
                     }

@@ -1,6 +1,9 @@
 package com.company.skillplatform.collabproject.application;
 
 import com.company.skillplatform.agent.infrastructure.FeishuDocumentMcpProxy;
+import com.company.skillplatform.collabproject.asdm.application.CollabAsdmDetectionService;
+import com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService;
+import com.company.skillplatform.collabproject.flow.application.CollabProjectFlowService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
@@ -24,16 +27,24 @@ public class CollabFeishuWorker {
     private final String webBaseUrl;
     private final boolean callbacksEnabled;
     private final ObjectMapper mapper;
+    private final CollabAsdmPublishCardService asdmCards;
+    private final CollabAsdmDetectionService asdmDetection;
+    private final CollabProjectFlowService flow;
 
     public CollabFeishuWorker(JdbcTemplate jdbc, CollabFeishuChatGateway chats, FeishuDocumentMcpProxy documents,
             FeishuProperties feishuProperties, ObjectMapper mapper,
-            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl) {
+            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
+            CollabAsdmPublishCardService asdmCards, CollabAsdmDetectionService asdmDetection,
+            CollabProjectFlowService flow) {
         this.jdbc = jdbc;
         this.chats = chats;
         this.documents = documents;
         this.webBaseUrl = webBaseUrl.replaceAll("/$", "");
         this.callbacksEnabled = feishuProperties.eventEnabled();
         this.mapper = mapper;
+        this.asdmCards = asdmCards;
+        this.asdmDetection = asdmDetection;
+        this.flow = flow;
     }
 
     @Scheduled(fixedDelayString = "${collab.feishu.worker-delay-ms:10000}")
@@ -66,7 +77,7 @@ public class CollabFeishuWorker {
     /** Backfills submissions created before publication was enqueued on submit. */
     private void reconcileMissingPublications() {
         List<Map<String, Object>> missing = jdbc.queryForList("SELECT s.project_id,sub.artifact_version_id FROM collab_submission sub "
-                + "JOIN collab_stage s ON s.id=sub.stage_id WHERE sub.status IN ('PENDING_APPROVAL','APPROVED') "
+                + "JOIN collab_stage s ON s.id=sub.stage_id WHERE sub.status IN ('PENDING_APPROVAL','APPROVED','PUBLISHING') "
                 + "AND sub.id=(SELECT MAX(latest.id) FROM collab_submission latest WHERE latest.stage_id=sub.stage_id) "
                 + "AND NOT EXISTS(SELECT 1 FROM collab_feishu_publication pub WHERE pub.artifact_version_id=sub.artifact_version_id) "
                 + "ORDER BY sub.id LIMIT 50");
@@ -78,6 +89,11 @@ public class CollabFeishuWorker {
             jdbc.update("INSERT IGNORE INTO collab_outbox(project_id,event_type,aggregate_type,aggregate_id,unique_dedupe_key,payload_json,status,attempts,next_attempt_at,time_created,time_updated) "
                     + "VALUES(?,'PUBLISH_ARTIFACT','ARTIFACT_VERSION',?,?,JSON_OBJECT('artifactVersionId',?),'PENDING',0,NOW(3),NOW(3),NOW(3))",
                     projectId, artifactVersionId, "publish:" + artifactVersionId, artifactVersionId);
+        }
+        List<Long> awaitingFinalize=jdbc.query("SELECT DISTINCT sub.artifact_version_id FROM collab_submission sub JOIN collab_feishu_publication pub ON pub.artifact_version_id=sub.artifact_version_id WHERE sub.publication_gate_state='WAITING_FEISHU' AND pub.publish_status='PUBLISHED' ORDER BY sub.artifact_version_id LIMIT 50",(rs,n)->rs.getLong(1));
+        for(Long artifactVersionId:awaitingFinalize){
+            try{flow.onFeishuPublicationSucceeded(artifactVersionId);}
+            catch(Exception error){log.warn("event=collab.publication.finalize.reconcile.failed artifactVersionId={} error={}",artifactVersionId,error.getClass().getSimpleName());}
         }
     }
 
@@ -118,7 +134,7 @@ public class CollabFeishuWorker {
         int claimed = jdbc.update("UPDATE collab_outbox SET status='PROCESSING',claimed_at=NOW(3),attempts=attempts+1,time_updated=NOW(3) "
                 + "WHERE id=? AND status='PENDING' AND next_attempt_at<=NOW(3)", id);
         if (claimed == 0) return;
-        Map<String, Object> row = jdbc.queryForMap("SELECT project_id,event_type,aggregate_type,aggregate_id,attempts,id FROM collab_outbox WHERE id=?", id);
+        Map<String, Object> row = jdbc.queryForMap("SELECT project_id,event_type,aggregate_type,aggregate_id,attempts,id,payload_json FROM collab_outbox WHERE id=?", id);
         long projectId = ((Number) row.get("project_id")).longValue();
         String type = String.valueOf(row.get("event_type"));
         long aggregateId = ((Number) row.get("aggregate_id")).longValue();
@@ -132,7 +148,10 @@ public class CollabFeishuWorker {
                 case "STAGE_ASSIGNMENT" -> { /* Drain legacy assignment events without sending stale cards. */ }
                 case "STAGE_REWORK" -> stageRework(projectId, aggregateId, id);
                 case "CREATE_WIKI_FOLDER" -> createWikiFolder(projectId);
-                case "PUBLISH_ARTIFACT" -> publish(projectId, aggregateId);
+                case "PUBLISH_ARTIFACT" -> { publish(projectId, aggregateId); flow.onFeishuPublicationSucceeded(aggregateId); }
+                case "ASDM_PUBLISH_CANDIDATE" -> asdmCards.sendCandidate(aggregateId, payloadLong(row,"candidateRevision").intValue());
+                case "ASDM_CONFIRM_PUBLISH" -> confirmAsdmPublish(aggregateId,payloadLong(row,"candidateRevision").intValue());
+                case "ASDM_TOKEN_INVALID" -> notifyAsdmTokenInvalid(aggregateId,id);
                 case "PROJECT_COMPLETED" -> projectCompleted(projectId, id);
                 default -> throw new IllegalArgumentException("Unknown collaboration event");
             }
@@ -145,12 +164,13 @@ public class CollabFeishuWorker {
                 if ("CREATE_CHAT".equals(type) || "CREATE_WIKI_FOLDER".equals(type))
                     jdbc.update("UPDATE collab_feishu_binding SET status='RECONCILE_REQUIRED',last_error=?,time_updated=NOW(3) WHERE project_id=?", message, projectId);
                 if ("PUBLISH_ARTIFACT".equals(type))
-                    jdbc.update("UPDATE collab_feishu_publication SET publish_status='RECONCILE_REQUIRED',last_error=?,time_updated=NOW(3) WHERE artifact_version_id=?", message, aggregateId);
+                    jdbc.update("UPDATE collab_feishu_publication SET publish_status='RECONCILE_REQUIRED',last_error=?,time_updated=NOW(3) WHERE artifact_version_id=? AND publish_status<>'PUBLISHED'", message, aggregateId);
                 jdbc.update("UPDATE collab_outbox SET status='RECONCILE_REQUIRED',last_error=?,time_updated=NOW(3) WHERE id=?", message, id);
             } else {
                 int attempts = ((Number) row.get("attempts")).intValue();
                 boolean waitingForGroup = error instanceof FeishuDependencyNotReadyException;
-                String status = !waitingForGroup && attempts >= 8 ? "FAILED" : "PENDING";
+                boolean asdmEvent=type.startsWith("ASDM_");
+                String status = !asdmEvent && !waitingForGroup && attempts >= 8 ? "FAILED" : "PENDING";
                 long backoff = waitingForGroup ? 15L : Math.min(3600, 15L << Math.min(7, attempts));
                 jdbc.update("UPDATE collab_outbox SET status=?,last_error=?,next_attempt_at=DATE_ADD(NOW(3),INTERVAL ? SECOND),time_updated=NOW(3) WHERE id=?",
                         status, message, backoff, id);
@@ -159,6 +179,34 @@ public class CollabFeishuWorker {
                             status.equals("FAILED") ? "PUBLISH_FAILED" : "PENDING", message, aggregateId);
             }
         }
+    }
+
+    private void confirmAsdmPublish(long candidateId,int revision) {
+        CollabAsdmDetectionService.ConfirmWorkerResult result=asdmDetection.revalidateForPublish(candidateId,revision);
+        if(result.stale()||result.changed())return;
+        try { flow.publishAsdmCandidate(result.projectKey(),candidateId,revision,result.actorId()); }
+        catch(com.company.skillplatform.common.application.BusinessException denied) {
+            if("STAGE_ATTEMPT_ALREADY_CLAIMED".equals(denied.getCode())) {
+                jdbc.update("update collab_asdm_candidate set status='CLOSED_BY_SKILL',last_error_code='SUBMISSION_ALREADY_CLAIMED',version_no=version_no+1,time_updated=now(3) where id=? and status='CONFIRM_REQUESTED'",candidateId);
+                return;
+            }
+            throw denied;
+        }
+    }
+
+    private Long payloadLong(Map<String,Object> row,String key) {
+        try { return mapper.readTree(String.valueOf(row.get("payload_json"))).path(key).asLong(); }
+        catch(Exception ex) { throw new IllegalArgumentException("Invalid ASDM outbox payload",ex); }
+    }
+
+    private void notifyAsdmTokenInvalid(long groupId,long outboxId) {
+        Map<String,Object> group=jdbc.queryForMap("select g.name,b.chat_id,u.feishu_open_id,u.display_name from collab_group g join collab_group_feishu_binding b on b.group_id=g.id join iam_user u on u.id=g.owner_user_id where g.id=?",groupId);
+        String chatId=(String)group.get("chat_id");
+        if(chatId==null||chatId.isBlank())throw new IllegalStateException("Project group Feishu chat is not ready");
+        String openId=(String)group.get("feishu_open_id");
+        String owner=openId==null||openId.isBlank()?String.valueOf(group.get("display_name")):"<at id="+openId+"></at>";
+        String body="ASDM GitLab 凭证失效或权限不足。请项目组 Owner "+owner+" 在研枢项目组配置页更新 Project Access Token；期间仍可使用 Skill 提交产物。";
+        chats.sendInteractive(chatId,Map.of("schema","2.0","body",Map.of("elements",List.of(Map.of("tag","markdown","content",body)))),"asdm:credential:invalid:"+outboxId);
     }
 
     private void createChat(long projectId) {

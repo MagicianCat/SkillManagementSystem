@@ -179,6 +179,17 @@ skill-platform:
     bot-task-interval-ms: ${FEISHU_BOT_TASK_INTERVAL_MS:2000}
     bot-max-retries: ${FEISHU_BOT_MAX_RETRIES:3}
     oauth-state-ttl: ${FEISHU_OAUTH_STATE_TTL:5m}
+  asdm-gitlab:
+    enabled: ${ASDM_GITLAB_ENABLED:false}
+    allowed-hosts: ${ASDM_GITLAB_ALLOWED_HOSTS:}
+    token-encryption-key: ${ASDM_GITLAB_TOKEN_ENCRYPTION_KEY:}
+    poll-interval: ${ASDM_GITLAB_POLL_INTERVAL:60s}
+    debounce: ${ASDM_GITLAB_DEBOUNCE:300s}
+    connect-timeout: ${ASDM_GITLAB_HTTP_CONNECT_TIMEOUT:5s}
+    read-timeout: ${ASDM_GITLAB_HTTP_READ_TIMEOUT:20s}
+    max-markdown-bytes: ${ASDM_GITLAB_MAX_MARKDOWN_BYTES:1048576}
+    max-tree-entries: ${ASDM_GITLAB_MAX_TREE_ENTRIES:5000}
+    poll-batch-size: ${ASDM_GITLAB_POLL_BATCH_SIZE:20}
   auth:
     jwt:
       issuer: ${JWT_ISSUER:skill-management-system}
