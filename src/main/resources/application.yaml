@@ -190,6 +190,16 @@ skill-platform:
     max-markdown-bytes: ${ASDM_GITLAB_MAX_MARKDOWN_BYTES:1048576}
     max-tree-entries: ${ASDM_GITLAB_MAX_TREE_ENTRIES:5000}
     poll-batch-size: ${ASDM_GITLAB_POLL_BATCH_SIZE:20}
+    multi-stage-enabled: ${ASDM_MULTI_STAGE_ENABLED:false}
+    multi-file-publish-enabled: ${ASDM_MULTI_FILE_PUBLISH_ENABLED:false}
+    max-discovery-entries: ${ASDM_MAX_DISCOVERY_ENTRIES:20000}
+    max-candidate-files: ${ASDM_MAX_CANDIDATE_FILES:300}
+    max-file-bytes: ${ASDM_MAX_FILE_BYTES:20971520}
+    max-package-bytes: ${ASDM_MAX_PACKAGE_BYTES:209715200}
+    match-likely-autoinclude: ${ASDM_MATCH_LIKELY_AUTOINCLUDE:false}
+    file-publish-workers: ${ASDM_FILE_PUBLISH_WORKERS:4}
+    file-publish-retry-limit: ${ASDM_FILE_PUBLISH_RETRY_LIMIT:8}
+    blob-cache-ttl: ${ASDM_BLOB_CACHE_TTL:24h}
   auth:
     jwt:
       issuer: ${JWT_ISSUER:skill-management-system}

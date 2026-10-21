@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.List;
 import org.springframework.stereotype.Component;
 
@@ -90,7 +91,42 @@ public class CollabAsdmGitlabClient {
         return List.copyOf(entries);
     }
 
+    /** Enumerates a bounded workspace tree at one immutable commit. A truncated tree is never returned. */
+    public List<TreeEntry> listTreeRecursive(long projectId, String ref, String root, String token,
+            int maxEntries, URI repositoryBase) {
+        if (root == null || !root.matches("workspace(?:/[A-Za-z0-9._/-]+)?") || root.contains(".."))
+            throw new IllegalArgumentException("Invalid ASDM workspace root");
+        ArrayDeque<String> pending = new ArrayDeque<>();
+        pending.add(root);
+        List<TreeEntry> all = new ArrayList<>();
+        while (!pending.isEmpty()) {
+            String directory = pending.removeFirst();
+            List<TreeEntry> page = listTree(projectId, ref, directory, token,
+                    maxEntries - all.size(), repositoryBase);
+            for (TreeEntry entry : page) {
+                if (!entry.path().startsWith(root + "/") || entry.path().contains("..") || entry.path().contains("\\"))
+                    throw new CollabAsdmGitlabException("GITLAB_TREE_INVALID_RESPONSE", 502);
+                all.add(entry);
+                if (all.size() > maxEntries) throw new CollabAsdmGitlabException("ASDM_TREE_TRUNCATED", 413);
+                if ("tree".equals(entry.type())) pending.add(entry.path());
+            }
+        }
+        return List.copyOf(all);
+    }
+
+    public FileContent getFileBytes(long projectId, String filePath, String ref, String token,
+            URI repositoryBase, long maxBytes) {
+        return readFile(projectId, filePath, ref, token, repositoryBase, maxBytes);
+    }
+
     public FileContent getFile(long projectId, String filePath, String ref, String token, URI repositoryBase) {
+        return readFile(projectId, filePath, ref, token, repositoryBase, properties.maxMarkdownBytes());
+    }
+
+    private FileContent readFile(long projectId, String filePath, String ref, String token, URI repositoryBase, long maxBytes) {
+        if (filePath == null || !filePath.startsWith("workspace/") || filePath.contains("..") || filePath.contains("\\")
+                || maxBytes < 1 || maxBytes > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("Invalid ASDM file request");
         String path = "/api/v4/projects/" + projectId + "/repository/files/" + encodePath(filePath);
         HttpRequest head = HttpRequest.newBuilder(repositoryBase.resolve(path + "?ref=" + encodeQuery(ref))).timeout(properties.readTimeout())
                 .header("PRIVATE-TOKEN", token).method("HEAD", HttpRequest.BodyPublishers.noBody()).build();
@@ -106,7 +142,7 @@ public class CollabAsdmGitlabClient {
             String commitSha = metadata.headers().firstValue("X-Gitlab-Commit-Id").orElse(ref);
             String canonicalPath = metadata.headers().firstValue("X-Gitlab-File-Path").orElse(filePath);
             try (InputStream ignored = metadata.body()) { }
-            if (declaredSize > properties.maxMarkdownBytes()) throw new CollabAsdmGitlabException("GITLAB_FILE_TOO_LARGE", 413);
+            if (declaredSize > maxBytes) throw new CollabAsdmGitlabException("GITLAB_FILE_TOO_LARGE", 413);
 
             URI rawUri = repositoryBase.resolve(path + "/raw?ref=" + encodeQuery(ref));
             HttpRequest raw = HttpRequest.newBuilder(rawUri).timeout(properties.readTimeout()).header("PRIVATE-TOKEN", token)
@@ -117,7 +153,7 @@ public class CollabAsdmGitlabClient {
                 throw statusError(response.statusCode());
             }
             try (InputStream body = response.body()) {
-                byte[] content = readLimited(body, properties.maxMarkdownBytes());
+                byte[] content = readLimited(body, (int) maxBytes);
                 if (declaredSize >= 0 && content.length != declaredSize) throw new CollabAsdmGitlabException("GITLAB_FILE_SIZE_MISMATCH", 502);
                 return new FileContent(canonicalPath, commitSha, blobSha, content, declaredSize < 0 ? content.length : declaredSize);
             }

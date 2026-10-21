@@ -51,10 +51,12 @@ public class CollabAsdmDetectionService {
     private final CollabProjectAuthorizationService authorization;
     private final CollabFeishuOutbox outbox;
     private final ObjectMapper mapper;
+    private final CollabAsdmMultiStageDetectionService multiStageDetection;
 
     public CollabAsdmDetectionService(JdbcTemplate jdbc, CollabAsdmProperties properties,
             CollabAsdmConfigurationService configuration, CollabAsdmGitlabClient gitlab,
-            CollabProjectAuthorizationService authorization, CollabFeishuOutbox outbox, ObjectMapper mapper) {
+            CollabProjectAuthorizationService authorization, CollabFeishuOutbox outbox, ObjectMapper mapper,
+            CollabAsdmMultiStageDetectionService multiStageDetection) {
         this.jdbc = jdbc;
         this.properties = properties;
         this.configuration = configuration;
@@ -62,6 +64,7 @@ public class CollabAsdmDetectionService {
         this.authorization = authorization;
         this.outbox = outbox;
         this.mapper = mapper;
+        this.multiStageDetection = multiStageDetection;
     }
 
     @Scheduled(fixedDelayString = "#{T(org.springframework.boot.convert.DurationStyle).detectAndParse('${ASDM_GITLAB_POLL_INTERVAL:60s}').toMillis()}")
@@ -80,6 +83,7 @@ public class CollabAsdmDetectionService {
             if (claimed == 1) scanRequirement(requirementId);
         }
         releaseDueCandidates();
+        multiStageDetection.releaseDueCandidates();
     }
 
     private void drainRescans() {
@@ -116,7 +120,8 @@ public class CollabAsdmDetectionService {
                     return;
                 }
             }
-            detectFileCandidate(requirement, access, branch.headSha());
+            if(!properties.multiStageEnabled()) detectFileCandidate(requirement, access, branch.headSha());
+            multiStageDetection.scanRequirement(requirementId);
             successfulScan(requirementId, branch.headSha());
         } catch (CollabAsdmGitlabException ex) {
             if (ex.httpStatus()==401||ex.httpStatus()==403) pauseCredential(requirement.groupId(),ex.errorCode());
@@ -195,7 +200,7 @@ public class CollabAsdmDetectionService {
 
     @Transactional
     public void releaseDueCandidates() {
-        List<Map<String,Object>> due=jdbc.queryForList("select c.id,c.requirement_id,c.detected_revision,p.status project_status,s.status stage_status,s.attempt_no from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id join collab_stage s on s.id=c.stage_id where c.status='DEBOUNCING' and c.notify_after<=now(3) and c.markdown_snapshot is not null and p.status='ACTIVE' and s.stage_key='REQUIREMENT' and s.status in ('IN_PROGRESS','REWORK') and s.attempt_no=c.attempt_no and s.actors_frozen_at is not null and not exists(select 1 from collab_submission sub where sub.stage_id=s.id and sub.attempt_no=s.attempt_no) order by c.notify_after limit ?",properties.pollBatchSize());
+        List<Map<String,Object>> due=jdbc.queryForList("select c.id,c.requirement_id,c.detected_revision,p.status project_status,s.status stage_status,s.attempt_no from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id join collab_stage s on s.id=c.stage_id where c.stage_key is null and c.status='DEBOUNCING' and c.notify_after<=now(3) and c.markdown_snapshot is not null and p.status='ACTIVE' and s.stage_key='REQUIREMENT' and s.status in ('IN_PROGRESS','REWORK') and s.attempt_no=c.attempt_no and s.actors_frozen_at is not null and not exists(select 1 from collab_submission sub where sub.stage_id=s.id and sub.attempt_no=s.attempt_no) order by c.notify_after limit ?",properties.pollBatchSize());
         for(Map<String,Object> candidate:due){
             long id=((Number)candidate.get("id")).longValue(); long requirementId=((Number)candidate.get("requirement_id")).longValue(); int revision=((Number)candidate.get("detected_revision")).intValue();
             int changed=jdbc.update("update collab_asdm_candidate c set status='NOTIFIED',notified_revision=c.detected_revision,notified_at=now(3),version_no=version_no+1,time_updated=now(3) "
@@ -274,13 +279,14 @@ public class CollabAsdmDetectionService {
 
     /** Worker-only GitLab revalidation followed by the shared transactional flow claim. */
     public ConfirmWorkerResult revalidateForPublish(long candidateId,int revision){
-        Map<String,Object> row=jdbc.query("select c.id,c.requirement_id,c.stage_id,c.attempt_no,c.detected_revision,c.status,c.source_path,c.source_commit_sha,c.source_blob_sha,c.content_sha256,c.markdown_snapshot,c.confirmed_by,p.project_key,p.group_id,p.asdm_branch,s.status stage_status,s.actors_frozen_at from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id join collab_stage s on s.id=c.stage_id where c.id=?",rs->rs.next()?row(rs):null,candidateId);
+        Map<String,Object> row=jdbc.query("select c.id,c.requirement_id,c.stage_id,c.attempt_no,c.detected_revision,c.status,c.stage_key,c.source_path,c.source_commit_sha,c.source_blob_sha,c.content_sha256,c.markdown_snapshot,c.confirmed_by,p.project_key,p.group_id,p.asdm_branch,s.status stage_status,s.actors_frozen_at from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id join collab_stage s on s.id=c.stage_id where c.id=?",rs->rs.next()?row(rs):null,candidateId);
         if(row==null)return ConfirmWorkerResult.staleResult();
         if(!"CONFIRM_REQUESTED".equals(row.get("status"))||((Number)row.get("detected_revision")).intValue()!=revision)return ConfirmWorkerResult.staleResult();
         long requirementId=((Number)row.get("requirement_id")).longValue();long groupId=((Number)row.get("group_id")).longValue();
         try{
             CollabAsdmConfigurationService.RepositoryAccess access=configuration.requireAccess(groupId);
             String branch=String.valueOf(row.get("asdm_branch"));
+            if (row.get("stage_key") != null) return revalidateMultiStage(candidateId,revision,row,access,branch,requirementId);
             FileContent pinnedFile;
             try {
                 pinnedFile=gitlab.getFile(access.projectId(),String.valueOf(row.get("source_path")),String.valueOf(row.get("source_commit_sha")),access.token(),access.repositoryBase());
@@ -315,6 +321,35 @@ public class CollabAsdmDetectionService {
             if(ex.httpStatus()==401||ex.httpStatus()==403)pauseCredential(groupId,ex.errorCode());
             throw gitlabError(ex);
         }
+    }
+
+    private ConfirmWorkerResult revalidateMultiStage(long candidateId,int revision,Map<String,Object> row,
+            CollabAsdmConfigurationService.RepositoryAccess access,String branch,long requirementId) {
+        List<com.company.skillplatform.collabproject.asdm.publication.CollabAsdmCandidateFileRepository.CandidateFile> files =
+                multiStageDetection.candidateFiles(candidateId,revision);
+        List<com.company.skillplatform.collabproject.asdm.publication.CollabAsdmCandidateFileRepository.CandidateFile> selected =
+                files.stream().filter(com.company.skillplatform.collabproject.asdm.publication.CollabAsdmCandidateFileRepository.CandidateFile::selected).toList();
+        if(selected.isEmpty())return ConfirmWorkerResult.staleResult();
+        String commit=String.valueOf(row.get("source_commit_sha"));
+        String head=gitlab.getBranch(access.projectId(),branch,access.token(),access.repositoryBase()).headSha();
+        for(var file:selected){
+            FileContent pinned=gitlab.getFileBytes(access.projectId(),file.sourcePath(),commit,access.token(),access.repositoryBase(),properties.maxFileBytes());
+            if(!Objects.equals(pinned.blobSha(),file.sourceBlobSha())||pinned.size()!=file.sizeBytes()){
+                jdbc.update("update collab_asdm_candidate set status='ERROR',last_error_code='ASDM_PINNED_SNAPSHOT_MISMATCH',version_no=version_no+1,time_updated=now(3) where id=? and status='CONFIRM_REQUESTED'",candidateId);
+                return ConfirmWorkerResult.changedResult();
+            }
+            FileContent current=gitlab.getFileBytes(access.projectId(),file.sourcePath(),head,access.token(),access.repositoryBase(),properties.maxFileBytes());
+            if(!Objects.equals(current.blobSha(),file.sourceBlobSha())){
+                multiStageDetection.scanRequirement(requirementId);
+                return ConfirmWorkerResult.changedResult();
+            }
+        }
+        Map<String,Object> state=jdbc.query("select c.status,c.detected_revision,s.attempt_no,s.status stage_status,s.actors_frozen_at from collab_asdm_candidate c join collab_stage s on s.id=c.stage_id where c.id=?",rs->rs.next()?row(rs):null,candidateId);
+        if(state==null||!"CONFIRM_REQUESTED".equals(state.get("status"))||((Number)state.get("detected_revision")).intValue()!=revision
+                ||((Number)state.get("attempt_no")).intValue()!=((Number)row.get("attempt_no")).intValue()
+                ||!Set.of("IN_PROGRESS","REWORK").contains(String.valueOf(state.get("stage_status")))||state.get("actors_frozen_at")==null)
+            return ConfirmWorkerResult.staleResult();
+        return ConfirmWorkerResult.current((String)row.get("project_key"),candidateId,revision,((Number)row.get("confirmed_by")).longValue());
     }
 
     private void successfulScan(long requirementId,String head){jdbc.update("update collab_project set asdm_last_scanned_head_sha=?,asdm_last_scan_at=now(3),asdm_binding_status=case when asdm_binding_status='AUTH_PAUSED' and asdm_requirement_path is null then 'WAITING_DIRECTORY' when asdm_binding_status='AUTH_PAUSED' then 'BOUND' else asdm_binding_status end,time_updated=now(3) where id=?",head,requirementId);}

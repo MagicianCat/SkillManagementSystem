@@ -63,4 +63,28 @@ public class CollabAsdmTokenCipher {
             finally { Arrays.fill(plain, (byte) 0); Arrays.fill(packed, (byte) 0); }
         } catch (Exception ex) { throw new IllegalStateException("Unable to decrypt ASDM credential", ex); }
     }
+
+    /** Encrypts short lived ASDM file snapshots with the same separately managed AES key. */
+    public byte[] encryptBytes(byte[] input) {
+        if (key == null) throw new IllegalStateException("ASDM GitLab token encryption is not configured");
+        try {
+            byte[] iv = new byte[12]; random.nextBytes(iv);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, iv));
+            byte[] encrypted = cipher.doFinal(input);
+            return ByteBuffer.allocate(1 + iv.length + encrypted.length).put((byte) 1).put(iv).put(encrypted).array();
+        } catch (Exception ex) { throw new IllegalStateException("Unable to encrypt ASDM snapshot", ex); }
+    }
+
+    public byte[] decryptBytes(byte[] packed) {
+        if (key == null) throw new IllegalStateException("ASDM GitLab token encryption is not configured");
+        if (packed == null || packed.length < 29 || packed[0] != 1) throw new IllegalArgumentException("Invalid ASDM snapshot ciphertext");
+        try {
+            byte[] iv = Arrays.copyOfRange(packed, 1, 13);
+            byte[] encrypted = Arrays.copyOfRange(packed, 13, packed.length);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+            return cipher.doFinal(encrypted);
+        } catch (Exception ex) { throw new IllegalStateException("Unable to decrypt ASDM snapshot", ex); }
+    }
 }

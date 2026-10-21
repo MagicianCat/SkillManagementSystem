@@ -4,6 +4,10 @@ import com.company.skillplatform.collabproject.application.CollabProjectAuthoriz
 import com.company.skillplatform.collabproject.application.CollabFeishuOutbox;
 import com.company.skillplatform.collabproject.application.CollabStagePromptFactory;
 import com.company.skillplatform.collabproject.application.CollabGitlabRootValidator;
+import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmPackagePreparationService.PreparedPackage;
+import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmPackageRepository;
+import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmPackageRepository.FileRecord;
+import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmPackageRepository.Manifest;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.ArtifactUpload;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.DecisionRequest;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.SubmissionRequest;
@@ -37,6 +41,7 @@ public class CollabProjectFlowService {
     private final CollabProjectAuthorizationService authorization;
     private final CollabFeishuOutbox feishuOutbox;
     private final CollabGitlabRootValidator gitlabRootValidator;
+    private final CollabAsdmPackageRepository asdmPackages;
 
     public CollabProjectFlowService(JdbcTemplate jdbc, ObjectMapper mapper,
             CollabProjectAuthorizationService authorization, CollabFeishuOutbox feishuOutbox,
@@ -46,6 +51,7 @@ public class CollabProjectFlowService {
         this.authorization = authorization;
         this.feishuOutbox = feishuOutbox;
         this.gitlabRootValidator = gitlabRootValidator;
+        this.asdmPackages = new CollabAsdmPackageRepository(jdbc);
     }
 
     @Transactional(readOnly = true)
@@ -147,7 +153,7 @@ public class CollabProjectFlowService {
         jdbc.update("insert into collab_submission(time_created,time_updated,stage_id,attempt_no,artifact_version_id,submitted_by,policy_snapshot,status,idempotency_key,request_fingerprint,submitted_at,decided_at,publication_gate_state) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",now,now,stage.id(),stage.attemptNo(),artifactVersionId,actorId,json(policy),"PUBLISHING",idempotencyKey,fingerprint,now,null,"WAITING_FEISHU");
         Long submissionId=jdbc.queryForObject("select id from collab_submission where stage_id=? and idempotency_key=?",Long.class,stage.id(),idempotencyKey);
         feishuOutbox.enqueuePublish(project.projectId(),artifactVersionId);
-        if("REQUIREMENT".equals(stage.stageKey())&&!idempotencyKey.startsWith("asdm:"))
+        if(!idempotencyKey.startsWith("asdm:"))
             jdbc.update("update collab_asdm_candidate set status='CLOSED_BY_SKILL',time_updated=? where stage_id=? and attempt_no=? and status in ('DEBOUNCING','NOTIFIED','CONFIRM_REQUESTED')",now,stage.id(),stage.attemptNo());
         addEvent(project.projectId(),stage,"SUBMITTED",actorId,stage.status(),"PUBLISHING",submissionId,Map.of("artifactVersionId",artifactVersionId,"approvalMode",manual?"MANUAL":"AUTOMATIC","source",idempotencyKey.startsWith("asdm:")?"ASDM_GITLAB":"SKILL"));
         return submissionId;
@@ -208,9 +214,101 @@ public class CollabProjectFlowService {
         return submission(requirementKey,submissionId,actorId);
     }
 
+    /** Claims a prepared multi-file candidate with the same stage/attempt uniqueness as Skill submissions. */
+    @Transactional
+    public SubmissionView publishAsdmPackage(PreparedPackage prepared) {
+        var project=authorization.requireMemberOrThrow(prepared.requirementKey(),prepared.confirmedBy());
+        authorization.requireWritable(project);
+        if(project.groupId()==null || project.projectId()!=prepared.requirementId())
+            throw error("ASDM_CANDIDATE_STALE","Candidate does not belong to this requirement",HttpStatus.CONFLICT);
+        lockProjectFlow(project.projectId());
+        requireWikiRootConfigured(project.projectId());
+        StageRow stage=lockedStage(project.projectId(),prepared.stageKey());
+        requireStageOwner(project,stage,prepared.confirmedBy());
+        requireCurrentStage(project.currentStageOrder(),stage);
+        if(stage.id()!=prepared.stageId() || stage.attemptNo()!=prepared.attemptNo()
+                || !Set.of("IN_PROGRESS","REWORK").contains(stage.status()))
+            throw error("ASDM_CANDIDATE_STALE","Stage attempt changed before package claim",HttpStatus.CONFLICT);
+        requireUnclaimedAttempt(stage);
+        Map<String,Object> candidate=jdbc.query("select id,status,detected_revision,attempt_no,stage_key,manifest_hash,source_commit_sha,confirmed_by from collab_asdm_candidate where id=? and requirement_id=? and stage_id=? for update",
+                rs->rs.next()?row(rs):null,prepared.candidateId(),project.projectId(),stage.id());
+        if(candidate==null || !"CONFIRM_REQUESTED".equals(candidate.get("status"))
+                || ((Number)candidate.get("detected_revision")).intValue()!=prepared.revision()
+                || ((Number)candidate.get("attempt_no")).intValue()!=prepared.attemptNo()
+                || !Objects.equals(candidate.get("stage_key"),prepared.stageKey())
+                || !Objects.equals(candidate.get("manifest_hash"),prepared.manifestHash())
+                || !Objects.equals(candidate.get("source_commit_sha"),prepared.commitSha())
+                || ((Number)candidate.get("confirmed_by")).longValue()!=prepared.confirmedBy())
+            throw error("ASDM_CANDIDATE_STALE","Candidate changed before package claim",HttpStatus.CONFLICT);
+        String idempotencyKey="asdm:package:"+prepared.candidateId()+":"+prepared.revision();
+        String title=jdbc.queryForObject("select name from collab_project where id=?",String.class,project.projectId())+" "+stage.title();
+        StringBuilder index=new StringBuilder("# ").append(title).append("\n\n")
+                .append("来源 commit: `").append(prepared.commitSha()).append("`\n\n")
+                .append("以下文件正在逐项发布到飞书；全部完成后本索引会更新链接。\n\n");
+        for(var file:prepared.files())index.append("- ").append(file.file().sourcePath())
+                .append(" (sha256: ").append(file.sha256()==null?"LINK_ONLY":file.sha256()).append(")\n");
+        String markdown=index.toString();
+        if(markdown.getBytes(StandardCharsets.UTF_8).length>MAX_MARKDOWN_BYTES)
+            throw error("ASDM_FILE_OVERSIZE","Package index exceeds Markdown limit",HttpStatus.PAYLOAD_TOO_LARGE);
+        Instant now=Instant.now();
+        Long artifactId=jdbc.query("select id from collab_artifact where stage_id=? and kind=? order by id limit 1",rs->rs.next()?rs.getLong(1):null,stage.id(),stage.artifactKind());
+        if(artifactId==null){
+            jdbc.update("insert into collab_artifact(time_created,time_updated,project_id,stage_id,kind,title,status) values(?,?,?,?,?,?,'ACTIVE')",now,now,project.projectId(),stage.id(),stage.artifactKind(),title);
+            artifactId=jdbc.queryForObject("select id from collab_artifact where stage_id=? and kind=? order by id desc limit 1",Long.class,stage.id(),stage.artifactKind());
+        }
+        int version=jdbc.queryForObject("select coalesce(max(version_no),0)+1 from collab_artifact_version where stage_id=?",Integer.class,stage.id());
+        String fingerprint=sha256(prepared.manifestHash()+":"+prepared.commitSha());
+        Map<String,Object> source=new LinkedHashMap<>();
+        source.put("stageKey",prepared.stageKey());source.put("sourceCommitSha",prepared.commitSha());
+        source.put("manifestHash",prepared.manifestHash());source.put("fileCount",prepared.files().size());
+        jdbc.update("insert into collab_artifact_version(time_created,time_updated,artifact_id,stage_id,version_no,attempt_no,sha256,mime_type,size_bytes,markdown_content,uploaded_by,upload_idempotency_key,request_fingerprint,source_type,source_ref_json) values(?,?,?,?,?,?,?,'text/markdown; charset=utf-8',?,?,?,?,?,'ASDM_GITLAB',?)",
+                now,now,artifactId,stage.id(),version,stage.attemptNo(),sha256(markdown),markdown.getBytes(StandardCharsets.UTF_8).length,markdown,prepared.confirmedBy(),idempotencyKey,fingerprint,json(source));
+        Long artifactVersionId=jdbc.queryForObject("select id from collab_artifact_version where stage_id=? and upload_idempotency_key=?",Long.class,stage.id(),idempotencyKey);
+        jdbc.update("update collab_artifact set title=?,latest_version_id=?,time_updated=? where id=?",title,artifactVersionId,now,artifactId);
+        Long submissionId=claimSubmission(project,stage,artifactVersionId,idempotencyKey,fingerprint,prepared.confirmedBy());
+        long packageId=asdmPackages.createPackage(new Manifest(project.projectId(),stage.id(),stage.attemptNo(),prepared.candidateId(),
+                prepared.revision(),submissionId,prepared.commitSha(),prepared.manifestHash(),"v3.0.1","PUBLISHING_FILES",
+                artifactVersionId,prepared.confirmedBy(),now));
+        List<FileRecord> files=new ArrayList<>();
+        for(var file:prepared.files()){
+            var c=file.file();
+            files.add(new FileRecord(packageId,sha256(c.sourcePath()),c.sourcePath(),file.sha256(),c.sourceBlobSha(),
+                    file.sizeBytes(),c.mediaType(),c.association(),c.associationScore(),c.reasonJson(),c.deliveryMode(),
+                    true,file.storageKey(),c.sourceGitUrl()));
+        }
+        asdmPackages.addFiles(packageId,files);
+        source.put("packageId",packageId);
+        jdbc.update("update collab_artifact_version set source_ref_json=?,time_updated=now(3) where id=?",json(source),artifactVersionId);
+        jdbc.update("update collab_asdm_candidate set status='CLAIMED',submission_id=?,time_updated=? where id=?",submissionId,now,prepared.candidateId());
+        addEvent(project.projectId(),stage,"ASDM_PACKAGE_CLAIMED",prepared.confirmedBy(),stage.status(),"PUBLISHING",packageId,
+                Map.of("packageId",packageId,"fileCount",files.size(),"manifestHash",prepared.manifestHash()));
+        return submission(prepared.requirementKey(),submissionId,prepared.confirmedBy());
+    }
+
     /** Finalizes one new submission after its Wiki document has been durably published. */
     @Transactional
     public void onFeishuPublicationSucceeded(long artifactVersionId) {
+        finalizeFeishuPublication(artifactVersionId,false);
+    }
+
+    /** The package worker calls this only after every selected file and the index are published. */
+    @Transactional
+    public void onAsdmPackagePublished(long packageId) {
+        Manifest manifest=asdmPackages.findPackage(packageId).orElseThrow(()->new IllegalArgumentException("ASDM_PACKAGE_NOT_FOUND"));
+        if(!asdmPackages.progress(packageId).allRequiredPublished())
+            throw new IllegalStateException("ASDM package still has unpublished files");
+        String indexStatus=jdbc.queryForObject("select publish_status from collab_feishu_publication where artifact_version_id=?",String.class,
+                manifest.sourceIndexArtifactVersionId());
+        if(!"PUBLISHED".equals(indexStatus))throw new IllegalStateException("ASDM package index is not published");
+        asdmPackages.markPackageStatus(packageId,"PUBLISHED",null);
+        finalizeFeishuPublication(manifest.sourceIndexArtifactVersionId(),true);
+    }
+
+    private void finalizeFeishuPublication(long artifactVersionId,boolean packageReady) {
+        if(!packageReady){
+            Integer packageCount=jdbc.queryForObject("select count(*) from collab_asdm_package where source_index_artifact_version_id=?",Integer.class,artifactVersionId);
+            if(packageCount!=null&&packageCount>0)return;
+        }
         Long projectId=jdbc.query("select s.project_id from collab_submission sub join collab_stage s on s.id=sub.stage_id where sub.artifact_version_id=?",rs->rs.next()?rs.getLong(1):null,artifactVersionId);
         if(projectId==null)return;
         lockProjectFlow(projectId);

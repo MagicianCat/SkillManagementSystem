@@ -3,6 +3,7 @@ package com.company.skillplatform.collabproject.application;
 import com.company.skillplatform.agent.infrastructure.FeishuDocumentMcpProxy;
 import com.company.skillplatform.collabproject.asdm.application.CollabAsdmDetectionService;
 import com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService;
+import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmPackagePreparationService;
 import com.company.skillplatform.collabproject.flow.application.CollabProjectFlowService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,13 +30,14 @@ public class CollabFeishuWorker {
     private final ObjectMapper mapper;
     private final CollabAsdmPublishCardService asdmCards;
     private final CollabAsdmDetectionService asdmDetection;
+    private final CollabAsdmPackagePreparationService asdmPreparation;
     private final CollabProjectFlowService flow;
 
     public CollabFeishuWorker(JdbcTemplate jdbc, CollabFeishuChatGateway chats, FeishuDocumentMcpProxy documents,
             FeishuProperties feishuProperties, ObjectMapper mapper,
             @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
             CollabAsdmPublishCardService asdmCards, CollabAsdmDetectionService asdmDetection,
-            CollabProjectFlowService flow) {
+            CollabAsdmPackagePreparationService asdmPreparation, CollabProjectFlowService flow) {
         this.jdbc = jdbc;
         this.chats = chats;
         this.documents = documents;
@@ -44,6 +46,7 @@ public class CollabFeishuWorker {
         this.mapper = mapper;
         this.asdmCards = asdmCards;
         this.asdmDetection = asdmDetection;
+        this.asdmPreparation = asdmPreparation;
         this.flow = flow;
     }
 
@@ -184,7 +187,11 @@ public class CollabFeishuWorker {
     private void confirmAsdmPublish(long candidateId,int revision) {
         CollabAsdmDetectionService.ConfirmWorkerResult result=asdmDetection.revalidateForPublish(candidateId,revision);
         if(result.stale()||result.changed())return;
-        try { flow.publishAsdmCandidate(result.projectKey(),candidateId,revision,result.actorId()); }
+        try {
+            String stageKey=jdbc.queryForObject("select stage_key from collab_asdm_candidate where id=?",String.class,candidateId);
+            if(stageKey==null)flow.publishAsdmCandidate(result.projectKey(),candidateId,revision,result.actorId());
+            else flow.publishAsdmPackage(asdmPreparation.prepare(candidateId,revision));
+        }
         catch(com.company.skillplatform.common.application.BusinessException denied) {
             if("STAGE_ATTEMPT_ALREADY_CLAIMED".equals(denied.getCode())) {
                 jdbc.update("update collab_asdm_candidate set status='CLOSED_BY_SKILL',last_error_code='SUBMISSION_ALREADY_CLAIMED',version_no=version_no+1,time_updated=now(3) where id=? and status='CONFIRM_REQUESTED'",candidateId);
@@ -334,7 +341,7 @@ public class CollabFeishuWorker {
 
     private void stageHandoff(long projectId, long stageId, long outboxId) {
         String chatId = chatId(projectId);
-        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,g.name group_name,s.id stage_id,s.stage_key,s.title stage_title,s.stage_order,s.attempt_no,s.git_required,"
+        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,p.asdm_branch,g.name group_name,s.id stage_id,s.stage_key,s.title stage_title,s.stage_order,s.attempt_no,s.git_required,"
                 + "rr.role_name_snapshot owner_role_name,"
                 + "u.display_name,u.feishu_open_id "
                 + "FROM collab_stage s JOIN collab_project p ON p.id=s.project_id JOIN iam_user u ON u.id=s.owner_user_id "
@@ -363,6 +370,8 @@ public class CollabFeishuWorker {
         elements.add(Map.of("tag", "markdown", "content", requirementHeading(row) + "\n"
                 + "阶段 **" + stageTitle + "** 已就绪（第 " + stageOrder + " 阶段）。"
                 + roleLine + "\n负责人：" + ownerMentions + reviewerLine));
+        if(newRequirement && row.get("asdm_branch")!=null && !"ACCEPTANCE".equals(stageKey))
+            elements.add(Map.of("tag","markdown","content","ASDM 正在监测专用分支 `"+row.get("asdm_branch")+"` 的本阶段产物。满足标志并达到配置的静默期后会发送发布确认卡；你也可以继续使用下方 Skill 提交。"));
         if (stageOrder > 1) {
             String contextPrompt = CollabStagePromptFactory.context(projectKey, stageTitle);
             elements.add(Map.of("tag", "markdown", "content",

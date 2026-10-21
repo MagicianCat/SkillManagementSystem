@@ -15,6 +15,7 @@ import java.sql.SQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /** Feishu candidate card sender and authenticated publish callback router. */
@@ -25,8 +26,10 @@ public class CollabAsdmPublishCardService {
     private final JdbcTemplate jdbc;
     private final CollabFeishuChatGateway chats;
     private final CollabAsdmDetectionService detection;
+    private final String webBaseUrl;
 
-    public CollabAsdmPublishCardService(JdbcTemplate jdbc,CollabFeishuChatGateway chats,CollabAsdmDetectionService detection){this.jdbc=jdbc;this.chats=chats;this.detection=detection;}
+    public CollabAsdmPublishCardService(JdbcTemplate jdbc,CollabFeishuChatGateway chats,CollabAsdmDetectionService detection,
+            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl){this.jdbc=jdbc;this.chats=chats;this.detection=detection;this.webBaseUrl=webBaseUrl.replaceAll("/$", "");}
 
     public boolean handles(P2CardActionTrigger event){
         if(event==null||event.getEvent()==null||event.getEvent().getAction()==null)return false;
@@ -63,7 +66,7 @@ public class CollabAsdmPublishCardService {
 
     /** Sends one Feishu interactive card for a persisted, debounced candidate revision. */
     public void sendCandidate(long candidateId,int revision){
-        Map<String,Object> row=jdbc.query("select c.detected_revision,c.notified_revision,c.status,c.attempt_no,c.source_path,c.source_commit_sha,c.notify_after,p.name requirement_name,p.asdm_branch,g.id group_id,g.name group_name,b.chat_id,g.owner_user_id,s.id stage_id,s.title stage_title "
+        Map<String,Object> row=jdbc.query("select c.detected_revision,c.notified_revision,c.status,c.attempt_no,c.source_path,c.source_commit_sha,c.notify_after,p.project_key,p.name requirement_name,p.asdm_branch,g.id group_id,g.name group_name,b.chat_id,g.owner_user_id,s.id stage_id,s.stage_key,s.title stage_title "
                 +"from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id join collab_group g on g.id=p.group_id join collab_stage s on s.id=c.stage_id left join collab_feishu_binding b on b.project_id=p.id where c.id=?",rs->rs.next()?row(rs):null,candidateId);
         if(row==null||!"NOTIFIED".equals(row.get("status"))||!Integer.valueOf(revision).equals(row.get("notified_revision"))||!Integer.valueOf(revision).equals(row.get("detected_revision")))return;
         String chatId=(String)row.get("chat_id");if(blank(chatId))throw new IllegalStateException("Requirement Feishu chat is not ready");
@@ -77,7 +80,17 @@ public class CollabAsdmPublishCardService {
         String repo=jdbc.queryForObject("select asdm_repository_url from collab_group where id=?",String.class,((Number)row.get("group_id")).longValue());
         // Use a commit permalink so branch names containing '/' remain unambiguous.
         String gitUrl=repo.replaceAll("/$","")+"/-/blob/"+encodePath(commit)+"/"+encodePath(path);
-        String body="**【需求分析产物待发布】**\n项目组："+group+"\n需求："+requirement+"\n负责人："+String.join(" ",mentions)+"\n分支：`"+branch+"`\n产物：`requirement-doc.md`\nGit commit：`"+commit.substring(0,Math.min(7,commit.length()))+"`\n检测情况：文件内容已连续 5 分钟稳定。";
+        String stageKey=String.valueOf(row.get("stage_key"));
+        String stageTitle=escape(String.valueOf(row.get("stage_title")));
+        List<Map<String,Object>> inventory=jdbc.queryForList("select association,selected,source_path from collab_asdm_candidate_file where candidate_id=? and candidate_revision=? order by source_path",candidateId,revision);
+        long confirmed=inventory.stream().filter(f->Boolean.TRUE.equals(f.get("selected"))&&"CONFIRMED".equals(f.get("association"))).count();
+        long likely=inventory.stream().filter(f->"LIKELY".equals(f.get("association"))).count();
+        long uncertain=inventory.stream().filter(f->"UNCERTAIN".equals(f.get("association"))).count();
+        long external=inventory.stream().filter(f->"EXTERNAL_REF".equals(f.get("association"))).count();
+        String found=inventory.isEmpty()?"产物：`requirement-doc.md`":
+                "自动确认关联：**"+confirmed+" 份**；推断关联待确认：**"+likely+" 份**；归属不明：**"+uncertain+" 份（不会自动发布）**；外部引用：**"+external+" 项**。";
+        String body="**【"+stageTitle+"产物待发布】**\n项目组："+group+"\n需求："+requirement+"\n负责人："+String.join(" ",mentions)+"\n分支：`"+branch+"`\n"+found+"\nGit commit：`"+commit.substring(0,Math.min(7,commit.length()))+"`\n检测情况：本阶段关联文件已达到配置的静默期。\n发布后将逐份同步已纳入清单的文档/附件，全部成功后进入审批或自动流转。";
+        if("TESTING".equals(stageKey))body+="\n此提醒只表示发现测试设计交付信号，不代表测试执行通过。";
         List<Object> elements=new ArrayList<>();
         elements.add(Map.of("tag","markdown","content",body));
         Map<String,Object> publishButton=Map.of("tag","button","type","primary","element_id","collab_asdm_publish",
@@ -86,9 +99,13 @@ public class CollabAsdmPublishCardService {
                         "candidateRevision",revision,"stageId",stageId,"attemptNo",row.get("attempt_no")))));
         Map<String,Object> gitlabButton=Map.of("tag","button","type","default","text",Map.of("tag","plain_text","content","查看 GitLab"),
                 "behaviors",List.of(Map.of("type","open_url","default_url",gitUrl,"pc_url",gitUrl,"ios_url",gitUrl,"android_url",gitUrl)));
+        String listUrl=webBaseUrl+"/collab-requirements/"+row.get("project_key")+"/stages/"+stageKey;
+        Map<String,Object> listButton=Map.of("tag","button","type","default","text",Map.of("tag","plain_text","content","查看产物清单"),
+                "behaviors",List.of(Map.of("type","open_url","default_url",listUrl,"pc_url",listUrl,"ios_url",listUrl,"android_url",listUrl)));
         Map<String,Object> publishColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(publishButton));
         Map<String,Object> gitlabColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(gitlabButton));
-        elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",List.of(publishColumn,gitlabColumn)));
+        Map<String,Object> listColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(listButton));
+        elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",List.of(listColumn,gitlabColumn,publishColumn)));
         chats.sendInteractive(chatId,Map.of("schema","2.0","body",Map.of("elements",elements)),"asdm-candidate:"+candidateId+":revision:"+revision);
     }
 

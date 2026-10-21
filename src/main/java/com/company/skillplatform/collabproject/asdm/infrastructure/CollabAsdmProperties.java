@@ -15,7 +15,17 @@ public record CollabAsdmProperties(
         Duration readTimeout,
         int maxMarkdownBytes,
         int maxTreeEntries,
-        int pollBatchSize) {
+        int pollBatchSize,
+        boolean multiStageEnabled,
+        boolean multiFilePublishEnabled,
+        int maxDiscoveryEntries,
+        int maxCandidateFiles,
+        long maxFileBytes,
+        long maxPackageBytes,
+        boolean matchLikelyAutoinclude,
+        int filePublishWorkers,
+        int filePublishRetryLimit,
+        Duration blobCacheTtl) {
     public CollabAsdmProperties {
         allowedHosts = allowedHosts == null ? List.of() : allowedHosts.stream()
                 .map(s -> s == null ? "" : s.trim().toLowerCase(java.util.Locale.ROOT))
@@ -27,5 +37,12 @@ public record CollabAsdmProperties(
         if (maxMarkdownBytes <= 0) maxMarkdownBytes = 1_048_576;
         if (maxTreeEntries <= 0) maxTreeEntries = 5_000;
         if (pollBatchSize <= 0) pollBatchSize = 20;
+        if (maxDiscoveryEntries <= 0) maxDiscoveryEntries = 20_000;
+        if (maxCandidateFiles <= 0) maxCandidateFiles = 300;
+        if (maxFileBytes <= 0) maxFileBytes = 20L * 1024 * 1024;
+        if (maxPackageBytes <= 0) maxPackageBytes = 200L * 1024 * 1024;
+        if (filePublishWorkers <= 0) filePublishWorkers = 4;
+        if (filePublishRetryLimit <= 0) filePublishRetryLimit = 8;
+        blobCacheTtl = blobCacheTtl == null ? Duration.ofHours(24) : blobCacheTtl;
     }
 }
