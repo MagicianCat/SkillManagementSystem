@@ -65,4 +65,58 @@ class CollabAsdmStageRulesTest {
         assertFalse(rules.evaluate("ACCEPTANCE",REQ,"需求",List.of(output),false).triggerReady());
         assertFalse(rules.evaluate("REQUIREMENT",REQ,"需求",List.of(output),false).triggerReady());
     }
+
+    @Test void configuredDoubleStarMatchesZeroOrMoreDirectoriesAndReplacesLegacyPaths() {
+        var config = new CollabAsdmStageRules.StageRuleConfig("PRODUCT", true,
+                List.of("${REQ_PATH}/systems/**/*.md"), List.of(), List.of(), List.of(), null);
+        assertTrue(rules.mayMatchStagePath("PRODUCT", REQ, REQ + "/systems/SYS-001.md", config));
+        assertTrue(rules.mayMatchStagePath("PRODUCT", REQ, REQ + "/systems/domain/SYS-002.md", config));
+        assertFalse(rules.mayMatchStagePath("PRODUCT", REQ, REQ + "/system-function-list.md", config));
+        var relative = new CollabAsdmStageRules.StageRuleConfig("PRODUCT", true,
+                List.of("${REQ_ID}/systems/**/*.md"), List.of(), List.of(), List.of(), "workspace/requirements");
+        assertTrue(rules.mayMatchStagePath("PRODUCT", REQ, REQ + "/systems/SYS-001.md", relative));
+    }
+
+    @Test void customMarkerGroupsKeepFixedProductValidationForNewConfiguredPaths() {
+        var config = new CollabAsdmStageRules.StageRuleConfig("PRODUCT", true,
+                List.of(REQ + "/spec/functions.md", REQ + "/catalog/**/*.md"), List.of(), List.of(),
+                List.of(List.of(REQ + "/spec/functions.md"), List.of(REQ + "/catalog/**/*.md")), null);
+        assertTrue(rules.mayMatchStagePath("PRODUCT", REQ, REQ + "/catalog/system-domain.md", config));
+        assertTrue(rules.markerPath(config, 1, REQ + "/catalog/system-domain.md", REQ));
+        var result = rules.evaluate("PRODUCT", REQ, "需求", List.of(
+                file(REQ + "/spec/functions.md", "Function list with substantive detail."),
+                file(REQ + "/catalog/system-domain.md", "System one owns the billing features.")), false, java.util.Map.of(), config);
+        assertEquals(2, result.files().size());
+        assertTrue(result.triggerReady(), result.diagnostic() + " " + result.markerEvidence() + " " + result.files() + " config=" + config);
+        assertEquals(2, result.markerEvidence().size());
+    }
+
+    @Test void configuredCodingRulesDoNotCollectFilesFromTheOtherCodingStage() {
+        String front = REQ + "/frontend/FEAT-001/task-list.md";
+        String back = REQ + "/backend/FEAT-002/task-list.md";
+        var files = List.of(file(front, "| FE-01 | DONE |"), file(back, "| BE-01 | DONE |"),
+                file(REQ + "/frontend/frontend-review.md", "Frontend review for REQ-001 is complete."),
+                file(REQ + "/backend/backend-review.md", "Backend review for REQ-001 is complete."));
+        var frontRule = new CollabAsdmStageRules.StageRuleConfig("FRONTEND_CODING", true,
+                List.of("${REQ_PATH}/**/task-list.md", "workspace/**/*-review.md"), List.of(), List.of(),
+                List.of(List.of("${REQ_PATH}/frontend/**/task-list.md")), null);
+        var backRule = new CollabAsdmStageRules.StageRuleConfig("BACKEND_CODING", true,
+                List.of("${REQ_PATH}/**/task-list.md", "workspace/**/*-review.md"), List.of(), List.of(),
+                List.of(List.of("${REQ_PATH}/backend/**/task-list.md")), null);
+
+        assertFalse(rules.mayMatchStagePath("FRONTEND_CODING", REQ, back, frontRule));
+        assertFalse(rules.mayMatchStagePath("BACKEND_CODING", REQ, front, backRule));
+        var architectureRule = new CollabAsdmStageRules.StageRuleConfig("ARCHITECTURE_DESIGN", true,
+                List.of("workspace/**/task-list.md", "${REQ_PATH}/new-design/**/*.md"), List.of(), List.of(), List.of(), null);
+        assertFalse(rules.mayMatchStagePath("ARCHITECTURE_DESIGN", REQ, front, architectureRule));
+        assertFalse(rules.mayMatchStagePath("ARCHITECTURE_DESIGN", REQ, back, architectureRule));
+        assertTrue(rules.mayMatchStagePath("ARCHITECTURE_DESIGN", REQ,
+                REQ + "/new-design/extra-design.md", architectureRule));
+        assertEquals(List.of(front, REQ + "/frontend/frontend-review.md"),
+                rules.evaluate("FRONTEND_CODING", REQ, "需求", files, false, java.util.Map.of(), frontRule)
+                        .files().stream().map(CollabAsdmStageRules.ClassifiedFile::path).sorted().toList());
+        assertEquals(List.of(back, REQ + "/backend/backend-review.md"),
+                rules.evaluate("BACKEND_CODING", REQ, "需求", files, false, java.util.Map.of(), backRule)
+                        .files().stream().map(CollabAsdmStageRules.ClassifiedFile::path).sorted().toList());
+    }
 }

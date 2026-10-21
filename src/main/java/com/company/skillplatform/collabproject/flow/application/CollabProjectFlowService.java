@@ -261,13 +261,16 @@ public class CollabProjectFlowService {
         Map<String,Object> source=new LinkedHashMap<>();
         source.put("stageKey",prepared.stageKey());source.put("sourceCommitSha",prepared.commitSha());
         source.put("manifestHash",prepared.manifestHash());source.put("fileCount",prepared.files().size());
+        Map<String,Object> ruleBinding=jdbc.query("select default_version,group_revision,effective_hash from collab_asdm_requirement_rule_binding where requirement_id=?",rs->rs.next()?Map.of("defaultVersion",rs.getString(1),"groupRevision",rs.getInt(2),"effectiveHash",rs.getString(3)):Map.of(),project.projectId());
+        source.put("asdmRules",ruleBinding);
         jdbc.update("insert into collab_artifact_version(time_created,time_updated,artifact_id,stage_id,version_no,attempt_no,sha256,mime_type,size_bytes,markdown_content,uploaded_by,upload_idempotency_key,request_fingerprint,source_type,source_ref_json) values(?,?,?,?,?,?,?,'text/markdown; charset=utf-8',?,?,?,?,?,'ASDM_GITLAB',?)",
                 now,now,artifactId,stage.id(),version,stage.attemptNo(),sha256(markdown),markdown.getBytes(StandardCharsets.UTF_8).length,markdown,prepared.confirmedBy(),idempotencyKey,fingerprint,json(source));
         Long artifactVersionId=jdbc.queryForObject("select id from collab_artifact_version where stage_id=? and upload_idempotency_key=?",Long.class,stage.id(),idempotencyKey);
         jdbc.update("update collab_artifact set title=?,latest_version_id=?,time_updated=? where id=?",title,artifactVersionId,now,artifactId);
         Long submissionId=claimSubmission(project,stage,artifactVersionId,idempotencyKey,fingerprint,prepared.confirmedBy());
+        String asdmRuleVersion=ruleBinding.isEmpty()?"v3.0.1":ruleBinding.get("defaultVersion")+"+g"+ruleBinding.get("groupRevision")+"+"+String.valueOf(ruleBinding.get("effectiveHash")).substring(0,16);
         long packageId=asdmPackages.createPackage(new Manifest(project.projectId(),stage.id(),stage.attemptNo(),prepared.candidateId(),
-                prepared.revision(),submissionId,prepared.commitSha(),prepared.manifestHash(),"v3.0.1","PUBLISHING_FILES",
+                prepared.revision(),submissionId,prepared.commitSha(),prepared.manifestHash(),asdmRuleVersion,"PUBLISHING_FILES",
                 artifactVersionId,prepared.confirmedBy(),now));
         List<FileRecord> files=new ArrayList<>();
         for(var file:prepared.files()){

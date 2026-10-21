@@ -1,6 +1,7 @@
 package com.company.skillplatform.collabproject.asdm.application;
 
 import com.company.skillplatform.collabproject.application.CollabFeishuChatGateway;
+import com.company.skillplatform.collabproject.application.CollabFeishuCardLayout;
 import com.company.skillplatform.common.application.BusinessException;
 import com.lark.oapi.event.cardcallback.model.CallBackToast;
 import com.lark.oapi.event.cardcallback.model.P2CardActionTrigger;
@@ -71,10 +72,8 @@ public class CollabAsdmPublishCardService {
         if(row==null||!"NOTIFIED".equals(row.get("status"))||!Integer.valueOf(revision).equals(row.get("notified_revision"))||!Integer.valueOf(revision).equals(row.get("detected_revision")))return;
         String chatId=(String)row.get("chat_id");if(blank(chatId))throw new IllegalStateException("Requirement Feishu chat is not ready");
         long stageId=((Number)row.get("stage_id")).longValue();
-        List<Map<String,Object>> owners=jdbc.queryForList("select distinct u.display_name,u.feishu_open_id from collab_requirement_stage_actor a join collab_group_member gm on gm.group_id=? and gm.user_id=a.user_id and gm.status='ACTIVE' join iam_user u on u.id=a.user_id and u.status='ACTIVE' where a.stage_id=? and a.duty='OWNER' and a.frozen_at is not null order by u.display_name",((Number)row.get("group_id")).longValue(),stageId);
-        if(owners.isEmpty())throw new IllegalStateException("No active frozen requirement owner is available");
-        List<String> mentions=new ArrayList<>();
-        for(Map<String,Object> owner:owners){String openId=owner.get("feishu_open_id")==null?"":owner.get("feishu_open_id").toString().trim();mentions.add(openId.isBlank()?escape(String.valueOf(owner.get("display_name"))):"<at id="+openId+"></at>");}
+        String ownerRoster = CollabFeishuCardLayout.owners(jdbc, stageId, true);
+        if (ownerRoster.isBlank()) throw new IllegalStateException("No active frozen requirement owner is available");
         String branch=escape(String.valueOf(row.get("asdm_branch")));String group=escape(String.valueOf(row.get("group_name")));String requirement=escape(String.valueOf(row.get("requirement_name")));
         String path=String.valueOf(row.get("source_path"));String commit=String.valueOf(row.get("source_commit_sha"));
         String repo=jdbc.queryForObject("select asdm_repository_url from collab_group where id=?",String.class,((Number)row.get("group_id")).longValue());
@@ -87,12 +86,21 @@ public class CollabAsdmPublishCardService {
         long likely=inventory.stream().filter(f->"LIKELY".equals(f.get("association"))).count();
         long uncertain=inventory.stream().filter(f->"UNCERTAIN".equals(f.get("association"))).count();
         long external=inventory.stream().filter(f->"EXTERNAL_REF".equals(f.get("association"))).count();
-        String found=inventory.isEmpty()?"产物：`requirement-doc.md`":
-                "自动确认关联：**"+confirmed+" 份**；推断关联待确认：**"+likely+" 份**；归属不明：**"+uncertain+" 份（不会自动发布）**；外部引用：**"+external+" 项**。";
-        String body="**【"+stageTitle+"产物待发布】**\n项目组："+group+"\n需求："+requirement+"\n负责人："+String.join(" ",mentions)+"\n分支：`"+branch+"`\n"+found+"\nGit commit：`"+commit.substring(0,Math.min(7,commit.length()))+"`\n检测情况：本阶段关联文件已达到配置的静默期。\n发布后将逐份同步已纳入清单的文档/附件，全部成功后进入审批或自动流转。";
-        if("TESTING".equals(stageKey))body+="\n此提醒只表示发现测试设计交付信号，不代表测试执行通过。";
-        List<Object> elements=new ArrayList<>();
-        elements.add(Map.of("tag","markdown","content",body));
+        String found = inventory.isEmpty() ? "产物：`requirement-doc.md`"
+                : "自动确认关联：**" + confirmed + " 份**\n推断关联待确认：**" + likely
+                    + " 份**\n归属不明：**" + uncertain + " 份**（不会自动发布）\n外部引用：**" + external + " 项**";
+        List<Object> elements = new ArrayList<>();
+        elements.add(CollabFeishuCardLayout.markdown("项目组：**" + group + "**\n需求：**" + requirement + "**"));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("**负责人：**\n" + ownerRoster));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("**产物检测结果**\n" + found));
+        elements.add(CollabFeishuCardLayout.markdown("分支：`" + branch + "`\nGit commit：`"
+                + commit.substring(0, Math.min(7, commit.length())) + "`\n\n本阶段关联文件已达到配置的静默期。"));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("发布后将逐份同步已纳入清单的文档及附件，全部成功后进入审批或自动流转。"));
+        if ("TESTING".equals(stageKey)) elements.add(CollabFeishuCardLayout.markdown(
+                "**测试阶段说明**\n此提醒只表示发现测试设计交付信号，不代表测试执行通过。"));
         Map<String,Object> publishButton=Map.of("tag","button","type","primary","element_id","collab_asdm_publish",
                 "name",ACTION+"|"+candidateId+"|"+revision,"text",Map.of("tag","plain_text","content","发布当前产物"),
                 "behaviors",List.of(Map.of("type","callback","value",Map.of("action",ACTION,"candidateId",candidateId,
@@ -106,7 +114,7 @@ public class CollabAsdmPublishCardService {
         Map<String,Object> gitlabColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(gitlabButton));
         Map<String,Object> listColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(listButton));
         elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",List.of(listColumn,gitlabColumn,publishColumn)));
-        chats.sendInteractive(chatId,Map.of("schema","2.0","body",Map.of("elements",elements)),"asdm-candidate:"+candidateId+":revision:"+revision);
+        chats.sendInteractive(chatId,CollabFeishuCardLayout.card("产物待发布 · " + String.valueOf(row.get("stage_title")), "blue", elements),"asdm-candidate:"+candidateId+":revision:"+revision);
     }
 
     private P2CardActionTriggerResponse result(P2CardActionTriggerResponse response,CallBackToast toast,String type,String content){toast.setType(type);toast.setContent(content);return response;}

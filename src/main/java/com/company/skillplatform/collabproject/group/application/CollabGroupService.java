@@ -4,6 +4,7 @@ import com.company.skillplatform.collabproject.application.CollabFeishuBindingSe
 import com.company.skillplatform.collabproject.application.CollabFeishuOutbox;
 import com.company.skillplatform.collabproject.application.GroupFeishuOutbox;
 import com.company.skillplatform.collabproject.asdm.application.CollabAsdmConfigurationService;
+import com.company.skillplatform.collabproject.asdm.application.CollabAsdmRuleService;
 import com.company.skillplatform.collabproject.asdm.infrastructure.CollabAsdmGitlabClient;
 import com.company.skillplatform.collabproject.asdm.infrastructure.CollabAsdmGitlabException;
 import com.company.skillplatform.common.application.BusinessException;
@@ -31,6 +32,8 @@ public class CollabGroupService {
     private final GroupFeishuOutbox outbox;
     private final CollabAsdmConfigurationService asdmConfiguration;
     private final CollabAsdmGitlabClient asdmGitlab;
+    @Autowired(required = false)
+    private CollabAsdmRuleService asdmRules;
 
     @Autowired
     public CollabGroupService(JdbcTemplate jdbc, ObjectMapper mapper, CollabFeishuBindingService wiki, CollabFeishuOutbox projectOutbox, GroupFeishuOutbox outbox,
@@ -266,6 +269,7 @@ public class CollabGroupService {
         Instant now=Instant.now();String requirementKey=UUID.randomUUID().toString();List<String> ordered=STAGES.stream().filter(included::contains).toList();int firstOrder=stageOrder(ordered.get(0));int firstGroupStart=stageGroupStart(firstOrder);List<String> initial=ordered.stream().filter(s->{int o=stageOrder(s);return o>=firstGroupStart&&o<=stageGroupEnd(firstGroupStart);}).toList();int currentOrder=initial.stream().mapToInt(this::stageOrder).min().orElse(firstOrder);
         long groupId=num(g,"id");jdbc.update("insert into collab_project(time_created,time_updated,project_key,home_team_id,name,description,owner_user_id,approval_level,status,current_stage_order,version_no,created_by,group_id,inherited_template_version,gitlab_root_snapshot,asdm_branch,asdm_binding_status,asdm_baseline_head_sha,asdm_last_scanned_head_sha) values(?,?,?,?,?,?,?,?,'ACTIVE',?,0,?,?,?,?,?,?,?,?)",now,now,requirementKey,g.get("home_team_id"),name,nullableTrim(command.description()),actorId,level,currentOrder,actorId,groupId,version,gitlab,asdmBranch,asdmBindingStatus,asdmBaseline,asdmBaseline);
         long projectId=jdbc.queryForObject("select id from collab_project where project_key=?",Long.class,requirementKey);
+        if(asdmRules!=null) asdmRules.effectiveForRequirement(projectId,true);
         jdbc.update("insert into collab_feishu_binding(project_id,wiki_space_id,wiki_root_node_token,wiki_parent_node_token,publish_actor_user_id,status,time_created,time_updated) values(?,?,?,NULL,?,'PENDING',?,?)",projectId,wikiBinding.get("wiki_space_id"),wikiBinding.get("wiki_group_node_token"),actorId,now,now);
         projectOutbox.enqueueCreateChat(projectId,requirementKey);
         projectOutbox.enqueueWikiFolder(projectId);

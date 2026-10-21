@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.PatternSyntaxException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
@@ -20,20 +21,41 @@ public class CollabAsdmStageRules {
             "UI_DESIGN", "FRONTEND_CODING", "BACKEND_CODING", "TESTING");
     private static final Set<String> EXCLUDED_SEGMENTS = Set.of("toolsets", "contexts", "spec", "extensions",
             "review-standards", "node_modules", "target", "build", ".git", "templates", "template", "cache");
+    private static final Set<String> SECURITY_EXCLUDED_SEGMENTS = Set.of("node_modules", "target", "build", ".git");
     private static final Pattern TASK_ROW = Pattern.compile("(?im)^[ \\t]*\\|[ \\t]*([^|\\r\\n]+?)[ \\t]*\\|[ \\t]*(?:[^|\\r\\n]*\\|){0,5}[ \\t]*(TODO|PENDING|IN_PROGRESS|DOING|DONE|COMPLETED|BLOCKED|FAILED)[ \\t]*\\|[^\\r\\n]*$");
     private static final Pattern TASK_KV = Pattern.compile("(?im)^\\s*(?:[-*]\\s*)?(?:task[_ -]?id|任务(?:编号|ID))\\s*[:：]\\s*([A-Za-z0-9_-]+).*?(?:\\R|$)(?:.*?\\R){0,4}?\\s*(?:status|状态)\\s*[:：]\\s*(TODO|PENDING|IN_PROGRESS|DOING|DONE|COMPLETED|BLOCKED|FAILED)\\b");
 
     public boolean enabled(String stageKey) { return ENABLED.contains(stageKey); }
 
+    /** Stage-specific path rules. Marker semantics remain owned by this class. */
+    public record StageRuleConfig(String stageKey, boolean enabled, List<String> includeGlobs,
+            List<String> excludeGlobs, List<String> markerGlobs, List<List<String>> markerGroups, String relativeBase) {
+        public StageRuleConfig {
+            includeGlobs = includeGlobs == null ? List.of() : List.copyOf(includeGlobs);
+            excludeGlobs = excludeGlobs == null ? List.of() : List.copyOf(excludeGlobs);
+            markerGlobs = markerGlobs == null ? List.of() : List.copyOf(markerGlobs);
+            markerGroups = markerGroups == null ? List.of() : markerGroups.stream().map(List::copyOf).toList();
+        }
+    }
+
     /** Path-only prefilter used before fetching blob contents from GitLab. */
     public boolean mayMatchStagePath(String stageKey,String requirementPath,String path) {
+        return mayMatchStagePath(stageKey, requirementPath, path, null);
+    }
+
+    public boolean mayMatchStagePath(String stageKey,String requirementPath,String path, StageRuleConfig config) {
         if (!enabled(stageKey) || path == null || !path.startsWith("workspace/") || path.length() > 1600
                 || path.contains("..") || path.contains("\\") || path.chars().anyMatch(Character::isISOControl)) return false;
+        if (config != null && (!stageKey.equals(config.stageKey()) || !config.enabled())) return false;
         String lower=path.toLowerCase(Locale.ROOT);
         if(lower.endsWith(".gitignore")||basename(lower).startsWith("readme")||basename(lower).startsWith(".")
                 ||Set.of("features-list.md","completion_report.md").contains(basename(lower)))return false;
-        for(String segment:lower.split("/"))if(EXCLUDED_SEGMENTS.contains(segment))return false;
-        return stagePattern(stageKey,lower,normalizedRequirement(requirementPath).toLowerCase(Locale.ROOT));
+        if (wrongCodingStage(stageKey, lower) || codingTaskOutsideCodingStage(stageKey, lower)) return false;
+        for(String segment:lower.split("/"))if((config==null?EXCLUDED_SEGMENTS:SECURITY_EXCLUDED_SEGMENTS).contains(segment))return false;
+        if (config != null && config.excludeGlobs().stream().anyMatch(g -> globMatches(g, path, requirementPath, config.relativeBase()))) return false;
+        return config == null
+                ? stagePattern(stageKey,lower,normalizedRequirement(requirementPath).toLowerCase(Locale.ROOT))
+                : config.includeGlobs().stream().anyMatch(g -> globMatches(g, path, requirementPath, config.relativeBase()));
     }
 
     public Evaluation evaluate(String stageKey, String requirementPath, String requirementName,
@@ -43,11 +65,16 @@ public class CollabAsdmStageRules {
 
     public Evaluation evaluate(String stageKey, String requirementPath, String requirementName,
             List<InputFile> all, boolean includeLikely, Map<String,String> associationOverrides) {
-        if (!enabled(stageKey)) return new Evaluation(false, "ASDM_STAGE_DISABLED", List.of(), List.of());
+        return evaluate(stageKey, requirementPath, requirementName, all, includeLikely, associationOverrides, null);
+    }
+
+    public Evaluation evaluate(String stageKey, String requirementPath, String requirementName,
+            List<InputFile> all, boolean includeLikely, Map<String,String> associationOverrides, StageRuleConfig config) {
+        if (!enabled(stageKey) || config != null && (!stageKey.equals(config.stageKey()) || !config.enabled())) return new Evaluation(false, "ASDM_STAGE_DISABLED", List.of(), List.of());
         String req = normalizedRequirement(requirementPath);
         List<ClassifiedFile> relevant = new ArrayList<>();
         for (InputFile file : all) {
-            ClassifiedFile classified = classify(stageKey, req, requirementName, file, includeLikely);
+            ClassifiedFile classified = classify(stageKey, req, requirementName, file, includeLikely, config);
             if (classified != null && associationOverrides != null) {
                 String override = associationOverrides.get(file.path());
                 if ("CONFIRMED".equals(override)) classified = new ClassifiedFile(classified.path(), classified.blobSha(), classified.size(),
@@ -61,34 +88,37 @@ public class CollabAsdmStageRules {
         List<ClassifiedFile> selected = relevant.stream().filter(ClassifiedFile::selected).toList();
         List<String> markers = new ArrayList<>();
         boolean ready = switch (stageKey) {
-            case "REQUIREMENT" -> has(selected, req + "/requirement-doc.md", markers);
-            case "PRODUCT" -> has(selected, req + "/system-function-list.md", markers)
-                    & any(selected, f -> f.path().startsWith(req + "/systems/")
-                    && basename(f.path()).matches("SYS-[^/]+\\.md") && substantive(f.content()), markers);
-            case "ARCHITECTURE_DESIGN" -> any(selected, f -> basename(f.path()).equals("system-design.md")
+            case "REQUIREMENT" -> hasMarkerOr(selected, req + "/requirement-doc.md", req, config, 0, markers);
+            case "PRODUCT" -> hasMarkerOr(selected, req + "/system-function-list.md", req, config, 0, markers)
+                    & any(selected, f -> (hasMarkerGroup(config,1) || basename(f.path()).matches("SYS-[^/]+\\.md"))
+                    && substantive(f.content()) && markerPath(config,1,f.path(),req), markers);
+            case "ARCHITECTURE_DESIGN" -> any(selected, f -> markerPath(config,0,f.path(),req) && (hasMarkerGroup(config,0) || basename(f.path()).equals("system-design.md"))
                     && substantive(f.content()), markers)
-                    & any(selected, f -> Set.of("task-list.md", "task-list-frontend.md").contains(basename(f.path()))
+                    & any(selected, f -> markerPath(config,1,f.path(),req) && (hasMarkerGroup(config,1) || Set.of("task-list.md", "task-list-frontend.md").contains(basename(f.path())))
                     && substantive(f.content()), markers)
-                    & any(selected, f -> f.path().contains("/taskList/") && basename(f.path()).matches("req-[^/]+\\.md")
+                    & any(selected, f -> markerPath(config,2,f.path(),req) && (hasMarkerGroup(config,2) || f.path().contains("/taskList/") && basename(f.path()).matches("req-[^/]+\\.md"))
                     && substantive(f.content()), markers);
-            case "UI_DESIGN" -> has(selected, req + "/prototypes/modification-summary.md", markers);
-            case "FRONTEND_CODING" -> tasksReady(selected, true, markers);
-            case "BACKEND_CODING" -> tasksReady(selected, false, markers);
-            case "TESTING" -> testPair(selected, requirementName, markers);
+            case "UI_DESIGN" -> hasMarkerOr(selected, req + "/prototypes/modification-summary.md", req, config, 0, markers);
+            case "FRONTEND_CODING" -> tasksReady(selected, true, markers, config, req);
+            case "BACKEND_CODING" -> tasksReady(selected, false, markers, config, req);
+            case "TESTING" -> testPair(selected, requirementName, markers, config, req);
             default -> false;
         };
         return new Evaluation(ready, ready ? "READY" : "ASDM_MARKER_NOT_READY", List.copyOf(markers), List.copyOf(relevant));
     }
 
-    private ClassifiedFile classify(String stage, String req, String name, InputFile file, boolean includeLikely) {
+    private ClassifiedFile classify(String stage, String req, String name, InputFile file, boolean includeLikely, StageRuleConfig config) {
         String path = file.path();
         if (path == null || !path.startsWith("workspace/") || path.length() > 1600 || path.contains("..")
                 || path.contains("\\") || path.chars().anyMatch(Character::isISOControl)) return null;
         String lower = path.toLowerCase(Locale.ROOT);
         if (lower.endsWith(".gitignore") || basename(lower).startsWith("readme")
                 || basename(lower).startsWith(".") || Set.of("features-list.md", "completion_report.md").contains(basename(lower))) return null;
-        for (String segment : lower.split("/")) if (EXCLUDED_SEGMENTS.contains(segment)) return null;
-        if (!stagePattern(stage, lower, req.toLowerCase(Locale.ROOT))) return null;
+        if (wrongCodingStage(stage, lower) || codingTaskOutsideCodingStage(stage, lower)) return null;
+        for (String segment : lower.split("/")) if ((config==null?EXCLUDED_SEGMENTS:SECURITY_EXCLUDED_SEGMENTS).contains(segment)) return null;
+        if (config != null && config.excludeGlobs().stream().anyMatch(g -> globMatches(g, path, req, config.relativeBase()))) return null;
+        if (config == null ? !stagePattern(stage, lower, req.toLowerCase(Locale.ROOT))
+                : config.includeGlobs().stream().noneMatch(g -> globMatches(g, path, req, config.relativeBase()))) return null;
         boolean exact = path.startsWith(req + "/");
         boolean testName = stage.equals("TESTING") && normalizedName(name).length() >= 3
                 && normalizedName(path).contains(normalizedName(name));
@@ -116,6 +146,45 @@ public class CollabAsdmStageRules {
                 delivery, selected);
     }
 
+    private boolean globMatches(String glob, String path, String req, String base) {
+        if (glob == null || glob.isBlank()) return false;
+        String reqDir = req == null || req.isBlank() ? "" : req.substring(req.lastIndexOf('/') + 1);
+        String reqId = reqDir.matches("REQ-[A-Za-z0-9]+(?:[-_].*)?") ? reqDir.replaceFirst("^((?:REQ-[A-Za-z0-9]+)).*$", "$1") : "";
+        String reqName = reqId.isBlank() ? "" : reqDir.substring(reqId.length()).replaceFirst("^[-_]+", "").replaceAll("[^\\p{IsHan}A-Za-z0-9_-]", "");
+        String expanded = glob.replace("${REQ_PATH}", req == null ? "" : req)
+                .replace("${REQ_DIR}", reqDir).replace("${REQ_ID}", reqId).replace("${REQ_NAME}", reqName);
+        if (base != null && !base.isBlank() && !expanded.startsWith("workspace/") && !expanded.startsWith("${REQ_")) expanded = base.replaceAll("/+$", "") + "/" + expanded;
+        StringBuilder regex = new StringBuilder("^");
+        for (int i=0;i<expanded.length();i++) {
+            char c=expanded.charAt(i);
+            if (c=='*') {
+                if (i+1<expanded.length() && expanded.charAt(i+1)=='*') {
+                    if (i+2<expanded.length() && expanded.charAt(i+2)=='/') { regex.append("(?:.*/)?"); i+=2; }
+                    else { regex.append(".*"); i++; }
+                }
+                else regex.append("[^/]*");
+            } else if (c=='?') regex.append("[^/]");
+            else if ("\\.[]{}()+-^$|".indexOf(c)>=0) regex.append('\\').append(c);
+            else regex.append(c);
+        }
+        regex.append('$');
+        try { return path.matches(regex.toString()); } catch (PatternSyntaxException ex) { return false; }
+    }
+
+    private boolean wrongCodingStage(String stage, String path) {
+        boolean frontend = path.contains("/frontend/") || path.contains("/web/")
+                || basename(path).startsWith("frontend-") || basename(path).startsWith("web-");
+        boolean backend = path.contains("/backend/") || basename(path).startsWith("backend-");
+        return "FRONTEND_CODING".equals(stage) && !frontend
+                || "BACKEND_CODING".equals(stage) && frontend && !backend;
+    }
+
+    private boolean codingTaskOutsideCodingStage(String stage, String path) {
+        return "ARCHITECTURE_DESIGN".equals(stage)
+                && (path.contains("/frontend/") || path.contains("/backend/") || path.contains("/web/"))
+                && (basename(path).equals("task-list.md") || basename(path).equals("task-list-frontend.md"));
+    }
+
     private boolean stagePattern(String stage, String path, String req) {
         String base = basename(path);
         return switch (stage) {
@@ -137,9 +206,11 @@ public class CollabAsdmStageRules {
         };
     }
 
-    private boolean tasksReady(List<ClassifiedFile> files, boolean frontend, List<String> markers) {
-        List<ClassifiedFile> lists = files.stream().filter(f -> f.selected() && basename(f.path()).equals("task-list.md")
-                && (frontend ? f.path().contains("frontend") || f.path().contains("web") : !f.path().contains("frontend") && !f.path().contains("web"))).toList();
+    private boolean tasksReady(List<ClassifiedFile> files, boolean frontend, List<String> markers, StageRuleConfig config, String req) {
+        List<ClassifiedFile> lists = files.stream().filter(f -> f.selected()
+                && (hasMarkerGroup(config,0) || basename(f.path()).equals("task-list.md"))
+                && markerPath(config,0,f.path(),req)
+                && (hasMarkerGroup(config,0) || (frontend ? f.path().contains("frontend") || f.path().contains("web") : !f.path().contains("frontend") && !f.path().contains("web")))).toList();
         if (lists.isEmpty()) return false;
         Map<String, String> statuses = new HashMap<>();
         for (ClassifiedFile list : lists) {
@@ -152,7 +223,7 @@ public class CollabAsdmStageRules {
         if (frontend) return true;
         Set<String> successful = new HashSet<>();
         for (ClassifiedFile file : files) {
-            if (!file.selected() || !file.path().endsWith("-execution-log.md") || file.content() == null) continue;
+            if (!file.selected() || (!hasMarkerGroup(config,1) && !file.path().endsWith("-execution-log.md")) || !markerPath(config,1,file.path(),req) || file.content() == null) continue;
             String text = file.content().toUpperCase(Locale.ROOT);
             if (text.matches("(?s).*\\b(ERROR|BLOCKED|FAILED|失败|阻塞)\\b.*")
                     || !text.matches("(?s).*\\b(DONE|SUCCESS|COMPLETED|成功)\\b.*")) continue;
@@ -175,15 +246,15 @@ public class CollabAsdmStageRules {
         return Map.copyOf(states);
     }
 
-    private boolean testPair(List<ClassifiedFile> files, String name, List<String> markers) {
+    private boolean testPair(List<ClassifiedFile> files, String name, List<String> markers, StageRuleConfig config, String req) {
         String normalized = normalizedName(name);
         if (normalized.length() < 3) return false;
         for (ClassifiedFile file : files) {
-            if (!file.selected() || !file.path().endsWith("-测试用例.xlsx")) continue;
+            if (!file.selected() || (!hasMarkerGroup(config,0) && !file.path().endsWith("-测试用例.xlsx")) || !markerPath(config,0,file.path(),req)) continue;
             String dir = file.path().substring(0, file.path().lastIndexOf('/') + 1);
             if (!normalizedName(dir).contains(normalized)) continue;
             for (ClassifiedFile review : files) if (review.selected() && review.path().startsWith(dir)
-                    && review.path().endsWith("-测试用例评审报告.md") && substantive(review.content())) {
+                    && (hasMarkerGroup(config,1) || review.path().endsWith("-测试用例评审报告.md")) && substantive(review.content()) && markerPath(config,1,review.path(),req)) {
                 markers.add(file.path()); markers.add(review.path()); return true;
             }
         }
@@ -193,6 +264,15 @@ public class CollabAsdmStageRules {
     private boolean has(List<ClassifiedFile> files, String path, List<String> markers) {
         return any(files, f -> f.path().equals(path) && substantive(f.content()), markers);
     }
+    private boolean hasMarkerOr(List<ClassifiedFile> files, String fallback, String req, StageRuleConfig config, int group, List<String> markers) {
+        return any(files, f -> markerPath(config,group,f.path(),req) && (config != null && group < config.markerGroups().size() || f.path().equals(fallback)) && substantive(f.content()), markers);
+    }
+    boolean markerPath(StageRuleConfig config, int group, String path, String req) {
+        if (config == null || config.markerGroups().isEmpty()) return true;
+        if (group >= config.markerGroups().size()) return false;
+        return config.markerGroups().get(group).stream().anyMatch(glob -> globMatches(glob,path,req,config.relativeBase()));
+    }
+    private boolean hasMarkerGroup(StageRuleConfig config,int group) { return config != null && group < config.markerGroups().size() && !config.markerGroups().get(group).isEmpty(); }
     private boolean any(List<ClassifiedFile> files, java.util.function.Predicate<ClassifiedFile> match, List<String> markers) {
         return files.stream().filter(match).findFirst().map(f -> { markers.add(f.path()); return true; }).orElse(false);
     }

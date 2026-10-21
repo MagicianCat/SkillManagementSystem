@@ -41,7 +41,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class CollabAsdmMultiStageDetectionService {
     private static final Set<String> ACTIVE = Set.of("IN_PROGRESS", "REWORK");
-    private static final Set<String> TERMINAL = Set.of("CLAIMED", "CLOSED_BY_SKILL", "INVALIDATED", "SUPERSEDED");
+    private static final Set<String> TERMINAL = Set.of("CLAIMED", "CLOSED_BY_SKILL", "SUPERSEDED");
     private static final Set<String> READABLE_SUFFIXES = Set.of(".md", ".xlsx", ".sql", ".txt", ".json", ".html", ".png", ".jpg", ".jpeg", ".svg", ".csv", ".py");
     private static final Pattern URL_PATTERN = Pattern.compile("https?://[^\\s)\\]}>\\\"']+", Pattern.CASE_INSENSITIVE);
 
@@ -50,6 +50,7 @@ public class CollabAsdmMultiStageDetectionService {
     private final CollabAsdmConfigurationService configuration;
     private final CollabAsdmGitlabClient gitlab;
     private final CollabAsdmStageRules rules;
+    private final CollabAsdmRuleService ruleService;
     private final CollabAsdmCandidateFileRepository candidateFiles;
     private final CollabProjectAuthorizationService authorization;
     private final CollabFeishuOutbox outbox;
@@ -57,13 +58,14 @@ public class CollabAsdmMultiStageDetectionService {
 
     public CollabAsdmMultiStageDetectionService(JdbcTemplate jdbc, CollabAsdmProperties properties,
             CollabAsdmConfigurationService configuration, CollabAsdmGitlabClient gitlab,
-            CollabAsdmStageRules rules, CollabAsdmCandidateFileRepository candidateFiles,
+            CollabAsdmStageRules rules, CollabAsdmRuleService ruleService, CollabAsdmCandidateFileRepository candidateFiles,
             CollabProjectAuthorizationService authorization, CollabFeishuOutbox outbox, ObjectMapper mapper) {
         this.jdbc = jdbc;
         this.properties = properties;
         this.configuration = configuration;
         this.gitlab = gitlab;
         this.rules = rules;
+        this.ruleService = ruleService;
         this.candidateFiles = candidateFiles;
         this.authorization = authorization;
         this.outbox = outbox;
@@ -71,29 +73,41 @@ public class CollabAsdmMultiStageDetectionService {
     }
 
     public void scanRequirement(long requirementId) {
+        scanRequirement(requirementId, null, null, null);
+    }
+
+    /** Reuses the immutable HEAD/tree fetched by an explicit multi-stage sync. */
+    public void scanRequirementAtHead(long requirementId, String head, List<TreeEntry> tree, Map<String, FileContent> rawByPath) {
+        scanRequirement(requirementId, head, tree, rawByPath);
+    }
+
+    private void scanRequirement(long requirementId, String suppliedHead, List<TreeEntry> suppliedTree,
+            Map<String, FileContent> suppliedRaw) {
         if (!properties.multiStageEnabled()) return;
         Requirement req = requirement(requirementId);
         if (req == null || req.branch() == null || req.path() == null || !"ACTIVE".equals(req.projectStatus())
                 || !"PUBLISHED".equals(req.groupStatus())) return;
         CollabAsdmConfigurationService.RepositoryAccess access = configuration.requireAccess(req.groupId());
         try {
-            String head = gitlab.getBranch(access.projectId(), req.branch(), access.token(), access.repositoryBase()).headSha();
-            List<TreeEntry> tree = gitlab.listTreeRecursive(access.projectId(), head, "workspace", access.token(),
-                    properties.maxDiscoveryEntries(), access.repositoryBase());
+            Map<String, CollabAsdmStageRules.StageRuleConfig> stageRules = ruleService.effectiveForRequirement(requirementId, false).rules();
+            String head = suppliedHead == null ? gitlab.getBranch(access.projectId(), req.branch(), access.token(), access.repositoryBase()).headSha() : suppliedHead;
+            List<TreeEntry> tree = suppliedTree == null ? gitlab.listTreeRecursive(access.projectId(), head, "workspace", access.token(),
+                    properties.maxDiscoveryEntries(), access.repositoryBase()) : suppliedTree;
             Map<String, String> baseline = req.baselineHead() == null ? Map.of() : treeMap(gitlab.listTreeRecursive(
                     access.projectId(), req.baselineHead(), "workspace", access.token(), properties.maxDiscoveryEntries(), access.repositoryBase()));
             List<Stage> active = jdbc.query("select id,stage_key,status,attempt_no,actors_frozen_at from collab_stage where project_id=? and status in ('IN_PROGRESS','REWORK') and actors_frozen_at is not null order by stage_order",
                     (rs,n)->stage(rs), requirementId);
             Map<String,Long> matchCounts=new LinkedHashMap<>();
-            for(Stage stage:active)if(rules.enabled(stage.key()))matchCounts.put(stage.key(),tree.stream().filter(e->"blob".equals(e.type())&&readable(e.path())&&rules.mayMatchStagePath(stage.key(),req.path(),e.path())).count());
+            for(Stage stage:active)if(stageRules.containsKey(stage.key())&&stageRules.get(stage.key()).enabled())matchCounts.put(stage.key(),tree.stream().filter(e->"blob".equals(e.type())&&readable(e.path())&&rules.mayMatchStagePath(stage.key(),req.path(),e.path(),stageRules.get(stage.key()))).count());
             Set<String> overLimit=matchCounts.entrySet().stream().filter(e->e.getValue()>properties.maxCandidateFiles()).map(Map.Entry::getKey).collect(java.util.stream.Collectors.toSet());
             List<TreeEntry> relevant = tree.stream().filter(e -> "blob".equals(e.type()) && readable(e.path())
-                    && active.stream().anyMatch(s->!overLimit.contains(s.key())&&rules.mayMatchStagePath(s.key(),req.path(),e.path()))).toList();
+                    && active.stream().anyMatch(s->!overLimit.contains(s.key())&&rules.mayMatchStagePath(s.key(),req.path(),e.path(),stageRules.get(s.key())))).toList();
             List<CollabAsdmStageRules.InputFile> files = new ArrayList<>(relevant.size());
-            Map<String, FileContent> rawByPath = new LinkedHashMap<>();
+            Map<String, FileContent> rawByPath = suppliedRaw == null ? new LinkedHashMap<>() : new LinkedHashMap<>(suppliedRaw);
             for (TreeEntry entry : relevant) {
                 try {
-                    FileContent raw = gitlab.getFileBytes(access.projectId(), entry.path(), head, access.token(), access.repositoryBase(), properties.maxFileBytes());
+                    FileContent raw = rawByPath.get(entry.path());
+                    if (raw == null) raw = gitlab.getFileBytes(access.projectId(), entry.path(), head, access.token(), access.repositoryBase(), properties.maxFileBytes());
                     rawByPath.put(entry.path(), raw);
                     String text = entry.path().toLowerCase(Locale.ROOT).endsWith(".md") ? decodeUtf8(raw.content()) : null;
                     files.add(new CollabAsdmStageRules.InputFile(entry.path(), raw.blobSha(), raw.size(), text,
@@ -106,15 +120,15 @@ public class CollabAsdmMultiStageDetectionService {
                 }
             }
             for (Stage stage : active) {
-                if (!rules.enabled(stage.key()) || !hasActiveOwner(req.groupId(), stage.id())) continue;
+                if (!stageRules.containsKey(stage.key()) || !stageRules.get(stage.key()).enabled() || !hasActiveOwner(req.groupId(), stage.id())) continue;
                 Integer legacy=jdbc.queryForObject("select count(*) from collab_asdm_candidate where stage_id=? and attempt_no=? and stage_key is null",Integer.class,stage.id(),stage.attempt());
                 if(legacy!=null&&legacy>0)continue;
                 if (submissionClaimed(stage.id(), stage.attempt())) { closeBySubmission(stage); continue; }
                 if(overLimit.contains(stage.key())){markStageScanError(stage,"ASDM_CANDIDATE_LIMIT_EXCEEDED");continue;}
                 Map<String,String> overrides=associationOverrides(requirementId, stage.key());
-                CollabAsdmStageRules.Evaluation trigger = rules.evaluate(stage.key(), req.path(), req.name(), files, properties.matchLikelyAutoinclude());
+                CollabAsdmStageRules.Evaluation trigger = rules.evaluate(stage.key(), req.path(), req.name(), files, properties.matchLikelyAutoinclude(), Map.of(), stageRules.get(stage.key()));
                 CollabAsdmStageRules.Evaluation evaluated = rules.evaluate(stage.key(), req.path(), req.name(), files,
-                        properties.matchLikelyAutoinclude(), overrides);
+                        properties.matchLikelyAutoinclude(), overrides, stageRules.get(stage.key()));
                 persistCandidate(req, access, stage, head, trigger, evaluated, rawByPath);
             }
             jdbc.update("update collab_project set asdm_last_scanned_head_sha=?,asdm_last_scan_at=now(3),time_updated=now(3) where id=?", head, requirementId);
@@ -167,7 +181,7 @@ public class CollabAsdmMultiStageDetectionService {
                     req.id(), stage.id(), stage.attempt(), markerPath, head, marker.blobSha(), markerSha, markerMarkdown, now, revision, now, now,
                     now.plus(properties.debounce()), 0, now, stage.key(), manifestHash, markerEvidenceJson, uncertain, external);
         } else {
-            jdbc.update("update collab_asdm_candidate set source_path=?,source_commit_sha=?,source_blob_sha=?,content_sha256=?,markdown_snapshot=?,snapshot_cached_at=?,detected_revision=?,status='DEBOUNCING',last_changed_at=?,notify_after=?,notified_revision=NULL,notified_at=NULL,confirmed_by=NULL,confirmed_at=NULL,submission_id=NULL,last_error_code=NULL,version_no=version_no+1,time_updated=?,stage_key=?,manifest_hash=?,marker_evidence_json=?,uncertain_count=?,external_ref_count=?,scan_scope_version=1 where id=? and status not in ('CLAIMED','CLOSED_BY_SKILL','INVALIDATED','SUPERSEDED')",
+            jdbc.update("update collab_asdm_candidate set source_path=?,source_commit_sha=?,source_blob_sha=?,content_sha256=?,markdown_snapshot=?,snapshot_cached_at=?,detected_revision=?,status='DEBOUNCING',last_changed_at=?,notify_after=?,notified_revision=NULL,notified_at=NULL,confirmed_by=NULL,confirmed_at=NULL,submission_id=NULL,last_error_code=NULL,version_no=version_no+1,time_updated=?,stage_key=?,manifest_hash=?,marker_evidence_json=?,uncertain_count=?,external_ref_count=?,scan_scope_version=1 where id=? and status not in ('CLAIMED','CLOSED_BY_SKILL','SUPERSEDED')",
                     markerPath, head, marker.blobSha(), markerSha, markerMarkdown, now, revision, now, now.plus(properties.debounce()), now,
                     stage.key(), manifestHash, markerEvidenceJson, uncertain, external, current.id());
         }
@@ -204,7 +218,9 @@ public class CollabAsdmMultiStageDetectionService {
         Requirement req = requirement(project.projectId());
         List<StageSummary> items = jdbc.query("select s.stage_key,s.status,s.attempt_no,s.started_at,s.completed_at,c.id candidate_id,c.detected_revision,c.status candidate_status,c.source_commit_sha,c.notify_after,c.last_error_code,c.uncertain_count,c.external_ref_count from collab_stage s left join collab_asdm_candidate c on c.stage_id=s.id and c.attempt_no=s.attempt_no where s.project_id=? order by s.stage_order",
                 (rs,n)->new StageSummary(rs.getString("stage_key"),rs.getString("status"),rs.getInt("attempt_no"),rs.getObject("candidate_id")==null?null:rs.getLong("candidate_id"),nullableInt(rs,"detected_revision"),rs.getString("candidate_status"),rs.getString("source_commit_sha"),instant(rs,"notify_after"),rs.getString("last_error_code"),nullableInt(rs,"uncertain_count"),nullableInt(rs,"external_ref_count")),project.projectId());
-        return new StageList(properties.multiStageEnabled(),req.branch(), req.path(), req.lastHead(), CollabAsdmStageRules.VERSION, items);
+        var bound=ruleService.effectiveForRequirement(project.projectId(),false);
+        return new StageList(properties.multiStageEnabled(),req.branch(), req.path(), req.lastHead(),
+                bound.defaultVersion()+"+g"+bound.groupRevision()+"+"+bound.effectiveHash().substring(0,16), items);
     }
 
     public StageDetail stage(String key, String stageKey, long actorId) {

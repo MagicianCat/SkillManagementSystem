@@ -261,7 +261,7 @@ public class CollabFeishuWorker {
     private void approvalReminder(long projectId, long aggregateId, boolean aggregateIsApproval) {
         String chatId = chatId(projectId);
         String aggregatePredicate = aggregateIsApproval ? "a.id=?" : "b.id=?";
-        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,g.name group_name,s.stage_key,a.state,a.version_no,a.id approval_id,b.id submission_id,art.title,pv.url feishu_url,pv.publish_status,v.git_evidence_json FROM collab_submission b "
+        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,g.name group_name,s.title stage_title,s.stage_key,a.state,a.version_no,a.id approval_id,b.id submission_id,art.title,pv.url feishu_url,pv.publish_status,v.git_evidence_json FROM collab_submission b "
                 + "JOIN collab_stage s ON s.id=b.stage_id JOIN collab_project p ON p.id=s.project_id "
                 + "LEFT JOIN collab_group g ON g.id=p.group_id "
                 + "JOIN collab_artifact_version v ON v.id=b.artifact_version_id JOIN collab_artifact art ON art.id=v.artifact_id "
@@ -290,7 +290,12 @@ public class CollabFeishuWorker {
                 log.warn("Could not read Git evidence for approval submission {}", submissionId, ex);
             }
         }
-        elements.add(Map.of("tag", "markdown", "content", requirementHeading(row) + "\n阶段 **" + stageKey + "**\n产物 **" + row.get("title") + "**\n审批人员：\n" + approverLines + "\n[在飞书中查看待审批产物](" + row.get("feishu_url") + ")" + gitLinks));
+        elements.add(CollabFeishuCardLayout.markdown(requirementHeading(row)
+                + "\n\n阶段：**" + row.get("stage_title") + "**\n产物：**" + row.get("title") + "**"));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("**审批人：**\n" + approverLines));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("[在飞书中查看待审批产物](" + row.get("feishu_url") + ")" + gitLinks));
         if (callbacksEnabled) {
             elements.add(Map.of("tag", "button", "type", "primary", "element_id", "collab_approval_approve",
                     "name", "collab_approve|" + submissionId + "|0",
@@ -302,55 +307,32 @@ public class CollabFeishuWorker {
                 "text", Map.of("tag", "plain_text", "content", "查看详情 / 驳回"),
                 "behaviors", List.of(Map.of("type", "open_url", "default_url", reviewUrl,
                         "pc_url", reviewUrl, "ios_url", reviewUrl, "android_url", reviewUrl))));
-        chats.sendInteractive(chatId, Map.of("schema", "2.0", "body", Map.of("elements", elements)),
+        chats.sendInteractive(chatId, CollabFeishuCardLayout.card("待审批 · " + row.get("stage_title"), "orange", elements),
                 "collab-approval-submission-" + submissionId);
     }
 
     private String approvalRosterMarkdown(long submissionId) {
-        List<Map<String, Object>> roles = jdbc.queryForList("SELECT r.requirement_role_id,r.role_name_snapshot,u.display_name,u.feishu_open_id "
+        List<Map<String, Object>> roles = jdbc.queryForList("SELECT r.requirement_role_id,r.role_name_snapshot role_name,u.display_name,u.feishu_open_id "
                 + "FROM collab_submission_reviewer_role r JOIN collab_submission_reviewer_assignment a "
                 + "ON a.submission_id=r.submission_id AND a.requirement_role_id=r.requirement_role_id "
                 + "JOIN collab_approval ap ON ap.id=a.approval_id AND ap.state='PENDING' "
                 + "JOIN iam_user u ON u.id=a.reviewer_user_id WHERE r.submission_id=? "
                 + "ORDER BY r.role_name_snapshot,u.display_name", submissionId);
-        if (!roles.isEmpty()) {
-            Map<Long, String> lines = new java.util.LinkedHashMap<>();
-            Map<Long, StringBuilder> members = new java.util.LinkedHashMap<>();
-            for (Map<String, Object> member : roles) {
-                Long roleId = ((Number) member.get("requirement_role_id")).longValue();
-                lines.putIfAbsent(roleId, String.valueOf(member.get("role_name_snapshot")));
-                String openId = member.get("feishu_open_id") == null ? "" : member.get("feishu_open_id").toString().trim();
-                String mention = openId.isEmpty() ? String.valueOf(member.get("display_name")) : "<at id=" + openId + "></at>";
-                StringBuilder names = members.computeIfAbsent(roleId, ignored -> new StringBuilder());
-                if (!names.isEmpty()) names.append("、");
-                names.append(mention);
-            }
-            List<String> result = new ArrayList<>();
-            lines.forEach((id, name) -> result.add(name + "：" + members.get(id)));
-            return String.join("\n", result);
-        }
+        if (!roles.isEmpty()) return CollabFeishuCardLayout.roster(roles, "指定审批人");
         List<Map<String, Object>> reviewers = jdbc.queryForList("SELECT DISTINCT u.display_name,u.feishu_open_id FROM collab_approval a "
                 + "JOIN iam_user u ON u.id=a.reviewer_user_id WHERE a.submission_id=? AND a.state='PENDING' ORDER BY u.display_name", submissionId);
-        List<String> names = new ArrayList<>();
-        for (Map<String, Object> reviewer : reviewers) {
-            String openId = reviewer.get("feishu_open_id") == null ? "" : reviewer.get("feishu_open_id").toString().trim();
-            names.add(openId.isEmpty() ? String.valueOf(reviewer.get("display_name")) : "<at id=" + openId + "></at>");
-        }
-        return "审批人：" + String.join("、", names);
+        return CollabFeishuCardLayout.roster(reviewers, "指定审批人");
     }
 
     private void stageHandoff(long projectId, long stageId, long outboxId) {
         String chatId = chatId(projectId);
         Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,p.asdm_branch,g.name group_name,s.id stage_id,s.stage_key,s.title stage_title,s.stage_order,s.attempt_no,s.git_required,"
-                + "rr.role_name_snapshot owner_role_name,"
                 + "u.display_name,u.feishu_open_id "
                 + "FROM collab_stage s JOIN collab_project p ON p.id=s.project_id JOIN iam_user u ON u.id=s.owner_user_id "
                 + "LEFT JOIN collab_group g ON g.id=p.group_id "
-                + "LEFT JOIN collab_requirement_stage_role sr ON sr.stage_id=s.id AND sr.duty='OWNER' "
-                + "LEFT JOIN collab_requirement_role rr ON rr.id=sr.requirement_role_id "
                 + "WHERE s.id=? AND p.id=?", stageId, projectId);
         boolean newRequirement = row.get("inherited_template_version") != null;
-        String ownerMentions = actorMentions(stageId, "OWNER", newRequirement);
+        String ownerMentions = CollabFeishuCardLayout.owners(jdbc, stageId, newRequirement);
         if (ownerMentions.isBlank()) throw new IllegalStateException("Next stage has no active owner");
 
         String projectKey = String.valueOf(row.get("project_key"));
@@ -361,35 +343,41 @@ public class CollabFeishuWorker {
         String stageUrl = stageUrl(projectKey, stageKey, newRequirement);
         String submitPrompt = CollabStagePromptFactory.submit(projectKey, stageTitle, stageId, attemptNo,
                 Boolean.TRUE.equals(row.get("git_required")));
-        String reviewerMentions = actorMentions(stageId, "REVIEWER", newRequirement);
-        String reviewerLine = reviewerMentions.isBlank() ? "" : "\n审批人：" + reviewerMentions;
-
+        boolean asdmEnabled = newRequirement && row.get("asdm_branch") != null
+                && !row.get("asdm_branch").toString().isBlank();
         List<Object> elements = new ArrayList<>();
-        String roleLine = newRequirement && row.get("owner_role_name") != null
-                ? "\n负责角色：**" + row.get("owner_role_name") + "**" : "";
-        elements.add(Map.of("tag", "markdown", "content", requirementHeading(row) + "\n"
-                + "阶段 **" + stageTitle + "** 已就绪（第 " + stageOrder + " 阶段）。"
-                + roleLine + "\n负责人：" + ownerMentions + reviewerLine));
-        if(newRequirement && row.get("asdm_branch")!=null && !"ACCEPTANCE".equals(stageKey))
-            elements.add(Map.of("tag","markdown","content","ASDM 正在监测专用分支 `"+row.get("asdm_branch")+"` 的本阶段产物。满足标志并达到配置的静默期后会发送发布确认卡；你也可以继续使用下方 Skill 提交。"));
-        if (stageOrder > 1) {
-            String contextPrompt = CollabStagePromptFactory.context(projectKey, stageTitle);
-            elements.add(Map.of("tag", "markdown", "content",
-                    promptMarkdown("获取前序阶段产物提示词", contextPrompt)));
-            if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "CONTEXT"));
+        elements.add(CollabFeishuCardLayout.markdown(requirementHeading(row)
+                + "\n\n阶段：**" + stageTitle + "** · 第 " + stageOrder + " 阶段 · 第 " + attemptNo + " 轮"));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("**负责人：**\n" + ownerMentions));
+        elements.add(Map.of("tag", "hr"));
+        if (asdmEnabled) {
+            String instruction = "ACCEPTANCE".equals(stageKey)
+                    ? "请在阶段页面查看验收要求并提交验收交付物。"
+                    : "ASDM 正在监测专用分支 `" + row.get("asdm_branch")
+                        + "`。产物满足配置的标志物及静默期后，将发送发布确认卡，请负责人确认发布。";
+            elements.add(CollabFeishuCardLayout.markdown(instruction));
         }
-        elements.add(Map.of("tag", "markdown", "content",
-                promptMarkdown("阶段完成后推送提示词", submitPrompt)
-                        + "\n请先把 {local file} 占位符替换为产物在本机上的实际文件路径。"));
-        if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "SUBMIT"));
+        if (!asdmEnabled) {
+            if (stageOrder > 1) {
+                String contextPrompt = CollabStagePromptFactory.context(projectKey, stageTitle);
+                elements.add(Map.of("tag", "markdown", "content",
+                        promptMarkdown("获取前序阶段产物提示词", contextPrompt)));
+                if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "CONTEXT"));
+            }
+            elements.add(Map.of("tag", "markdown", "content",
+                    promptMarkdown("阶段完成后推送提示词", submitPrompt)
+                            + "\n请先把 {local file} 占位符替换为产物在本机上的实际文件路径。"));
+            if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "SUBMIT"));
+        }
         elements.add(Map.of("tag", "markdown", "content", "[打开阶段页面](" + stageUrl + ")"));
-        chats.sendInteractive(chatId, Map.of("schema", "2.0", "body", Map.of("elements", elements)),
+        chats.sendInteractive(chatId, CollabFeishuCardLayout.card("阶段已开启 · " + stageTitle, "blue", elements),
                 "collab-stage-handoff-" + outboxId);
     }
 
     private void stageRework(long projectId, long stageId, long outboxId) {
         String chatId = chatId(projectId);
-        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,g.name group_name,s.stage_key,s.title stage_title,s.stage_order,s.attempt_no,s.git_required,"
+        Map<String, Object> row = jdbc.queryForMap("SELECT p.name,p.project_key,p.inherited_template_version,p.asdm_branch,g.name group_name,s.stage_key,s.title stage_title,s.stage_order,s.attempt_no,s.git_required,"
                 + "sub.id submission_id,(SELECT rejected.decision_comment FROM collab_approval rejected WHERE rejected.submission_id=sub.id "
                 + "AND rejected.state='REJECTED' ORDER BY rejected.id DESC LIMIT 1) decision_comment,a.title artifact_title,pv.url artifact_url "
                 + "FROM collab_stage s JOIN collab_project p ON p.id=s.project_id JOIN iam_user u ON u.id=s.owner_user_id "
@@ -399,7 +387,7 @@ public class CollabFeishuWorker {
                 + "JOIN collab_artifact a ON a.id=v.artifact_id LEFT JOIN collab_feishu_publication pv ON pv.artifact_version_id=v.id "
                 + "WHERE s.id=? AND p.id=? AND s.status='REWORK' AND sub.status='REJECTED'", stageId, projectId);
         boolean newRequirement = row.get("inherited_template_version") != null;
-        String ownerMentions = actorMentions(stageId, "OWNER", newRequirement);
+        String ownerMentions = CollabFeishuCardLayout.owners(jdbc, stageId, newRequirement);
         if (ownerMentions.isBlank()) throw new IllegalStateException("Stage has no active owner");
 
         String projectKey = String.valueOf(row.get("project_key"));
@@ -411,16 +399,27 @@ public class CollabFeishuWorker {
                 Boolean.TRUE.equals(row.get("git_required")));
         String comment = row.get("decision_comment") == null ? "（未填写）" : String.valueOf(row.get("decision_comment"));
         List<Object> elements = new ArrayList<>();
-        elements.add(Map.of("tag", "markdown", "content", requirementHeading(row) + " 的 **" + stageTitle
-                + "** 阶段已驳回，请 " + ownerMentions + " 修改后重新提交（第 " + attemptNo + " 轮）。"));
-        elements.add(Map.of("tag", "markdown", "content", "**驳回意见：**\n" + comment));
+        elements.add(CollabFeishuCardLayout.markdown(requirementHeading(row)
+                + "\n\n阶段：**" + stageTitle + "** · 请修改后重新提交（第 " + attemptNo + " 轮）"));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("**负责人：**\n" + ownerMentions));
+        elements.add(Map.of("tag", "hr"));
+        elements.add(CollabFeishuCardLayout.markdown("**驳回意见：**\n" + CollabFeishuCardLayout.escape(comment)));
         if (row.get("artifact_url") != null)
             elements.add(Map.of("tag", "markdown", "content", "[查看被驳回的产物](" + row.get("artifact_url") + ")"));
-        elements.add(Map.of("tag", "markdown", "content", promptMarkdown("阶段完成后推送提示词", prompt)
-                + "\n请先把 {local file} 占位符替换为产物在本机上的实际文件路径。"));
-        if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "SUBMIT"));
+        boolean asdmEnabled = newRequirement && row.get("asdm_branch") != null
+                && !row.get("asdm_branch").toString().isBlank();
+        if (!asdmEnabled) {
+            elements.add(Map.of("tag", "markdown", "content", promptMarkdown("阶段完成后推送提示词", prompt)
+                    + "\n请先把 {local file} 占位符替换为产物在本机上的实际文件路径。"));
+            if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "SUBMIT"));
+        } else {
+            elements.add(CollabFeishuCardLayout.markdown("ACCEPTANCE".equals(stageKey)
+                    ? "请在阶段页面查看验收要求并重新提交验收交付物。"
+                    : "请更新 ASDM 专用分支中的阶段产物，满足检测规则后将重新发送发布确认卡。"));
+        }
         elements.add(Map.of("tag", "markdown", "content", "[打开阶段页面](" + stageUrl + ")"));
-        chats.sendInteractive(chatId, Map.of("schema", "2.0", "body", Map.of("elements", elements)),
+        chats.sendInteractive(chatId, CollabFeishuCardLayout.card("阶段需重做 · " + stageTitle, "orange", elements),
                 "collab-stage-rework-" + outboxId);
     }
 
@@ -446,30 +445,6 @@ public class CollabFeishuWorker {
     private String stageUrl(String requirementKey, String stageKey, boolean newRequirement) {
         return webBaseUrl + (newRequirement ? "/collab-requirements/" : "/collab-projects/")
                 + requirementKey + "/stages/" + stageKey;
-    }
-
-    private String actorMentions(long stageId, String duty, boolean newRequirement) {
-        List<Map<String, Object>> actors;
-        if (newRequirement) {
-            actors = jdbc.queryForList("SELECT DISTINCT u.display_name,u.feishu_open_id FROM collab_requirement_stage_actor a "
-                    + "JOIN collab_stage s ON s.id=a.stage_id JOIN collab_project p ON p.id=s.project_id "
-                    + "JOIN collab_group_member gm ON gm.group_id=p.group_id AND gm.user_id=a.user_id AND gm.status='ACTIVE' "
-                    + "JOIN iam_user u ON u.id=a.user_id AND u.status='ACTIVE' "
-                    + "WHERE a.stage_id=? AND a.duty=? ORDER BY u.display_name", stageId, duty);
-        } else if ("OWNER".equals(duty)) {
-            actors = jdbc.queryForList("SELECT u.display_name,u.feishu_open_id FROM collab_stage s "
-                    + "JOIN iam_user u ON u.id=s.owner_user_id WHERE s.id=?", stageId);
-        } else {
-            actors = jdbc.queryForList("SELECT DISTINCT u.display_name,u.feishu_open_id FROM iam_user u JOIN ("
-                    + "SELECT reviewer_user_id FROM collab_stage WHERE id=? AND reviewer_user_id IS NOT NULL UNION "
-                    + "SELECT reviewer_user_id FROM collab_stage_additional_reviewer WHERE stage_id=?) r "
-                    + "ON r.reviewer_user_id=u.id ORDER BY u.display_name", stageId, stageId);
-        }
-        return actors.stream().map(actor -> {
-            Object id = actor.get("feishu_open_id");
-            return id == null || id.toString().isBlank()
-                    ? String.valueOf(actor.get("display_name")) : "<at id=" + id + "></at>";
-        }).collect(java.util.stream.Collectors.joining("、"));
     }
 
     private void publish(long projectId, long artifactVersionId) {
