@@ -114,6 +114,13 @@ public class NotificationService {
     }
 
     @Transactional
+    public void wikiIndexFailed(Long documentId) {
+        save(userRoles.findActiveSuperAdmins(), NotificationType.WIKI_INDEX_FAILED,
+                "Wiki 知识库更新失败", "Wiki 文档 ID " + documentId + " 索引更新已重试 10 次仍失败，请检查知识库服务并手动修复。",
+                "WIKI_DOCUMENT", documentId, null);
+    }
+
+    @Transactional
     public void feishuDocumentPublication(Long actorId, NotificationType type, String title, String content, Long taskId, String targetData) {
         users.findById(actorId).ifPresent(user -> notifications.save(new UserNotificationEntity(user, type, title, content, "FEISHU_DOCUMENT_PUBLICATION", taskId, null).withTargetData(targetData)));
     }

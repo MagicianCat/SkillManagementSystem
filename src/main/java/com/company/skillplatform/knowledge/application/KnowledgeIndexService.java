@@ -20,7 +20,7 @@ public class KnowledgeIndexService {
     public KnowledgeIndexService(WikiDocumentRepository documents,WikiDocumentSkillRepository links,MarkdownHeadingChunker chunker,
             EmbeddingPort embedding,VectorStorePort vectors,KnowledgeProperties properties,MeterRegistry metrics){this.documents=documents;this.links=links;this.chunker=chunker;this.embedding=embedding;this.vectors=vectors;this.properties=properties;this.metrics=metrics;}
     @Transactional(readOnly=true)
-    public void reindex(long documentId){
+    public synchronized void reindex(long documentId){
         if(!properties.isEnabled())return;long started=System.nanoTime();
         try{WikiDocumentEntity document=documents.findById(documentId).orElse(null);if(document==null||!"ACTIVE".equals(document.getStatus())||document.getCurrentRevision()==null){vectors.deleteDocument(documentId);return;}
             var skillLinks=links.findByDocumentIdOrderBySortOrderAsc(documentId);List<String> keys=skillLinks.stream().map(link->link.getSkill().getSkillKey()).distinct().toList();List<String> stages=skillLinks.stream().map(link->link.getSkill().getDevelopmentStage()).filter(java.util.Objects::nonNull).map(Enum::name).distinct().toList();var revision=document.getCurrentRevision();
@@ -31,6 +31,6 @@ public class KnowledgeIndexService {
         }catch(RuntimeException failure){metrics.counter("knowledge.index.failure").increment();log.warn("event=knowledge.index.failed documentId={} errorType={} durationMs={}",documentId,failure.getClass().getSimpleName(),elapsed(started));throw failure;}
         finally{metrics.timer("knowledge.index.duration").record(java.time.Duration.ofNanos(System.nanoTime()-started));}
     }
-    public void delete(long documentId){if(properties.isEnabled())vectors.deleteDocument(documentId);}
+    public synchronized void delete(long documentId){if(properties.isEnabled())vectors.deleteDocument(documentId);}
     private long elapsed(long started){return (System.nanoTime()-started)/1_000_000;}
 }

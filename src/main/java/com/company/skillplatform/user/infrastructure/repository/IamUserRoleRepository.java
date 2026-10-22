@@ -19,4 +19,9 @@ public interface IamUserRoleRepository extends JpaRepository<IamUserRoleEntity, 
             "where rp.permission.permissionKey = :permissionKey and ur.role.status = com.company.skillplatform.user.domain.RoleStatus.ACTIVE " +
             "and ur.user.status = com.company.skillplatform.user.domain.UserStatus.ACTIVE")
     List<IamUserEntity> findActiveUsersByPermission(String permissionKey);
+
+    @Query("select distinct ur.user from IamUserRoleEntity ur where ur.role.roleKey = 'ADMIN' " +
+            "and ur.role.status = com.company.skillplatform.user.domain.RoleStatus.ACTIVE " +
+            "and ur.user.status = com.company.skillplatform.user.domain.UserStatus.ACTIVE")
+    List<IamUserEntity> findActiveSuperAdmins();
 }

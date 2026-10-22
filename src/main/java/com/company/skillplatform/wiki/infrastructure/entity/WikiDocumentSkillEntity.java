@@ -17,6 +17,7 @@ public class WikiDocumentSkillEntity {
         this.document = document; this.skill = skill; this.relationType = relationType; this.sortOrder = sortOrder; this.id = new Id(document.getId(), skill.getId());
     }
     public WikiDocumentEntity getDocument() { return document; } public SkillEntity getSkill() { return skill; }
+    public void setSortOrder(int value) { this.sortOrder = value; }
     @Embeddable public static class Id implements java.io.Serializable {
         private Long documentId; private Long skillId;
         protected Id() {} public Id(Long d, Long s) { documentId=d; skillId=s; }

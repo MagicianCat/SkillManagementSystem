@@ -16,4 +16,5 @@ public enum NotificationType {
     ,CODE_GRAPH_READY
     ,CODE_GRAPH_FAILED
     ,CODE_GRAPH_UPDATED
+    ,WIKI_INDEX_FAILED
 }
