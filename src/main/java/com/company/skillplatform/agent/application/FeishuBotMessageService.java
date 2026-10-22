@@ -16,7 +16,6 @@ import com.lark.oapi.event.cardcallback.model.*;
 import java.time.*;
 import java.util.*;
 import java.util.regex.Pattern;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,7 +40,6 @@ public class FeishuBotMessageService {
     private final FeishuBotClient bot;
     private final FeishuAuthService auth;
     private final FeishuProperties feishu;
-    private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final boolean enabled;
     private final String webBaseUrl;
@@ -50,13 +48,13 @@ public class FeishuBotMessageService {
     public FeishuBotMessageService(FeishuBotMessageRepository messages, FeishuBotBindingRepository bindings,
             AgentSessionRepository sessions, AgentRunRepository runs, AgentMessageRepository agentMessages,
             IamUserRepository users, IamRolePermissionRepository permissions, AgentConversationService conversation,
-            FeishuBotClient bot, FeishuAuthService auth, FeishuProperties feishu, ObjectMapper json, JdbcTemplate jdbc,
+            FeishuBotClient bot, FeishuAuthService auth, FeishuProperties feishu, ObjectMapper json,
             @Value("${skill-platform.feishu.bot-enabled:false}") boolean enabled,
             @Value("${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
             @Value("${skill-platform.feishu.bot-max-retries:3}") int maxRetries) {
         this.messages=messages; this.bindings=bindings; this.sessions=sessions; this.runs=runs; this.agentMessages=agentMessages;
         this.users=users; this.permissions=permissions; this.conversation=conversation; this.bot=bot; this.auth=auth; this.feishu=feishu;
-        this.json=json; this.jdbc=jdbc; this.enabled=enabled; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.maxRetries=maxRetries;
+        this.json=json; this.enabled=enabled; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.maxRetries=maxRetries;
     }
 
     @Transactional
@@ -64,14 +62,14 @@ public class FeishuBotMessageService {
         if (!enabled || event == null || event.getEvent() == null || event.getEvent().getMessage() == null) return;
         EventMessage message = event.getEvent().getMessage();
         if (!"text".equalsIgnoreCase(message.getMessageType()) || blank(message.getMessageId())) return;
-        if (messages.findByMessageId(message.getMessageId()).isPresent()) return;
         String chatType = text(message.getChatType(), "p2p").toLowerCase(Locale.ROOT);
         String chatId = text(message.getChatId(), "");
         if (chatId.isBlank()) return;
-        if (isManagedCollabChat(chatType, chatId)) {
-            log.info("event=feishu.bot.message.ignored reason=collab_managed_chat chatType={}", chatType);
+        if (!"p2p".equals(chatType)) {
+            log.info("event=feishu.bot.message.ignored reason=group_chat chatType={}", chatType);
             return;
         }
+        if (messages.findByMessageId(message.getMessageId()).isPresent()) return;
         String content = textContent(message.getContent());
         if (content.isBlank()) return;
         String threadKey = threadKey(message, chatType);
@@ -130,6 +128,7 @@ public class FeishuBotMessageService {
     public void processInbound(Long id) {
         FeishuBotMessageEntity message = messages.findById(id).orElse(null);
         if (message == null || !"RECEIVED".equals(message.getStatus())) return;
+        if (!"p2p".equalsIgnoreCase(message.getChatType())) { ignoreGroupMessage(message); return; }
         IamUserEntity user = message.getOwnerUserId() == null ? null : users.findById(message.getOwnerUserId()).orElse(null);
         if (user == null || user.getStatus() != UserStatus.ACTIVE || !permissions.findPermissionKeysByUserId(user.getId()).contains("skill:browse")) {
             replyText(message, "当前飞书账号尚未加入平台或没有使用研途助手的权限，请联系管理员。", false);
@@ -161,6 +160,7 @@ public class FeishuBotMessageService {
     public void deliverRun(Long id) {
         FeishuBotMessageEntity message = messages.findById(id).orElse(null);
         if (message == null || !"RUN_SUBMITTED".equals(message.getStatus())) return;
+        if (!"p2p".equalsIgnoreCase(message.getChatType())) { ignoreGroupMessage(message); return; }
         AgentRunEntity run = runs.findByRunKey(message.getAgentRunKey()).orElse(null);
         if (run == null || "PENDING".equals(run.getStatus()) || "RUNNING".equals(run.getStatus())) return;
         AgentSessionEntity session = sessions.findBySessionKey(message.getAgentSessionKey()).orElse(null);
@@ -186,11 +186,10 @@ public class FeishuBotMessageService {
     }
     private FeishuBotBindingEntity bindingFor(FeishuBotMessageEntity message, Long userId) { return bindings.findByOwnerUserIdAndScopeKey(userId, scopeKey(message)).orElse(null); }
     private String scopeKey(FeishuBotMessageEntity message) { return ("group".equalsIgnoreCase(message.getChatType()) ? "group:" : "p2p:") + message.getChatId() + ":" + message.getThreadKey(); }
-    private boolean isManagedCollabChat(String chatType, String chatId) {
-        if (!"group".equalsIgnoreCase(chatType) && !"topic".equalsIgnoreCase(chatType)) return false;
-        Boolean managed = jdbc.queryForObject("select exists(select 1 from collab_feishu_binding where chat_id=?) or exists(select 1 from collab_group_feishu_binding where chat_id=?)",
-                Boolean.class, chatId, chatId);
-        return Boolean.TRUE.equals(managed);
+    private void ignoreGroupMessage(FeishuBotMessageEntity message) {
+        message.status("IGNORED");
+        messages.save(message);
+        log.info("event=feishu.bot.message.ignored reason=group_chat_queue messageId={}", message.getMessageId());
     }
 
     private void replyAuthorization(FeishuBotMessageEntity message) {
