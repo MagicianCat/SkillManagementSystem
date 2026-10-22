@@ -1,5 +1,6 @@
 package com.company.skillplatform.collabproject.application;
 
+import com.company.skillplatform.auth.infrastructure.FeishuCardActionTagger;
 import com.company.skillplatform.collabproject.flow.application.CollabProjectFlowService;
 import com.company.skillplatform.collabproject.flow.interfaces.CollabProjectFlowController.DecisionRequest;
 import com.company.skillplatform.common.application.BusinessException;
@@ -53,7 +54,7 @@ public class CollabApprovalCardService {
             long expectedVersion;
             try {
                 var action = callback.getAction();
-                String callbackName = action.getName();
+                String callbackName = FeishuCardActionTagger.stripEnvSuffix(action.getName());
                 if (action.getValue() != null && "collab_approve".equals(action.getValue().get("action"))) {
                     submissionId = parseLong(action.getValue().get("submissionId"));
                     expectedVersion = parseLong(action.getValue().get("approvalVersion"));

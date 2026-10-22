@@ -5,6 +5,8 @@ import com.company.skillplatform.agent.infrastructure.repository.*;
 import com.company.skillplatform.auth.application.FeishuAuthService;
 import com.company.skillplatform.auth.infrastructure.FeishuBotClient;
 import com.company.skillplatform.auth.infrastructure.FeishuProperties;
+import com.company.skillplatform.auth.infrastructure.FeishuCardProperties;
+import com.company.skillplatform.auth.infrastructure.FeishuCardActionTagger;
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.user.domain.UserStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
@@ -22,6 +24,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Idempotent inbox and delivery workflow for Feishu bot messages. */
@@ -44,7 +47,10 @@ public class FeishuBotMessageService {
     private final boolean enabled;
     private final String webBaseUrl;
     private final int maxRetries;
+    private final FeishuCardActionTagger cardTagger;
+    private final boolean callbacksEnabled;
 
+    /** Compatibility constructor for existing direct callers and unit tests. */
     public FeishuBotMessageService(FeishuBotMessageRepository messages, FeishuBotBindingRepository bindings,
             AgentSessionRepository sessions, AgentRunRepository runs, AgentMessageRepository agentMessages,
             IamUserRepository users, IamRolePermissionRepository permissions, AgentConversationService conversation,
@@ -52,9 +58,25 @@ public class FeishuBotMessageService {
             @Value("${skill-platform.feishu.bot-enabled:false}") boolean enabled,
             @Value("${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
             @Value("${skill-platform.feishu.bot-max-retries:3}") int maxRetries) {
+        this(messages, bindings, sessions, runs, agentMessages, users, permissions, conversation, bot, auth, feishu,
+                json, enabled, webBaseUrl, maxRetries, null, null);
+    }
+
+    @Autowired
+    public FeishuBotMessageService(FeishuBotMessageRepository messages, FeishuBotBindingRepository bindings,
+            AgentSessionRepository sessions, AgentRunRepository runs, AgentMessageRepository agentMessages,
+            IamUserRepository users, IamRolePermissionRepository permissions, AgentConversationService conversation,
+            FeishuBotClient bot, FeishuAuthService auth, FeishuProperties feishu, ObjectMapper json,
+            @Value("${skill-platform.feishu.bot-enabled:false}") boolean enabled,
+            @Value("${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
+            @Value("${skill-platform.feishu.bot-max-retries:3}") int maxRetries,
+            FeishuCardProperties cardProperties, FeishuCardActionTagger cardTagger) {
         this.messages=messages; this.bindings=bindings; this.sessions=sessions; this.runs=runs; this.agentMessages=agentMessages;
         this.users=users; this.permissions=permissions; this.conversation=conversation; this.bot=bot; this.auth=auth; this.feishu=feishu;
         this.json=json; this.enabled=enabled; this.webBaseUrl=webBaseUrl.replaceAll("/$", ""); this.maxRetries=maxRetries;
+        // The legacy direct constructor preserves the prior card shape; Spring uses the explicit new setting.
+        this.callbacksEnabled = cardProperties == null || cardProperties.isActionEnabled();
+        this.cardTagger = cardTagger;
     }
 
     @Transactional
@@ -94,7 +116,7 @@ public class FeishuBotMessageService {
             String sender = operator == null ? null : first(operator.getOpenId(), operator.getUserId(), operator.getUnionId());
             IamUserEntity user = sender == null ? null : users.findByFeishuOpenId(sender).or(() -> users.findByFeishuUserId(sender)).orElse(null);
             CallBackAction action = event.getEvent().getAction();
-            String name = text(action.getName(), "");
+            String name = FeishuCardActionTagger.stripEnvSuffix(text(action.getName(), ""));
             int separator = name.indexOf('|');
             if (user == null || separator < 0 || !name.startsWith("agent_")) return toast(response, toast, "error", "无法识别当前会话");
             String kind = name.substring(6, separator);
@@ -203,8 +225,10 @@ public class FeishuBotMessageService {
     private void replyResult(FeishuBotMessageEntity message, String answer, AgentConversationService.RecommendationView recommendation, String runKey, AgentSessionEntity session, boolean group) {
         List<Object> elements = new ArrayList<>(); elements.add(Map.of("tag", "markdown", "content", truncate(answer, 12000)));
         elements.add(Map.of("tag", "hr")); elements.add(Map.of("tag", "markdown", "content", targetSummary(session)));
-        elements.add(contextSelect("平台", "agent_platform|" + session.getSessionKey(), session.getPlatform(), List.of(option("CodeBuddy", "CODEBUDDY"), option("OpenCode", "OPENCODE"))));
-        elements.add(contextSelect("操作系统", "agent_os|" + session.getSessionKey(), session.getOsType(), List.of(option("通用", "ANY"), option("Windows", "WINDOWS"), option("macOS", "MACOS"), option("Linux", "LINUX"))));
+        if (callbacksEnabled) {
+            elements.add(contextSelect("平台", actionName("agent_platform|" + session.getSessionKey()), session.getPlatform(), List.of(option("CodeBuddy", "CODEBUDDY"), option("OpenCode", "OPENCODE"))));
+            elements.add(contextSelect("操作系统", actionName("agent_os|" + session.getSessionKey()), session.getOsType(), List.of(option("通用", "ANY"), option("Windows", "WINDOWS"), option("macOS", "MACOS"), option("Linux", "LINUX"))));
+        }
         if (recommendation != null && !recommendation.items().isEmpty()) {
             elements.add(Map.of("tag", "hr")); elements.add(Map.of("tag", "markdown", "content", "**推荐 Skill**"));
             for (Map<String,Object> item : recommendation.items()) {
@@ -220,8 +244,10 @@ public class FeishuBotMessageService {
     private void replyContextCard(FeishuBotMessageEntity message, AgentSessionEntity session, String prompt, boolean thread) {
         List<Object> elements = new ArrayList<>();
         elements.add(Map.of("tag", "markdown", "content", prompt));
-        elements.add(contextSelect("平台", "agent_platform|" + session.getSessionKey(), session.getPlatform(), List.of(option("CodeBuddy", "CODEBUDDY"), option("OpenCode", "OPENCODE"))));
-        elements.add(contextSelect("操作系统", "agent_os|" + session.getSessionKey(), session.getOsType(), List.of(option("通用", "ANY"), option("Windows", "WINDOWS"), option("macOS", "MACOS"), option("Linux", "LINUX"))));
+        if (callbacksEnabled) {
+            elements.add(contextSelect("平台", actionName("agent_platform|" + session.getSessionKey()), session.getPlatform(), List.of(option("CodeBuddy", "CODEBUDDY"), option("OpenCode", "OPENCODE"))));
+            elements.add(contextSelect("操作系统", actionName("agent_os|" + session.getSessionKey()), session.getOsType(), List.of(option("通用", "ANY"), option("Windows", "WINDOWS"), option("macOS", "MACOS"), option("Linux", "LINUX"))));
+        }
         send(message, "interactive", card("选择运行环境", elements), thread);
     }
     private Map<String,Object> contextSelect(String label, String name, String selected, List<Map<String,Object>> options) {
@@ -231,6 +257,7 @@ public class FeishuBotMessageService {
         if (selected != null && !selected.isBlank()) value.put("initial_option", selected);
         return value;
     }
+    private String actionName(String name) { return cardTagger == null ? name : cardTagger.appendEnvironmentToActionName(name); }
     private Map<String,Object> option(String label, String value) { return Map.of("text", Map.of("tag", "plain_text", "content", label), "value", value); }
     private String targetSummary(AgentSessionEntity session) { return "**当前筛选**：平台 " + Objects.requireNonNullElse(session.getPlatform(), "未选择") + "；系统 " + Objects.requireNonNullElse(session.getOsType(), "未选择") + "。本轮消息中的明确要求会自动覆盖这里的选择。"; }
     private P2CardActionTriggerResponse toast(P2CardActionTriggerResponse response, CallBackToast toast, String type, String content) { toast.setType(type); toast.setContent(content); return response; }

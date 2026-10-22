@@ -3,6 +3,8 @@ package com.company.skillplatform.collabproject.asdm.application;
 import com.company.skillplatform.collabproject.application.CollabFeishuChatGateway;
 import com.company.skillplatform.collabproject.application.CollabFeishuCardLayout;
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.auth.infrastructure.FeishuCardActionTagger;
+import com.company.skillplatform.auth.infrastructure.FeishuCardProperties;
 import com.lark.oapi.event.cardcallback.model.CallBackToast;
 import com.lark.oapi.event.cardcallback.model.P2CardActionTrigger;
 import com.lark.oapi.event.cardcallback.model.P2CardActionTriggerResponse;
@@ -18,6 +20,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /** Feishu candidate card sender and authenticated publish callback router. */
 @Service
@@ -28,9 +31,22 @@ public class CollabAsdmPublishCardService {
     private final CollabFeishuChatGateway chats;
     private final CollabAsdmDetectionService detection;
     private final String webBaseUrl;
+    private final FeishuCardActionTagger cardTagger;
+    private final boolean callbacksEnabled;
 
+    /** Compatibility constructor retained for callers that instantiate this service directly. */
     public CollabAsdmPublishCardService(JdbcTemplate jdbc,CollabFeishuChatGateway chats,CollabAsdmDetectionService detection,
-            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl){this.jdbc=jdbc;this.chats=chats;this.detection=detection;this.webBaseUrl=webBaseUrl.replaceAll("/$", "");}
+            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl){
+        this(jdbc, chats, detection, webBaseUrl, null, null);
+    }
+
+    @Autowired
+    public CollabAsdmPublishCardService(JdbcTemplate jdbc,CollabFeishuChatGateway chats,CollabAsdmDetectionService detection,
+            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
+            FeishuCardProperties cardProperties, FeishuCardActionTagger cardTagger){
+        this.jdbc=jdbc;this.chats=chats;this.detection=detection;this.webBaseUrl=webBaseUrl.replaceAll("/$", "");
+        this.cardTagger=cardTagger;this.callbacksEnabled=cardProperties==null||cardProperties.isActionEnabled();
+    }
 
     public boolean handles(P2CardActionTrigger event){
         if(event==null||event.getEvent()==null||event.getEvent().getAction()==null)return false;
@@ -101,23 +117,33 @@ public class CollabAsdmPublishCardService {
         elements.add(CollabFeishuCardLayout.markdown("发布后将逐份同步已纳入清单的文档及附件，全部成功后进入审批或自动流转。"));
         if ("TESTING".equals(stageKey)) elements.add(CollabFeishuCardLayout.markdown(
                 "**测试阶段说明**\n此提醒只表示发现测试设计交付信号，不代表测试执行通过。"));
+        Map<String,Object> callbackValue = new java.util.LinkedHashMap<>();
+        callbackValue.put("action", ACTION); callbackValue.put("candidateId", candidateId);
+        callbackValue.put("candidateRevision", revision); callbackValue.put("stageId", stageId);
+        callbackValue.put("attemptNo", row.get("attempt_no"));
+        String callbackName = ACTION+"|"+candidateId+"|"+revision;
+        if (cardTagger != null) {
+            callbackValue = cardTagger.attachEnvironmentToCallbackValue(callbackValue);
+            callbackName = cardTagger.appendEnvironmentToActionName(callbackName);
+        }
         Map<String,Object> publishButton=Map.of("tag","button","type","primary","element_id","collab_asdm_publish",
-                "name",ACTION+"|"+candidateId+"|"+revision,"text",Map.of("tag","plain_text","content","发布当前产物"),
-                "behaviors",List.of(Map.of("type","callback","value",Map.of("action",ACTION,"candidateId",candidateId,
-                        "candidateRevision",revision,"stageId",stageId,"attemptNo",row.get("attempt_no")))));
+                "name",callbackName,"text",Map.of("tag","plain_text","content","发布当前产物"),
+                "behaviors",List.of(Map.of("type","callback","value",callbackValue)));
         Map<String,Object> gitlabButton=Map.of("tag","button","type","default","text",Map.of("tag","plain_text","content","查看 GitLab"),
                 "behaviors",List.of(Map.of("type","open_url","default_url",gitUrl,"pc_url",gitUrl,"ios_url",gitUrl,"android_url",gitUrl)));
         String listUrl=webBaseUrl+"/collab-requirements/"+row.get("project_key")+"/stages/"+stageKey;
         Map<String,Object> listButton=Map.of("tag","button","type","default","text",Map.of("tag","plain_text","content","查看产物清单"),
                 "behaviors",List.of(Map.of("type","open_url","default_url",listUrl,"pc_url",listUrl,"ios_url",listUrl,"android_url",listUrl)));
-        Map<String,Object> publishColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(publishButton));
         Map<String,Object> gitlabColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(gitlabButton));
         Map<String,Object> listColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(listButton));
-        elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",List.of(listColumn,gitlabColumn,publishColumn)));
+        List<Map<String,Object>> columns = new ArrayList<>(List.of(listColumn, gitlabColumn));
+        if (callbacksEnabled) columns.add(publishColumn(publishButton));
+        elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",columns));
         chats.sendInteractive(chatId,CollabFeishuCardLayout.card("产物待发布 · " + String.valueOf(row.get("stage_title")), "blue", elements),"asdm-candidate:"+candidateId+":revision:"+revision);
     }
 
     private P2CardActionTriggerResponse result(P2CardActionTriggerResponse response,CallBackToast toast,String type,String content){toast.setType(type);toast.setContent(content);return response;}
+    private Map<String,Object> publishColumn(Map<String,Object> button){return Map.of("tag","column","width","weighted","weight",1,"elements",List.of(button));}
     private long parseLong(Object value){if(value instanceof Number number)return number.longValue();return Long.parseLong(String.valueOf(value));}
     private boolean blank(String value){return value==null||value.isBlank()||"null".equals(value);}
     private Map<String,Object> row(ResultSet rs)throws SQLException{Map<String,Object> result=new java.util.HashMap<>();for(int i=1;i<=rs.getMetaData().getColumnCount();i++)result.put(rs.getMetaData().getColumnLabel(i).toLowerCase(java.util.Locale.ROOT),rs.getObject(i));return result;}

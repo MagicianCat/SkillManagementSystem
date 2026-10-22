@@ -174,6 +174,23 @@ skill-platform:
     api-base-url: ${FEISHU_API_BASE_URL:https://open.feishu.cn/open-apis}
     token-encryption-key: ${FEISHU_TOKEN_ENCRYPTION_KEY:}
     event-enabled: ${FEISHU_EVENT_ENABLED:false}
+    card:
+      environment: ${FEISHU_CARD_ENV:}
+      action-enabled: ${FEISHU_CARD_ACTION_ENABLED:false}
+      gateway-enabled: ${FEISHU_CARD_GATEWAY_ENABLED:false}
+      legacy-env: ${FEISHU_CARD_LEGACY_ENV:reject}
+      route-local:
+        enabled: ${FEISHU_CARD_ROUTE_LOCAL_ENABLED:false}
+        url: ${FEISHU_CARD_ROUTE_LOCAL_URL:}
+      route-prod:
+        enabled: ${FEISHU_CARD_ROUTE_PROD_ENABLED:false}
+        url: ${FEISHU_CARD_ROUTE_PROD_URL:}
+      forward:
+        connect-timeout-ms: ${FEISHU_CARD_CONNECT_TIMEOUT_MS:300}
+        total-timeout-ms: ${FEISHU_CARD_TOTAL_TIMEOUT_MS:1800}
+      security:
+        local-secret: ${FEISHU_CARD_HMAC_LOCAL_SECRET:}
+        prod-secret: ${FEISHU_CARD_HMAC_PROD_SECRET:}
     bot-enabled: ${FEISHU_BOT_ENABLED:${FEISHU_EVENT_ENABLED:false}}
     bot-web-base-url: ${FEISHU_BOT_WEB_BASE_URL:http://127.0.0.1:5173}
     bot-task-interval-ms: ${FEISHU_BOT_TASK_INTERVAL_MS:2000}

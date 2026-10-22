@@ -1,5 +1,6 @@
 package com.company.skillplatform.collabproject.application;
 
+import com.company.skillplatform.auth.infrastructure.FeishuCardActionTagger;
 import com.company.skillplatform.common.application.BusinessException;
 import com.lark.oapi.event.cardcallback.model.CallBackToast;
 import com.lark.oapi.event.cardcallback.model.P2CardActionTrigger;
@@ -58,7 +59,7 @@ public class CollabStagePromptCardService {
             if (actors.size() != 1) return result(response, toast, "error", "飞书账号尚未关联唯一的研枢用户");
 
             Map<String, Object> value = callback.getAction().getValue();
-            String callbackName = callback.getAction().getName();
+            String callbackName = FeishuCardActionTagger.stripEnvSuffix(callback.getAction().getName());
             if ((value == null || !value.containsKey("projectKey")) && callbackName != null
                     && callbackName.startsWith(ACTION + "|")) {
                 String[] parts = callbackName.split("\\|", -1);
