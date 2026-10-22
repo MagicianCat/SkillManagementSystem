@@ -487,6 +487,8 @@ public class CollabFeishuWorker {
                 documentToken, nodeToken, documentUrl, artifactVersionId);
         if (created) documents.writeNativeDocx(actor.longValue(), documentToken, (String) artifact.get("markdown_content"));
         else documents.replaceNativeDocx(actor.longValue(), documentToken, (String) artifact.get("markdown_content"));
+        String chatId = (String) binding.get("chat_id");
+        documents.grantChatReadAccess(actor.longValue(), documentToken, "docx", chatId);
         jdbc.update("UPDATE collab_feishu_publication SET publish_status='PUBLISHED',published_at=NOW(3),last_error=NULL,time_updated=NOW(3) WHERE artifact_version_id=?", artifactVersionId);
     }
 

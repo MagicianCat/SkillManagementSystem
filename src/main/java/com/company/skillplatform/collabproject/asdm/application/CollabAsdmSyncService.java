@@ -233,7 +233,7 @@ public class CollabAsdmSyncService {
 
     private void publishStage(long jobId,Map<String,Object> stage) {
         long syncStageId=num(stage,"id"); long stageId=num(stage,"stage_id");
-        var target=jdbc.queryForMap("select b.wiki_space_id,b.wiki_parent_node_token,b.publish_actor_user_id,p.id requirement_id,s.title stage_title,s.stage_order,j.head_sha,j.rule_hash,j.default_version,j.group_revision,j.requested_by from collab_asdm_sync_job j join collab_project p on p.id=j.requirement_id join collab_stage s on s.id=? join collab_feishu_binding b on b.project_id=p.id where j.id=?",stageId,jobId);
+        var target=jdbc.queryForMap("select b.wiki_space_id,b.wiki_parent_node_token,b.publish_actor_user_id,b.chat_id,p.id requirement_id,s.title stage_title,s.stage_order,j.head_sha,j.rule_hash,j.default_version,j.group_revision,j.requested_by from collab_asdm_sync_job j join collab_project p on p.id=j.requirement_id join collab_stage s on s.id=? join collab_feishu_binding b on b.project_id=p.id where j.id=?",stageId,jobId);
         long actor=num(target,"publish_actor_user_id");String space=str(target,"wiki_space_id");
         String node=(String)stage.get("supplemental_node_token");
         if(node==null||node.isBlank()) {
@@ -251,7 +251,7 @@ public class CollabAsdmSyncService {
         for(var file:files) {
             if("PUBLISHED".equals(file.get("publish_status")))continue;
             if("RECONCILE_REQUIRED".equals(file.get("publish_status")))continue;
-            try {publishFile(actor,space,node,file);}
+            try {publishFile(actor,space,node,str(target,"chat_id"),file);}
             catch(Exception ex){
                 String error=code(ex);
                 String status=error.contains("99991679")||error.startsWith("Feishu API rejected request")
@@ -275,10 +275,11 @@ public class CollabAsdmSyncService {
         for(var file:files)index.append("| `").append(str(file,"source_path").replace("|","\\|"))
                 .append("` | ").append(file.get("sync_action")).append(" | [打开](").append(file.get("feishu_url")).append(") |\n");
         documents.replaceNativeDocx(actor,indexToken,index.toString());
+        documents.grantChatReadAccess(actor,indexToken,"docx",str(target,"chat_id"));
         stageStatus(syncStageId,"COMPLETED",null);
     }
 
-    private void publishFile(long actor,String space,String parent,Map<String,Object> file) {
+    private void publishFile(long actor,String space,String parent,String chatId,Map<String,Object> file) {
         long fileId=num(file,"id");
         if("UPLOADING".equals(file.get("publish_status")))throw new IllegalStateException("ASDM_FEISHU_RECONCILE_REQUIRED");
         byte[] bytes=snapshots.read(str(file,"snapshot_storage_key"),num(file,"size_bytes"),str(file,"content_sha256"));
@@ -293,6 +294,7 @@ public class CollabAsdmSyncService {
                     jdbc.update("update collab_asdm_sync_file set feishu_target_id=?,feishu_node_token=?,feishu_url=? where id=?",token,node,url,fileId);
                 }
                 documents.replaceNativeDocx(actor,token,new String(bytes,StandardCharsets.UTF_8));
+                documents.grantChatReadAccess(actor,token,"docx",chatId);
             } else {
                 if(token==null) {
                     token=attachments.uploadToDrive(actor,attachments.rootDriveFolderToken(actor),title,str(file,"media_type"),bytes);
@@ -303,6 +305,7 @@ public class CollabAsdmSyncService {
                     node=mounted.nodeToken();url=mounted.url();
                     jdbc.update("update collab_asdm_sync_file set feishu_node_token=?,feishu_url=? where id=?",node,url,fileId);
                 }
+                documents.grantChatReadAccess(actor,token,"file",chatId);
             }
             long stageId=jdbc.queryForObject("select s.stage_id from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id where f.id=?",Long.class,fileId);
             long requirementId=jdbc.queryForObject("select j.requirement_id from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id join collab_asdm_sync_job j on j.id=s.job_id where f.id=?",Long.class,fileId);

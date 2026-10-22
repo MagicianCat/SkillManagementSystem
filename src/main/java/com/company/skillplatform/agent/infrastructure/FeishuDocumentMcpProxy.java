@@ -238,6 +238,48 @@ public class FeishuDocumentMcpProxy {
         }
     }
 
+    /** Gives the requirement chat read access to a published Drive artifact. */
+    public void grantChatReadAccess(Long userId, String resourceToken, String resourceType, String chatId) {
+        if (resourceToken == null || resourceToken.isBlank() || chatId == null || chatId.isBlank())
+            throw new BusinessException("FEISHU_SHARE_TARGET_INVALID", "Feishu artifact or requirement chat is missing", HttpStatus.BAD_GATEWAY);
+        if (!Set.of("docx", "file").contains(resourceType))
+            throw new BusinessException("FEISHU_SHARE_TYPE_UNSUPPORTED", "Only Feishu documents and files can be shared with the requirement chat", HttpStatus.BAD_GATEWAY);
+        try {
+            ObjectNode body = json.createObjectNode().put("member_type", "openchat")
+                    .put("member_id", chatId).put("perm", "view");
+            String base = apiBaseUrl.replaceAll("/$", "");
+            String url = base + "/drive/v1/permissions/" + URLEncoder.encode(resourceToken, StandardCharsets.UTF_8)
+                    + "/members?type=" + resourceType + "&need_notification=false";
+            String uat = userToken(userId);
+            try { request("POST", url, body, uat); }
+            catch (BusinessException createFailure) {
+                // A previous worker attempt may have granted access before it crashed.
+                String memberUrl = base + "/drive/v1/permissions/" + URLEncoder.encode(resourceToken, StandardCharsets.UTF_8)
+                        + "/members/" + URLEncoder.encode(chatId, StandardCharsets.UTF_8)
+                        + "?type=" + resourceType + "&member_type=openchat";
+                ObjectNode update = json.createObjectNode().put("member_type", "openchat")
+                        .put("member_id", chatId).put("perm", "view");
+                try { request("PUT", memberUrl, update, uat); }
+                catch (Exception updateFailure) { throw createFailure; }
+            }
+            if ("docx".equals(resourceType)) enableViewerComments(userId, resourceToken);
+        } catch (BusinessException e) { throw e; }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException("FEISHU_SHARE_FAILED", "Feishu artifact sharing was interrupted", HttpStatus.BAD_GATEWAY);
+        } catch (Exception e) {
+            throw new BusinessException("FEISHU_SHARE_FAILED", "Feishu artifact could not be shared with the requirement chat", HttpStatus.BAD_GATEWAY);
+        }
+    }
+
+    /** Feishu separates document read permission from the policy that allows readers to comment. */
+    private void enableViewerComments(Long userId, String documentToken) throws Exception {
+        ObjectNode body = json.createObjectNode().put("comment_entity", "anyone_can_view");
+        String url = apiBaseUrl.replaceAll("/$", "") + "/drive/v1/permissions/"
+                + URLEncoder.encode(documentToken, StandardCharsets.UTF_8) + "/public?type=docx";
+        request("PATCH", url, body, userToken(userId));
+    }
+
     /** Parses a small markdown subset into Feishu DOCX blocks so published documents render as
      *  real headings/lists/quotes/code instead of raw "#"/"-" text. Falls back to a text block. */
     private List<ObjectNode> markdownToBlocks(String markdown) {

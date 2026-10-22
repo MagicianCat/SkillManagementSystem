@@ -96,6 +96,10 @@ public class CollabAsdmPackageWorker {
                 case "LINK_ONLY" -> new PublishedResult("LINK_ONLY",null,file.sourceGitUrl());
                 default -> throw new IllegalArgumentException("ASDM_DELIVERY_MODE_UNSUPPORTED");
             };
+            if ("DOCX".equals(file.deliveryMode()))
+                documents.grantChatReadAccess(asLong(target,"publish_actor_user_id"),result.targetId(),"docx",str(target,"chat_id"));
+            else if ("DRIVE_FILE".equals(file.deliveryMode()))
+                documents.grantChatReadAccess(asLong(target,"publish_actor_user_id"),result.targetId(),"file",str(target,"chat_id"));
             if(!packages.markFileStatus(fileId,"UPLOADING",result.status(),result.targetId(),result.url(),null))
                 log.warn("event=asdm.package.file.status_conflict packageId={} fileId={}",manifest.id(),fileId);
         } catch(Exception ex) {
@@ -172,6 +176,8 @@ public class CollabAsdmPackageWorker {
                     .append(file.publishStatus()).append(" | ").append(url==null||url.isBlank()?"—":"[打开]("+url+")").append(" |\n");
         }
         documents.replaceNativeDocx(actor,String.valueOf(index.get("document_token")),content.toString());
+        var target=wikiTarget(manifest.requirementId());
+        documents.grantChatReadAccess(actor,String.valueOf(index.get("document_token")),"docx",str(target,"chat_id"));
         flow.onAsdmPackagePublished(packageId);
         for(var file:files) {
             try { snapshots.delete(file.snapshotStorageKey()); }
@@ -180,7 +186,7 @@ public class CollabAsdmPackageWorker {
     }
 
     private Map<String,Object> wikiTarget(long requirementId) {
-        return jdbc.queryForMap("SELECT b.wiki_space_id,b.wiki_parent_node_token,b.publish_actor_user_id FROM collab_feishu_binding b WHERE b.project_id=?",requirementId);
+        return jdbc.queryForMap("SELECT b.wiki_space_id,b.wiki_parent_node_token,b.publish_actor_user_id,b.chat_id FROM collab_feishu_binding b WHERE b.project_id=?",requirementId);
     }
     private Long publishActor(long requirementId){return jdbc.queryForObject("SELECT publish_actor_user_id FROM collab_feishu_binding WHERE project_id=?",Long.class,requirementId);}
     private int stageOrder(long stageId){return jdbc.queryForObject("SELECT stage_order FROM collab_stage WHERE id=?",Integer.class,stageId);}
