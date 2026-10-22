@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
+import com.company.skillplatform.collabproject.application.CollabApprovalCardService;
 import java.util.Set;
 
 /**
@@ -31,14 +32,20 @@ public class FeishuLongConnection implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(FeishuLongConnection.class);
 
     private final FeishuProperties properties;
-    private final FeishuCardCallbackGateway cardGateway;
     private final com.company.skillplatform.agent.application.FeishuBotMessageService botMessages;
+    private final CollabApprovalCardService collabApprovalCards;
+    private final com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards;
+    private final com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards;
     private volatile Client client;
     private volatile boolean running;
 
-    public FeishuLongConnection(FeishuProperties properties, FeishuCardCallbackGateway cardGateway,
-            com.company.skillplatform.agent.application.FeishuBotMessageService botMessages) {
-        this.properties = properties; this.cardGateway = cardGateway; this.botMessages = botMessages;
+    public FeishuLongConnection(FeishuProperties properties,
+            com.company.skillplatform.agent.application.FeishuBotMessageService botMessages,
+            CollabApprovalCardService collabApprovalCards,
+            com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards,
+            com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards) {
+        this.properties = properties; this.botMessages = botMessages; this.collabApprovalCards = collabApprovalCards;
+        this.collabStagePromptCards = collabStagePromptCards; this.collabAsdmPublishCards = collabAsdmPublishCards;
     }
 
     @Override
@@ -59,7 +66,11 @@ public class FeishuLongConnection implements SmartLifecycle {
                                         && event.getEvent().getContext().getOpenChatId() != null,
                                 event != null && event.getEvent() != null && event.getEvent().getContext() != null
                                         && event.getEvent().getContext().getOpenMessageId() != null);
-                        return cardGateway.handleFromFeishu(event);
+                        if (collabApprovalCards.handles(event)) return collabApprovalCards.handle(event);
+                        if (collabStagePromptCards.handles(event)) return collabStagePromptCards.handle(event);
+                        if (collabAsdmPublishCards.handles(event)) return collabAsdmPublishCards.handle(event);
+                        log.info("event=feishu.card_action.unmatched route=agent_fallback");
+                        return botMessages.handleCardAction(event);
                     }
                 })
                 .onP2MessageReceiveV1(new ImService.P2MessageReceiveV1Handler() {

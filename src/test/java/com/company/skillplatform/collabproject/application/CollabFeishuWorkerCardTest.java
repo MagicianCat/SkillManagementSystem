@@ -5,8 +5,6 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import com.company.skillplatform.auth.infrastructure.FeishuProperties;
-import com.company.skillplatform.auth.infrastructure.FeishuCardProperties;
-import com.company.skillplatform.auth.infrastructure.FeishuCardActionTagger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.HashMap;
 import java.util.List;
@@ -50,16 +48,6 @@ class CollabFeishuWorkerCardTest {
         ReflectionTestUtils.invokeMethod(worker, "stageHandoff", 1L, 2L, 3L);
         assertThat(sentCard()).contains("project-context-fetch", "project-artifact-submit", "单独发送")
                 .doesNotContain("审批人");
-    }
-
-    @Test void localCardKeepsCallbacksWithEventConnectionDisabled() {
-        var noEvent = new FeishuProperties(true, "app", "secret", null,
-                false, null, null, null, null, null, false, java.time.Duration.ofMinutes(5));
-        var cards = new FeishuCardProperties(); cards.setEnvironment("local"); cards.setActionEnabled(true);
-        worker = new CollabFeishuWorker(jdbc, chats, null, noEvent, new ObjectMapper(),
-                "http://localhost:5173", null, null, null, null, cards, new FeishuCardActionTagger(cards));
-        ReflectionTestUtils.invokeMethod(worker, "stageHandoff", 1L, 2L, 3L);
-        assertThat(sentCard()).contains("单独发送", "|env=local", "env=local");
     }
 
     @Test void asdmAcceptanceHidesPromptsWithoutClaimingAsdmMonitorsAcceptance() {

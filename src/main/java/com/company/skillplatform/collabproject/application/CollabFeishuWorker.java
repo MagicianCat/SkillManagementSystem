@@ -12,9 +12,6 @@ import java.util.Map;
 import java.util.ArrayList;
 import org.springframework.beans.factory.annotation.Value;
 import com.company.skillplatform.auth.infrastructure.FeishuProperties;
-import com.company.skillplatform.auth.infrastructure.FeishuCardProperties;
-import com.company.skillplatform.auth.infrastructure.FeishuCardActionTagger;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -35,36 +32,22 @@ public class CollabFeishuWorker {
     private final CollabAsdmDetectionService asdmDetection;
     private final CollabAsdmPackagePreparationService asdmPreparation;
     private final CollabProjectFlowService flow;
-    private final FeishuCardActionTagger cardTagger;
 
-    /** Compatibility constructor for focused unit tests and older callers. */
     public CollabFeishuWorker(JdbcTemplate jdbc, CollabFeishuChatGateway chats, FeishuDocumentMcpProxy documents,
             FeishuProperties feishuProperties, ObjectMapper mapper,
             @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
             CollabAsdmPublishCardService asdmCards, CollabAsdmDetectionService asdmDetection,
             CollabAsdmPackagePreparationService asdmPreparation, CollabProjectFlowService flow) {
-        this(jdbc, chats, documents, feishuProperties, mapper, webBaseUrl, asdmCards, asdmDetection,
-                asdmPreparation, flow, null, null);
-    }
-
-    @Autowired
-    public CollabFeishuWorker(JdbcTemplate jdbc, CollabFeishuChatGateway chats, FeishuDocumentMcpProxy documents,
-            FeishuProperties feishuProperties, ObjectMapper mapper,
-            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl,
-            CollabAsdmPublishCardService asdmCards, CollabAsdmDetectionService asdmDetection,
-            CollabAsdmPackagePreparationService asdmPreparation, CollabProjectFlowService flow,
-            FeishuCardProperties cardProperties, FeishuCardActionTagger cardTagger) {
         this.jdbc = jdbc;
         this.chats = chats;
         this.documents = documents;
         this.webBaseUrl = webBaseUrl.replaceAll("/$", "");
-        this.callbacksEnabled = cardProperties == null ? feishuProperties.eventEnabled() : cardProperties.isActionEnabled();
+        this.callbacksEnabled = feishuProperties.eventEnabled();
         this.mapper = mapper;
         this.asdmCards = asdmCards;
         this.asdmDetection = asdmDetection;
         this.asdmPreparation = asdmPreparation;
         this.flow = flow;
-        this.cardTagger = cardTagger;
     }
 
     @Scheduled(fixedDelayString = "${collab.feishu.worker-delay-ms:10000}")
@@ -314,17 +297,11 @@ public class CollabFeishuWorker {
         elements.add(Map.of("tag", "hr"));
         elements.add(CollabFeishuCardLayout.markdown("[在飞书中查看待审批产物](" + row.get("feishu_url") + ")" + gitLinks));
         if (callbacksEnabled) {
-            Map<String, Object> callbackValue = new java.util.LinkedHashMap<>();
-            callbackValue.put("action", "collab_approve");
-            callbackValue.put("submissionId", submissionId);
-            callbackValue.put("approvalVersion", 0);
-            if (cardTagger != null) callbackValue = cardTagger.attachEnvironmentToCallbackValue(callbackValue);
-            String callbackName = "collab_approve|" + submissionId + "|0";
-            if (cardTagger != null) callbackName = cardTagger.appendEnvironmentToActionName(callbackName);
             elements.add(Map.of("tag", "button", "type", "primary", "element_id", "collab_approval_approve",
-                    "name", callbackName,
+                    "name", "collab_approve|" + submissionId + "|0",
                     "text", Map.of("tag", "plain_text", "content", "批准"),
-                    "behaviors", List.of(Map.of("type", "callback", "value", callbackValue))));
+                    "behaviors", List.of(Map.of("type", "callback", "value", Map.of("action", "collab_approve",
+                            "submissionId", submissionId, "approvalVersion", 0)))));
         }
         elements.add(Map.of("tag", "button", "type", "default", "element_id", "collab_approval_details",
                 "text", Map.of("tag", "plain_text", "content", "查看详情 / 驳回"),
@@ -448,20 +425,11 @@ public class CollabFeishuWorker {
 
     private Map<String, Object> promptButton(String projectKey, long stageId, int attemptNo, String promptType) {
         String callbackName = "collab_send_prompt|" + projectKey + "|" + stageId + "|" + attemptNo + "|" + promptType;
-        Map<String, Object> callbackValue = new java.util.LinkedHashMap<>();
-        callbackValue.put("action", "collab_send_prompt");
-        callbackValue.put("projectKey", projectKey);
-        callbackValue.put("stageId", stageId);
-        callbackValue.put("attemptNo", attemptNo);
-        callbackValue.put("promptType", promptType);
-        if (cardTagger != null) {
-            callbackName = cardTagger.appendEnvironmentToActionName(callbackName);
-            callbackValue = cardTagger.attachEnvironmentToCallbackValue(callbackValue);
-        }
         return Map.of("tag", "button", "type", "default", "element_id", callbackName,
                 "name", callbackName,
                 "text", Map.of("tag", "plain_text", "content", "单独发送"),
-                "behaviors", List.of(Map.of("type", "callback", "value", callbackValue)));
+                "behaviors", List.of(Map.of("type", "callback", "value", Map.of("action", "collab_send_prompt",
+                        "projectKey", projectKey, "stageId", stageId, "attemptNo", attemptNo, "promptType", promptType))));
     }
 
     private String promptMarkdown(String title, String prompt) {
