@@ -55,7 +55,7 @@ public class DependencyService {
                 LogContext.requestId(), actorId, versionId, version.getSkill().getSkillKey(), next.size());
         return next.stream().map(this::view).toList();
     }
-    @PreAuthorize("hasAuthority('skill:edit')") @Transactional(readOnly = true)
+    @PreAuthorize("hasAnyAuthority('skill:browse', 'skill:download', 'skill:edit')") @Transactional(readOnly = true)
     public ResolveView resolve(Long versionId) {
         SkillVersionEntity root = skillService.version(versionId); LinkedHashMap<String, ResolvedItem> resolved = new LinkedHashMap<>();
         LinkedHashMap<String, List<String>> constraints = new LinkedHashMap<>(); LinkedHashSet<String> conflicts = new LinkedHashSet<>();
