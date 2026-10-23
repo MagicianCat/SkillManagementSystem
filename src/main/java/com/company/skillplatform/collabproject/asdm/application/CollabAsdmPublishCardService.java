@@ -3,6 +3,8 @@ package com.company.skillplatform.collabproject.asdm.application;
 import com.company.skillplatform.collabproject.application.CollabFeishuChatGateway;
 import com.company.skillplatform.collabproject.application.CollabFeishuCardLayout;
 import com.company.skillplatform.common.application.BusinessException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lark.oapi.event.cardcallback.model.CallBackToast;
 import com.lark.oapi.event.cardcallback.model.P2CardActionTrigger;
 import com.lark.oapi.event.cardcallback.model.P2CardActionTriggerResponse;
@@ -11,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import org.slf4j.Logger;
@@ -24,19 +27,24 @@ import org.springframework.stereotype.Service;
 public class CollabAsdmPublishCardService {
     private static final Logger log=LoggerFactory.getLogger(CollabAsdmPublishCardService.class);
     private static final String ACTION="collab_asdm_publish";
+    private static final String INCLUDE_ACTION="collab_asdm_include_suspected";
     private final JdbcTemplate jdbc;
     private final CollabFeishuChatGateway chats;
     private final CollabAsdmDetectionService detection;
+    private final CollabAsdmMultiStageDetectionService multiStageDetection;
+    private final ObjectMapper mapper;
     private final String webBaseUrl;
 
     public CollabAsdmPublishCardService(JdbcTemplate jdbc,CollabFeishuChatGateway chats,CollabAsdmDetectionService detection,
-            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl){this.jdbc=jdbc;this.chats=chats;this.detection=detection;this.webBaseUrl=webBaseUrl.replaceAll("/$", "");}
+            CollabAsdmMultiStageDetectionService multiStageDetection,ObjectMapper mapper,
+            @Value("${collab.web-base-url:http://127.0.0.1:5173}") String webBaseUrl){this.jdbc=jdbc;this.chats=chats;this.detection=detection;this.multiStageDetection=multiStageDetection;this.mapper=mapper;this.webBaseUrl=webBaseUrl.replaceAll("/$", "");}
 
     public boolean handles(P2CardActionTrigger event){
         if(event==null||event.getEvent()==null||event.getEvent().getAction()==null)return false;
         var action=event.getEvent().getAction();
-        return action.getValue()!=null&&ACTION.equals(action.getValue().get("action"))
-                || action.getName()!=null&&action.getName().startsWith(ACTION);
+        Object valueAction=action.getValue()==null?null:action.getValue().get("action");
+        return ACTION.equals(valueAction)||INCLUDE_ACTION.equals(valueAction)
+                || action.getName()!=null&&(action.getName().startsWith(ACTION)||action.getName().startsWith(INCLUDE_ACTION));
     }
 
     public P2CardActionTriggerResponse handle(P2CardActionTrigger event){
@@ -49,9 +57,14 @@ public class CollabAsdmPublishCardService {
             List<Long> actors=jdbc.query("select id from iam_user where status='ACTIVE' and ((? is not null and feishu_open_id=?) or (? is not null and feishu_user_id=?)) limit 2",(rs,n)->rs.getLong(1),openId,openId,feishuUserId,feishuUserId);
             if(actors.size()!=1)return result(response,toast,"error","飞书账号尚未关联唯一的研枢用户");
             Map<String,Object> value=callback.getAction().getValue();
-            if(value==null||!ACTION.equals(value.get("action")))return result(response,toast,"error","需求产物卡片已失效，请等待最新通知");
+            if(value==null)return result(response,toast,"error","需求产物卡片已失效，请等待最新通知");
             long candidateId=parseLong(value.get("candidateId"));int revision=Math.toIntExact(parseLong(value.get("candidateRevision")));
             if(candidateId<1||revision<1)return result(response,toast,"error","需求产物卡片已失效，请等待最新通知");
+            if(INCLUDE_ACTION.equals(value.get("action"))){
+                var included=multiStageDetection.includeSuspectedFiles(candidateId,revision,actors.get(0));
+                return result(response,toast,"success","已纳入"+included.includedCount()+"份疑似产物，正在重新扫描");
+            }
+            if(!ACTION.equals(value.get("action")))return result(response,toast,"error","需求产物卡片已失效，请等待最新通知");
             detection.requestPublish(candidateId,revision,actors.get(0));
             return result(response,toast,"success","已收到发布请求，正在校验 GitLab 内容");
         }catch(BusinessException denied){
@@ -59,6 +72,7 @@ public class CollabAsdmPublishCardService {
                 case "COLLAB_STAGE_OWNER_REQUIRED","COLLAB_PROJECT_MEMBER_REQUIRED"->"仅当前阶段负责人可以发布此产物";
                 case "ASDM_CANDIDATE_STALE"->"此卡片已过期或已处理，请使用最新通知";
                 case "ASDM_CANDIDATE_NOT_FOUND"->"候选产物不存在或已失效";
+                case "ASDM_NO_SUSPECTED_FILES"->"当前没有可一键纳入的疑似产物";
                 default->"发布请求未受理，请打开研枢需求页面查看状态";
             };
             return result(response,toast,"error",message);
@@ -67,7 +81,7 @@ public class CollabAsdmPublishCardService {
 
     /** Sends one Feishu interactive card for a persisted, debounced candidate revision. */
     public void sendCandidate(long candidateId,int revision){
-        Map<String,Object> row=jdbc.query("select c.detected_revision,c.notified_revision,c.status,c.attempt_no,c.source_path,c.source_commit_sha,c.notify_after,p.project_key,p.name requirement_name,p.asdm_branch,g.id group_id,g.name group_name,b.chat_id,g.owner_user_id,s.id stage_id,s.stage_key,s.title stage_title "
+        Map<String,Object> row=jdbc.query("select c.detected_revision,c.notified_revision,c.status,c.attempt_no,c.source_path,c.source_commit_sha,c.notify_after,c.marker_evidence_json,p.project_key,p.name requirement_name,p.asdm_branch,g.id group_id,g.name group_name,b.chat_id,g.owner_user_id,s.id stage_id,s.stage_key,s.title stage_title "
                 +"from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id join collab_group g on g.id=p.group_id join collab_stage s on s.id=c.stage_id left join collab_feishu_binding b on b.project_id=p.id where c.id=?",rs->rs.next()?row(rs):null,candidateId);
         if(row==null||!"NOTIFIED".equals(row.get("status"))||!Integer.valueOf(revision).equals(row.get("notified_revision"))||!Integer.valueOf(revision).equals(row.get("detected_revision")))return;
         String chatId=(String)row.get("chat_id");if(blank(chatId))throw new IllegalStateException("Requirement Feishu chat is not ready");
@@ -81,11 +95,16 @@ public class CollabAsdmPublishCardService {
         String gitUrl=repo.replaceAll("/$","")+"/-/blob/"+encodePath(commit)+"/"+encodePath(path);
         String stageKey=String.valueOf(row.get("stage_key"));
         String stageTitle=escape(String.valueOf(row.get("stage_title")));
-        List<Map<String,Object>> inventory=jdbc.queryForList("select association,selected,source_path from collab_asdm_candidate_file where candidate_id=? and candidate_revision=? order by source_path",candidateId,revision);
+        List<Map<String,Object>> inventory=jdbc.queryForList("select association,selected,source_path,reason_json from collab_asdm_candidate_file where candidate_id=? and candidate_revision=? order by source_path",candidateId,revision);
         long confirmed=inventory.stream().filter(f->Boolean.TRUE.equals(f.get("selected"))&&"CONFIRMED".equals(f.get("association"))).count();
         long likely=inventory.stream().filter(f->"LIKELY".equals(f.get("association"))).count();
         long uncertain=inventory.stream().filter(f->"UNCERTAIN".equals(f.get("association"))).count();
         long external=inventory.stream().filter(f->"EXTERNAL_REF".equals(f.get("association"))).count();
+        List<String> markerPaths=parseStringArray(String.valueOf(row.get("marker_evidence_json")));
+        long eligibleSuspected=inventory.stream().filter(f->Boolean.FALSE.equals(f.get("selected"))
+                &&Set.of("LIKELY","UNCERTAIN").contains(f.get("association"))
+                &&!markerPaths.contains(String.valueOf(f.get("source_path")))
+                &&!String.valueOf(f.get("reason_json")).contains("ASDM_FILE_UNREADABLE_OR_OVERSIZE")).count();
         String found = inventory.isEmpty() ? "产物：`requirement-doc.md`"
                 : "自动确认关联：**" + confirmed + " 份**\n推断关联待确认：**" + likely
                     + " 份**\n归属不明：**" + uncertain + " 份**（不会自动发布）\n外部引用：**" + external + " 项**";
@@ -113,12 +132,23 @@ public class CollabAsdmPublishCardService {
         Map<String,Object> publishColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(publishButton));
         Map<String,Object> gitlabColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(gitlabButton));
         Map<String,Object> listColumn=Map.of("tag","column","width","weighted","weight",1,"elements",List.of(listButton));
-        elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",List.of(listColumn,gitlabColumn,publishColumn)));
+        List<Object> columns=new ArrayList<>(List.of(listColumn,gitlabColumn));
+        if(eligibleSuspected>0){
+            Map<String,Object> includeButton=Map.of("tag","button","type","default","element_id","collab_asdm_include_suspected",
+                    "name",INCLUDE_ACTION+"|"+candidateId+"|"+revision,
+                    "text",Map.of("tag","plain_text","content","一键纳入疑似产物（"+eligibleSuspected+"）"),
+                    "behaviors",List.of(Map.of("type","callback","value",Map.of("action",INCLUDE_ACTION,"candidateId",candidateId,
+                            "candidateRevision",revision,"stageId",stageId,"attemptNo",row.get("attempt_no")))));
+            columns.add(Map.of("tag","column","width","weighted","weight",1,"elements",List.of(includeButton)));
+        }
+        columns.add(Map.of("tag","column","width","weighted","weight",1,"elements",List.of(publishButton)));
+        elements.add(Map.of("tag","column_set","flex_mode","none","background_style","default","columns",columns));
         chats.sendInteractive(chatId,CollabFeishuCardLayout.card("产物待发布 · " + String.valueOf(row.get("stage_title")), "blue", elements),"asdm-candidate:"+candidateId+":revision:"+revision);
     }
 
     private P2CardActionTriggerResponse result(P2CardActionTriggerResponse response,CallBackToast toast,String type,String content){toast.setType(type);toast.setContent(content);return response;}
     private long parseLong(Object value){if(value instanceof Number number)return number.longValue();return Long.parseLong(String.valueOf(value));}
+    private List<String> parseStringArray(String value){try{JsonNode node=mapper.readTree(value);if(!node.isArray())return List.of();List<String> result=new ArrayList<>();node.forEach(item->{if(item.isTextual())result.add(item.asText());});return result;}catch(Exception ignored){return List.of();}}
     private boolean blank(String value){return value==null||value.isBlank()||"null".equals(value);}
     private Map<String,Object> row(ResultSet rs)throws SQLException{Map<String,Object> result=new java.util.HashMap<>();for(int i=1;i<=rs.getMetaData().getColumnCount();i++)result.put(rs.getMetaData().getColumnLabel(i).toLowerCase(java.util.Locale.ROOT),rs.getObject(i));return result;}
     private String encodePath(String value){String[] parts=value.split("/",-1);List<String> encoded=new ArrayList<>();for(String part:parts)encoded.add(URLEncoder.encode(part,StandardCharsets.UTF_8).replace("+","%20"));return String.join("/",encoded);}

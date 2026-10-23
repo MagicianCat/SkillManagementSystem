@@ -97,11 +97,19 @@ public class CollabAsdmMultiStageDetectionService {
                     access.projectId(), req.baselineHead(), "workspace", access.token(), properties.maxDiscoveryEntries(), access.repositoryBase()));
             List<Stage> active = jdbc.query("select id,stage_key,status,attempt_no,actors_frozen_at from collab_stage where project_id=? and status in ('IN_PROGRESS','REWORK') and actors_frozen_at is not null order by stage_order",
                     (rs,n)->stage(rs), requirementId);
+            List<Stage> scanStages = new ArrayList<>();
+            for (Stage stage : active) {
+                if ("REWORK".equals(stage.status()) && sameHeadAsLatestRejectedSubmission(stage.id(), head)) {
+                    invalidateCandidate(stage, "ASDM_WAITING_FOR_NEW_COMMIT_AFTER_REJECTION");
+                } else {
+                    scanStages.add(stage);
+                }
+            }
             Map<String,Long> matchCounts=new LinkedHashMap<>();
-            for(Stage stage:active)if(stageRules.containsKey(stage.key())&&stageRules.get(stage.key()).enabled())matchCounts.put(stage.key(),tree.stream().filter(e->"blob".equals(e.type())&&readable(e.path())&&rules.mayMatchStagePath(stage.key(),req.path(),e.path(),stageRules.get(stage.key()))).count());
+            for(Stage stage:scanStages)if(stageRules.containsKey(stage.key())&&stageRules.get(stage.key()).enabled())matchCounts.put(stage.key(),tree.stream().filter(e->"blob".equals(e.type())&&readable(e.path())&&rules.mayMatchStagePath(stage.key(),req.path(),e.path(),stageRules.get(stage.key()))).count());
             Set<String> overLimit=matchCounts.entrySet().stream().filter(e->e.getValue()>properties.maxCandidateFiles()).map(Map.Entry::getKey).collect(java.util.stream.Collectors.toSet());
             List<TreeEntry> relevant = tree.stream().filter(e -> "blob".equals(e.type()) && readable(e.path())
-                    && active.stream().anyMatch(s->!overLimit.contains(s.key())&&rules.mayMatchStagePath(s.key(),req.path(),e.path(),stageRules.get(s.key())))).toList();
+                    && scanStages.stream().anyMatch(s->!overLimit.contains(s.key())&&rules.mayMatchStagePath(s.key(),req.path(),e.path(),stageRules.get(s.key())))).toList();
             List<CollabAsdmStageRules.InputFile> files = new ArrayList<>(relevant.size());
             Map<String, FileContent> rawByPath = suppliedRaw == null ? new LinkedHashMap<>() : new LinkedHashMap<>(suppliedRaw);
             for (TreeEntry entry : relevant) {
@@ -119,7 +127,7 @@ public class CollabAsdmMultiStageDetectionService {
                     } else throw ex;
                 }
             }
-            for (Stage stage : active) {
+            for (Stage stage : scanStages) {
                 if (!stageRules.containsKey(stage.key()) || !stageRules.get(stage.key()).enabled() || !hasActiveOwner(req.groupId(), stage.id())) continue;
                 if (submissionClaimed(stage.id(), stage.attempt())) { closeBySubmission(stage); continue; }
                 if(overLimit.contains(stage.key())){markStageScanError(stage,"ASDM_CANDIDATE_LIMIT_EXCEEDED");continue;}
@@ -134,6 +142,15 @@ public class CollabAsdmMultiStageDetectionService {
             if (ex.httpStatus() == 401 || ex.httpStatus() == 403) pauseCredential(req.groupId(), ex.errorCode());
             markScanError(requirementId, ex.errorCode());
         }
+    }
+
+    private boolean sameHeadAsLatestRejectedSubmission(long stageId, String head) {
+        String rejectedHead = jdbc.query("select coalesce(p.source_commit_sha, json_unquote(json_extract(av.source_ref_json,'$.commitSha'))) "
+                        + "from collab_submission sub join collab_artifact_version av on av.id=sub.artifact_version_id "
+                        + "left join collab_asdm_package p on p.submission_id=sub.id and p.package_status='PUBLISHED' "
+                        + "where sub.stage_id=? and sub.status='REJECTED' order by sub.id desc limit 1",
+                rs -> rs.next() ? rs.getString(1) : null, stageId);
+        return rejectedHead != null && rejectedHead.equals(head);
     }
 
     private void persistCandidate(Requirement req, CollabAsdmConfigurationService.RepositoryAccess access, Stage stage,
@@ -265,6 +282,44 @@ public class CollabAsdmMultiStageDetectionService {
 
     @Transactional
     public CandidateDetail updateAssociations(String key,String stageKey,AssociationUpdate request,long actorId) {
+        return applyAssociations(key,stageKey,request,actorId);
+    }
+
+    /** Includes all eligible likely/uncertain files from a candidate and queues a fresh scan for Feishu callbacks. */
+    @Transactional
+    public AssociationBatchResult includeSuspectedFiles(long candidateId,int revision,long actorId) {
+        return includeSuspectedFiles(null,null,candidateId,revision,actorId);
+    }
+
+    @Transactional
+    public AssociationBatchResult includeSuspectedFiles(String requirementKey,String expectedStageKey,long candidateId,int revision,long actorId) {
+        Map<String,Object> candidate=jdbc.query("select c.requirement_id,c.stage_key,c.detected_revision,c.version_no,c.status,p.project_key "
+                        +"from collab_asdm_candidate c join collab_project p on p.id=c.requirement_id where c.id=? for update",
+                rs->rs.next()?row(rs):null,candidateId);
+        if(candidate==null)throw error("ASDM_CANDIDATE_NOT_FOUND",HttpStatus.NOT_FOUND);
+        if((requirementKey!=null&&!requirementKey.equals(candidate.get("project_key")))
+                ||(expectedStageKey!=null&&!expectedStageKey.equals(candidate.get("stage_key"))))
+            throw error("ASDM_CANDIDATE_NOT_FOUND",HttpStatus.NOT_FOUND);
+        if(!Set.of("DEBOUNCING","NOTIFIED").contains(candidate.get("status"))
+                ||((Number)candidate.get("detected_revision")).intValue()!=revision)
+            throw error("ASDM_CANDIDATE_STALE",HttpStatus.CONFLICT);
+        String key=String.valueOf(candidate.get("project_key"));
+        String stageKey=String.valueOf(candidate.get("stage_key"));
+        int version=((Number)candidate.get("version_no")).intValue();
+        List<String> markers=parseJsonList(Objects.toString(jdbc.queryForObject(
+                "select marker_evidence_json from collab_asdm_candidate where id=?",String.class,candidateId),"[]"));
+        List<AssociationChange> changes=candidateFiles.list(candidateId,revision).stream()
+                .filter(file->!file.selected()&&Set.of("LIKELY","UNCERTAIN").contains(file.association()))
+                .filter(file->!markers.contains(file.sourcePath()))
+                .filter(file->!Objects.toString(file.reasonJson(),"").contains("ASDM_FILE_UNREADABLE_OR_OVERSIZE"))
+                .map(file->new AssociationChange(file.sourcePath(),"CONFIRMED")).toList();
+        if(changes.isEmpty())throw error("ASDM_NO_SUSPECTED_FILES",HttpStatus.CONFLICT);
+        authorization.requireMemberOrThrow(key,actorId);
+        applyAssociations(key,stageKey,new AssociationUpdate(revision,version,changes),actorId);
+        return new AssociationBatchResult(changes.size(),true);
+    }
+
+    private CandidateDetail applyAssociations(String key,String stageKey,AssociationUpdate request,long actorId) {
         var project=authorization.requireMemberOrThrow(key,actorId);
         Integer owner=jdbc.queryForObject("select count(*) from collab_stage s join collab_requirement_stage_actor a on a.stage_id=s.id and a.duty='OWNER' and a.user_id=? and a.frozen_at is not null join collab_group_member gm on gm.group_id=? and gm.user_id=a.user_id and gm.status='ACTIVE' join iam_user u on u.id=a.user_id and u.status='ACTIVE' where s.project_id=? and s.stage_key=? and s.status in ('IN_PROGRESS','REWORK')",Integer.class,actorId,project.groupId(),project.projectId(),stageKey);
         if(actorId!=project.groupOwnerUserId()&&actorId!=project.createdBy()&&(owner==null||owner==0))
@@ -287,8 +342,15 @@ public class CollabAsdmMultiStageDetectionService {
             if(changed==0)jdbc.update("insert into collab_asdm_file_association(requirement_id,stage_key,source_path_sha256,source_path,association_status,review_actor_user_id,reason,time_updated) values(?,?,?,?,?,?,?,now(3))",
                     project.projectId(),stageKey,sha256(change.path().getBytes(StandardCharsets.UTF_8)),change.path(),change.association(),actorId,"MANUAL_REVIEW");
         }
-        scanRequirement(project.projectId());
+        queueAssociationRescan(project.groupId(),project.projectId(),candidateId,revision);
         return candidate(key,stageKey,actorId);
+    }
+
+    private void queueAssociationRescan(long groupId,long requirementId,long candidateId,int revision) {
+        Instant now=Instant.now();
+        jdbc.update("insert into collab_asdm_scan_task(group_id,requirement_id,task_type,dedupe_key,status,available_at,time_created,time_updated) "
+                        +"values(?,?,'RESCAN',?,'PENDING',?,?,?)",
+                groupId,requirementId,"asdm:association:"+candidateId+":"+revision+":"+java.util.UUID.randomUUID(),now,now,now);
     }
 
     public List<CandidateFile> candidateFiles(long candidateId,int revision){return candidateFiles.list(candidateId,revision);}
@@ -359,6 +421,7 @@ public class CollabAsdmMultiStageDetectionService {
     public record ScanQueued(boolean accepted,Instant queuedAt){}
     public record AssociationUpdate(int expectedRevision,int expectedVersion,List<AssociationChange> changes){}
     public record AssociationChange(String path,String association){}
+    public record AssociationBatchResult(int includedCount,boolean rescanQueued){}
     private record Requirement(long id,String name,long groupId,String projectStatus,String branch,String path,String baselineHead,String lastHead,String groupStatus,String repositoryUrl){}
     private record Stage(long id,long projectId,String key,String status,int attempt,long groupId){}
     private record Candidate(long id,int revision,String status,String manifestHash){}

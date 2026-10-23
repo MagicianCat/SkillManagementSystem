@@ -2,6 +2,7 @@ package com.company.skillplatform.collabproject.asdm.interfaces;
 
 import com.company.skillplatform.collabproject.asdm.application.CollabAsdmMultiStageDetectionService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -57,8 +58,15 @@ public class CollabAsdmStageController {
                 new CollabAsdmMultiStageDetectionService.AssociationUpdate(request.expectedRevision(),request.expectedVersion(),changes), actor(auth));
     }
 
+    @PostMapping("/{stageKey}/candidate:include-suspected")
+    public CollabAsdmMultiStageDetectionService.AssociationBatchResult includeSuspected(@PathVariable String requirementKey,
+            @PathVariable String stageKey, @Valid @RequestBody IncludeSuspectedRequest request, Authentication auth) {
+        return detection.includeSuspectedFiles(requirementKey,stageKey,request.candidateId(),request.expectedRevision(),actor(auth));
+    }
+
     private long actor(Authentication auth) { return ((Number) auth.getPrincipal()).longValue(); }
 
-    public record AssociationRequest(@Positive int expectedRevision,@Positive int expectedVersion,@NotEmpty List<@Valid AssociationChange> changes) {}
+    public record AssociationRequest(@Positive int expectedRevision,@Min(0) int expectedVersion,@NotEmpty List<@Valid AssociationChange> changes) {}
+    public record IncludeSuspectedRequest(@Positive long candidateId,@Positive int expectedRevision) {}
     public record AssociationChange(@NotBlank String path, @NotNull String association) {}
 }

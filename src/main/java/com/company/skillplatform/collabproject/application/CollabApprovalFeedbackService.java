@@ -14,7 +14,8 @@ import org.springframework.stereotype.Service;
 /** Read-only, submission-bound evidence collection for approval feedback. */
 @Service
 public class CollabApprovalFeedbackService {
-    private static final String MVP_STAGE = "REQUIREMENT";
+    private static final Set<String> SUPPORTED_STAGES = Set.of("REQUIREMENT", "PRODUCT", "ARCHITECTURE_DESIGN",
+            "UI_DESIGN", "FRONTEND_CODING", "BACKEND_CODING", "TESTING", "ACCEPTANCE");
     private final JdbcTemplate jdbc;
     private final CollabProjectAuthorizationService authorization;
     private final FeishuApprovalFeedbackGateway feishu;
@@ -43,7 +44,7 @@ public class CollabApprovalFeedbackService {
     }
 
     public Map<String,Object> artifacts(String requirementKey, Long submissionId, Long actorId) {
-        Round round = resolve(requirementKey, MVP_STAGE, submissionId, actorId);
+        Round round = resolve(requirementKey, null, submissionId, actorId);
         List<Map<String,Object>> docs = documents(round, false);
         List<Map<String,Object>> supplements = supplements(round);
         return map("submissionId", round.submissionId, "attemptNo", round.attemptNo,
@@ -53,7 +54,7 @@ public class CollabApprovalFeedbackService {
     }
 
     public Map<String,Object> decisions(String requirementKey, Long submissionId, Long actorId) {
-        Round round = resolve(requirementKey, MVP_STAGE, submissionId, actorId);
+        Round round = resolve(requirementKey, null, submissionId, actorId);
         List<Map<String,Object>> approvals = jdbc.queryForList("select a.id approvalId,a.reviewer_user_id reviewerUserId,u.display_name reviewerName,a.state,a.decision_comment decisionComment,a.time_created createdAt,a.decided_at decidedAt " +
                 "from collab_approval a join iam_user u on u.id=a.reviewer_user_id where a.submission_id=? order by a.id", round.submissionId);
         List<Map<String,Object>> roles = jdbc.queryForList("select r.requirement_role_id roleId,r.role_key_snapshot roleKey,r.role_name_snapshot roleName," +
@@ -72,7 +73,7 @@ public class CollabApprovalFeedbackService {
 
     public Map<String,Object> messages(String requirementKey, Long submissionId, String cutoffAt,
             String cursor, Long actorId) {
-        Round round = resolve(requirementKey, MVP_STAGE, submissionId, actorId);
+        Round round = resolve(requirementKey, null, submissionId, actorId);
         Instant cutoff = checkedCutoff(cutoffAt, round);
         if (round.chatId == null) return map("submissionId", round.submissionId, "items", List.of(), "cursor", null,
                 "hasMore", false, "messagesComplete", false, "threadsComplete", false,
@@ -114,7 +115,7 @@ public class CollabApprovalFeedbackService {
 
     public Map<String,Object> comments(String requirementKey, Long submissionId, String cutoffAt,
             String cursor, Long actorId) {
-        Round round = resolve(requirementKey, MVP_STAGE, submissionId, actorId);
+        Round round = resolve(requirementKey, null, submissionId, actorId);
         Instant cutoff = checkedCutoff(cutoffAt, round);
         List<Map<String,Object>> docs = documents(round, true).stream().filter(d -> Boolean.TRUE.equals(d.get("commentsSupported"))).toList();
         Cursor state = decodeCursor(cursor, round, cutoff, "comments");
@@ -165,11 +166,15 @@ public class CollabApprovalFeedbackService {
     }
 
     private Round resolve(String requirementKey, String stageKey, Long expectedSubmission, Long actorId) {
-        if (!MVP_STAGE.equalsIgnoreCase(stageKey)) throw error("APPROVAL_FEEDBACK_STAGE_UNSUPPORTED", "Only REQUIREMENT stage is supported", HttpStatus.BAD_REQUEST);
+        if (stageKey != null && !SUPPORTED_STAGES.contains(stageKey.toUpperCase(Locale.ROOT)))
+            throw error("APPROVAL_FEEDBACK_STAGE_UNSUPPORTED", "Unsupported stage key", HttpStatus.BAD_REQUEST);
         var project = authorization.requireMemberOrThrow(requirementKey, actorId);
-        List<Map<String,Object>> ownerRows = jdbc.queryForList("select s.id from collab_stage s join collab_requirement_stage_actor a on a.stage_id=s.id " +
-                "where s.project_id=? and s.stage_key='REQUIREMENT' and a.duty='OWNER' and a.user_id=? and a.frozen_at is not null", project.projectId(), actorId);
-        if (ownerRows.isEmpty()) throw error("APPROVAL_FEEDBACK_OWNER_REQUIRED", "A frozen requirement owner is required", HttpStatus.FORBIDDEN);
+        String stageFilter = stageKey == null ? "" : " and s.stage_key=?";
+        String submissionFilter = expectedSubmission == null ? "" : " and sub.id=?";
+        List<Object> params = new ArrayList<>();
+        params.add(project.projectId());
+        if (stageKey != null) params.add(stageKey.toUpperCase(Locale.ROOT));
+        if (expectedSubmission != null) params.add(expectedSubmission);
         List<Map<String,Object>> rows = jdbc.queryForList("select s.id stageId,s.stage_key stageKey,s.title stageTitle,s.status stageStatus,s.attempt_no currentAttempt, " +
                 "sub.id submissionId,sub.attempt_no attemptNo,sub.artifact_version_id artifactVersionId,sub.status submissionStatus, " +
                 "b.chat_id chatId, " +
@@ -177,12 +182,16 @@ public class CollabApprovalFeedbackService {
                 "(select min(a.time_created) from collab_approval a where a.submission_id=sub.id)) approvalStartedAt " +
                 "from collab_stage s join collab_submission sub on sub.stage_id=s.id " +
                 "left join collab_feishu_binding b on b.project_id=s.project_id " +
-                "where s.project_id=? and s.stage_key='REQUIREMENT' and ((s.status='PENDING_APPROVAL' and sub.status='PENDING_APPROVAL') or (s.status='REWORK' and sub.status='REJECTED')) " +
-                "order by sub.attempt_no desc limit 1", project.projectId());
-        if (rows.isEmpty()) throw error("APPROVAL_FEEDBACK_ROUND_UNAVAILABLE", "No pending approval or rejected requirement round is available", HttpStatus.CONFLICT);
+                "where s.project_id=?" + stageFilter + submissionFilter +
+                " and ((s.status='PENDING_APPROVAL' and sub.status='PENDING_APPROVAL') or (s.status='REWORK' and sub.status='REJECTED')) " +
+                "order by sub.attempt_no desc limit 1", params.toArray());
+        if (rows.isEmpty()) throw error("APPROVAL_FEEDBACK_ROUND_UNAVAILABLE", "No pending approval or rejected round is available for this stage", HttpStatus.CONFLICT);
         Map<String,Object> row = rows.get(0);
         Long sid = ((Number) row.get("submissionId")).longValue();
         if (expectedSubmission != null && !expectedSubmission.equals(sid)) throw error("APPROVAL_FEEDBACK_SUBMISSION_MISMATCH", "Submission does not match the current feedback round", HttpStatus.CONFLICT);
+        List<Map<String,Object>> ownerRows = jdbc.queryForList("select user_id from collab_requirement_stage_actor " +
+                "where stage_id=? and duty='OWNER' and user_id=? and frozen_at is not null", row.get("stageId"), actorId);
+        if (ownerRows.isEmpty()) throw error("APPROVAL_FEEDBACK_OWNER_REQUIRED", "A frozen owner of this stage is required", HttpStatus.FORBIDDEN);
         Object started = row.get("approvalStartedAt");
         if (started == null) throw error("APPROVAL_FEEDBACK_WINDOW_UNAVAILABLE", "Approval start time is unavailable", HttpStatus.CONFLICT);
         Instant start = started instanceof Timestamp t ? t.toInstant() : ((java.time.LocalDateTime) started).toInstant(java.time.ZoneOffset.UTC);

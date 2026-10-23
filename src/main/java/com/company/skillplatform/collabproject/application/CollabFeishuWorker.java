@@ -418,6 +418,12 @@ public class CollabFeishuWorker {
         elements.add(CollabFeishuCardLayout.markdown("**驳回意见：**\n" + CollabFeishuCardLayout.escape(comment)));
         if (row.get("artifact_url") != null)
             elements.add(Map.of("tag", "markdown", "content", "[查看被驳回的产物](" + row.get("artifact_url") + ")"));
+        if (newRequirement && row.get("group_name") != null) {
+            String feedbackPrompt = "使用 project-approval-feedback-fetch，收集「" + row.get("group_name")
+                    + "」项目组下「" + row.get("name") + "」的" + stageTitle + "阶段审批反馈";
+            elements.add(CollabFeishuCardLayout.markdown("当前阶段产物已被驳回。如需汇总群聊消息和文档批注，可使用以下提示词："));
+            elements.add(CollabFeishuCardLayout.markdown(promptMarkdown("审批反馈收集提示词", feedbackPrompt)));
+        }
         boolean asdmEnabled = newRequirement && row.get("asdm_branch") != null
                 && !row.get("asdm_branch").toString().isBlank();
         if (!asdmEnabled) {
