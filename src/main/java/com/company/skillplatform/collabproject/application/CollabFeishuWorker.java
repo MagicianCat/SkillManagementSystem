@@ -297,18 +297,29 @@ public class CollabFeishuWorker {
         elements.add(Map.of("tag", "hr"));
         elements.add(CollabFeishuCardLayout.markdown("[在飞书中查看待审批产物](" + row.get("feishu_url") + ")" + gitLinks));
         if (callbacksEnabled) {
-            elements.add(Map.of("tag", "button", "type", "primary", "element_id", "collab_approval_approve",
-                    "name", "collab_approve|" + submissionId + "|0",
-                    "text", Map.of("tag", "plain_text", "content", "批准"),
-                    "behaviors", List.of(Map.of("type", "callback", "value", Map.of("action", "collab_approve",
-                            "submissionId", submissionId, "approvalVersion", 0)))));
+            Map<String,Object> approveButton = approvalDecisionButton("批准", "primary", "collab_approve", submissionId);
+            Map<String,Object> rejectButton = approvalDecisionButton("驳回", "danger", "collab_reject", submissionId);
+            elements.add(Map.of("tag", "column_set", "flex_mode", "none", "background_style", "default",
+                    "columns", List.of(approvalButtonColumn(approveButton), approvalButtonColumn(rejectButton))));
         }
         elements.add(Map.of("tag", "button", "type", "default", "element_id", "collab_approval_details",
-                "text", Map.of("tag", "plain_text", "content", "查看详情 / 驳回"),
+                "text", Map.of("tag", "plain_text", "content", "查看详情"),
                 "behaviors", List.of(Map.of("type", "open_url", "default_url", reviewUrl,
                         "pc_url", reviewUrl, "ios_url", reviewUrl, "android_url", reviewUrl))));
         chats.sendInteractive(chatId, CollabFeishuCardLayout.card("待审批 · " + row.get("stage_title"), "orange", elements),
                 "collab-approval-submission-" + submissionId);
+    }
+
+    private Map<String, Object> approvalDecisionButton(String label, String type, String action, long submissionId) {
+        return Map.of("tag", "button", "type", type, "element_id", "collab_approval_" + action.substring("collab_".length()),
+                "name", action + "|" + submissionId + "|0",
+                "text", Map.of("tag", "plain_text", "content", label),
+                "behaviors", List.of(Map.of("type", "callback", "value", Map.of("action", action,
+                        "submissionId", submissionId, "approvalVersion", 0))));
+    }
+
+    private Map<String, Object> approvalButtonColumn(Map<String, Object> button) {
+        return Map.of("tag", "column", "width", "weighted", "weight", 1, "elements", List.of(button));
     }
 
     private String approvalRosterMarkdown(long submissionId) {

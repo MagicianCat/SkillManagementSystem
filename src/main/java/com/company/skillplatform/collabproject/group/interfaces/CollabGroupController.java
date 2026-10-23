@@ -1,9 +1,12 @@
 package com.company.skillplatform.collabproject.group.interfaces;
 
 import com.company.skillplatform.collabproject.group.application.CollabGroupService;
+import com.company.skillplatform.common.application.BusinessException;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import java.util.List;
+import java.util.Map;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -19,6 +22,21 @@ public class CollabGroupController {
     @PostMapping @ResponseStatus(HttpStatus.CREATED)
     public CollabGroupService.GroupView create(@Valid @RequestBody CreateRequest request,Authentication auth){return service.create(new CollabGroupService.CreateGroup(request.homeTeamId(),request.name(),request.description(),request.gitlabRootUrl(),request.asdmRepositoryUrl()),actor(auth));}
     @GetMapping public List<CollabGroupService.GroupView> list(Authentication auth){return service.list(actor(auth));}
+    @GetMapping("/resolve-requirement")
+    public Map<String,String> resolveRequirement(@RequestParam String groupName,
+            @RequestParam String requirementName, Authentication auth) {
+        if (groupName.isBlank()) throw new BusinessException("COLLAB_GROUP_NAME_REQUIRED", "Project group name is required", HttpStatus.BAD_REQUEST);
+        if (requirementName.isBlank()) throw new BusinessException("COLLAB_REQUIREMENT_NAME_REQUIRED", "Requirement name is required", HttpStatus.BAD_REQUEST);
+        List<CollabGroupService.GroupView> groups = service.list(actor(auth)).stream()
+                .filter(g -> g.name().equals(groupName.trim())).toList();
+        if (groups.isEmpty()) throw new BusinessException("COLLAB_GROUP_NAME_NOT_FOUND", "No visible project group has that exact name", HttpStatus.NOT_FOUND);
+        if (groups.size() > 1) throw new BusinessException("COLLAB_GROUP_NAME_AMBIGUOUS", "More than one visible project group has that exact name", HttpStatus.CONFLICT);
+        List<CollabGroupService.RequirementView> requirements = service.requirements(groups.get(0).groupKey(), actor(auth)).stream()
+                .filter(r -> r.name().equals(requirementName.trim())).toList();
+        if (requirements.isEmpty()) throw new BusinessException("COLLAB_REQUIREMENT_NAME_NOT_FOUND", "No requirement with that exact name exists in the project group", HttpStatus.NOT_FOUND);
+        if (requirements.size() > 1) throw new BusinessException("COLLAB_REQUIREMENT_NAME_AMBIGUOUS", "More than one requirement has that exact name in the project group", HttpStatus.CONFLICT);
+        return Map.of("groupKey", groups.get(0).groupKey(), "requirementKey", requirements.get(0).requirementKey());
+    }
     @GetMapping("/{groupKey}") public CollabGroupService.GroupView get(@PathVariable String groupKey,Authentication auth){return service.get(groupKey,actor(auth));}
     @PatchMapping("/{groupKey}") public CollabGroupService.GroupView update(@PathVariable String groupKey,@Valid @RequestBody UpdateRequest request,Authentication auth){return service.update(groupKey,actor(auth),new CollabGroupService.UpdateGroup(request.name(),request.description(),request.gitlabRootUrl(),request.expectedVersion()));}
 

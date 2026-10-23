@@ -91,7 +91,8 @@ public class CollabFeishuChatGateway {
                     && result.path("code").asInt(-1) != 99991663
                     && result.path("code").asInt(-1) != 99991668)
                 throw new IllegalStateException("Feishu chat HTTP " + response.statusCode()
-                        + " code=" + result.path("code").asInt(-1));
+                        + " code=" + result.path("code").asInt(-1)
+                        + " msg=" + result.path("msg").asText("").replaceAll("[\\r\\n]", " "));
             return result;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

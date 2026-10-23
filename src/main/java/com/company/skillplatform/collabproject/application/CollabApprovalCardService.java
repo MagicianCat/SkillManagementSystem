@@ -16,7 +16,8 @@ import org.springframework.stereotype.Service;
 @Service
 public class CollabApprovalCardService {
     private static final Logger log = LoggerFactory.getLogger(CollabApprovalCardService.class);
-    private static final String ACTION_PREFIX = "collab_approve|";
+    private static final String APPROVE_ACTION_PREFIX = "collab_approve|";
+    private static final String REJECT_ACTION_PREFIX = "collab_reject|";
 
     private final JdbcTemplate jdbc;
     private final CollabProjectFlowService flow;
@@ -31,7 +32,8 @@ public class CollabApprovalCardService {
         var action = event.getEvent().getAction();
         Object actionType = action.getValue() == null ? null : action.getValue().get("action");
         String name = action.getName();
-        return "collab_approve".equals(actionType) || name != null && name.startsWith(ACTION_PREFIX);
+        return "collab_approve".equals(actionType) || "collab_reject".equals(actionType)
+                || name != null && (name.startsWith(APPROVE_ACTION_PREFIX) || name.startsWith(REJECT_ACTION_PREFIX));
     }
 
     public P2CardActionTriggerResponse handle(P2CardActionTrigger event) {
@@ -51,17 +53,21 @@ public class CollabApprovalCardService {
             if (actors.size() != 1) return result(response, toast, "error", "飞书账号尚未关联唯一的研枢用户");
             long submissionId;
             long expectedVersion;
+            String decision;
             try {
                 var action = callback.getAction();
                 String callbackName = action.getName();
-                if (action.getValue() != null && "collab_approve".equals(action.getValue().get("action"))) {
+                Object actionValue = action.getValue() == null ? null : action.getValue().get("action");
+                if (action.getValue() != null && ("collab_approve".equals(actionValue) || "collab_reject".equals(actionValue))) {
                     submissionId = parseLong(action.getValue().get("submissionId"));
                     expectedVersion = parseLong(action.getValue().get("approvalVersion"));
-                } else if (callbackName != null && callbackName.startsWith(ACTION_PREFIX)) {
+                    decision = "collab_reject".equals(actionValue) ? "REJECT" : "APPROVE";
+                } else if (callbackName != null && (callbackName.startsWith(APPROVE_ACTION_PREFIX) || callbackName.startsWith(REJECT_ACTION_PREFIX))) {
                     String[] parts = callbackName.split("\\|", -1);
                     if (parts.length != 3) return result(response, toast, "error", "审批卡片已失效，请打开研枢审批页");
                     submissionId = Long.parseLong(parts[1]);
                     expectedVersion = Long.parseLong(parts[2]);
+                    decision = callbackName.startsWith(REJECT_ACTION_PREFIX) ? "REJECT" : "APPROVE";
                 } else {
                     return result(response, toast, "error", "审批卡片已失效，请打开研枢审批页");
                 }
@@ -72,8 +78,8 @@ public class CollabApprovalCardService {
             String projectKey = jdbc.query("select p.project_key from collab_submission sub join collab_stage s on s.id=sub.stage_id join collab_project p on p.id=s.project_id where sub.id=?",
                     rs -> rs.next() ? rs.getString(1) : null, submissionId);
             if (projectKey == null) return result(response, toast, "error", "审批事项不存在或已失效");
-            flow.decide(projectKey, submissionId, new DecisionRequest("APPROVE", null, expectedVersion), actors.get(0));
-            return result(response, toast, "success", "已批准，阶段状态已更新");
+            flow.decide(projectKey, submissionId, new DecisionRequest(decision, null, expectedVersion), actors.get(0));
+            return result(response, toast, "success", "REJECT".equals(decision) ? "已驳回，阶段已退回重做" : "已批准，阶段状态已更新");
         } catch (BusinessException denied) {
             String message = switch (denied.getCode()) {
                 case "COLLAB_APPROVER_REQUIRED", "COLLAB_PROJECT_MEMBER_REQUIRED", "COLLAB_PROJECT_NOT_FOUND" -> "当前飞书账号无权审批此事项";

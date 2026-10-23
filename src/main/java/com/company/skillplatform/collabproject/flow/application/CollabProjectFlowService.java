@@ -392,7 +392,6 @@ public class CollabProjectFlowService {
         if(!"PENDING".equals(row.get("state"))||!"PENDING_APPROVAL".equals(row.get("status")))throw error("COLLAB_SUBMISSION_ALREADY_DECIDED","Submission is no longer awaiting review",HttpStatus.CONFLICT);
         if(((Number)row.get("approval_version")).longValue()!=request.expectedVersion())throw error("COLLAB_APPROVAL_VERSION_STALE","Approval changed; reload and retry",HttpStatus.CONFLICT);
         String decision=request.decision().trim().toUpperCase(Locale.ROOT); if(!List.of("APPROVE","REJECT").contains(decision))throw error("COLLAB_DECISION_INVALID","Decision must be APPROVE or REJECT",HttpStatus.BAD_REQUEST);
-        if("REJECT".equals(decision)&&(request.comment()==null||request.comment().isBlank()))throw error("COLLAB_REJECTION_REASON_REQUIRED","A reason is required when rejecting",HttpStatus.UNPROCESSABLE_ENTITY);
         Instant now=Instant.now(); String approvalState="APPROVE".equals(decision)?"APPROVED":"REJECTED";
         int changed=jdbc.update("update collab_approval set state=?,decision_comment=?,decided_at=?,version_no=version_no+1,time_updated=? where id=? and state='PENDING' and version_no=?",approvalState,request.comment(),now,now,row.get("approval_id"),request.expectedVersion());
         if(changed!=1)throw error("COLLAB_SUBMISSION_ALREADY_DECIDED","Submission was decided concurrently",HttpStatus.CONFLICT);
