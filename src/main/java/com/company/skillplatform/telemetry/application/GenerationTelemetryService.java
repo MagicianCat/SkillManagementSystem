@@ -20,8 +20,10 @@ import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -62,6 +64,9 @@ public class GenerationTelemetryService {
         AiGenerationEntity generation = generations
                 .findByUser_IdAndHookGenerationId(userId, command.generationId())
                 .orElseGet(() -> new AiGenerationEntity(user, command.clientSessionId(), command.generationId(), status, command.startedAt()));
+        if (generation.getId() != null && !acceptsUpdate(generation, command))
+            return new GenerationView(generation.getId(), command.generationId(), generation.getStatus().name(),
+                    generation.getPrimaryStage() == null ? null : generation.getPrimaryStage().name());
 
         TokenUsage u = command.usage();
         CodeMetric c = command.code();
@@ -73,10 +78,13 @@ public class GenerationTelemetryService {
                 u == null ? null : parseTokenSource(u.source()), u == null ? null : parseTokenQuality(u.quality()),
                 c == null ? 0 : nz(c.linesAdded()), c == null ? 0 : nz(c.linesDeleted()),
                 c == null ? 0 : nzi(c.filesCreated()), c == null ? 0 : nzi(c.filesModified()),
-                nzi(command.toolCallCount()), nzi(command.toolFailureCount()));
+                nzi(command.toolCallCount()), nzi(command.toolFailureCount()), command.revision(),
+                command.captureQuality(), command.modelId(), command.modelName(), command.observedLog(),
+                command.observedStructured(), command.tokenMismatch(), command.codeSource(), command.ingestLagMs(),
+                command.durationSource());
         generation = generations.saveAndFlush(generation);
 
-        replaceSkillRelations(generation, command.skillKeys());
+        replaceSkillRelations(generation, command.skillKeys(), command.skillInvocations());
         replaceFileMetrics(generation, command.fileTypes());
         linkSkillUsageEvents(userId, command.generationId());
 
@@ -97,8 +105,40 @@ public class GenerationTelemetryService {
         return GenerationStage.MULTI_STAGE;
     }
 
-    private void replaceSkillRelations(AiGenerationEntity generation, List<String> skillKeys) {
+    private boolean acceptsUpdate(AiGenerationEntity existing, UpsertCommand incoming) {
+        if (existing.getCaptureRevision() > 0 && incoming.revision() == null) return false;
+        if (incoming.revision() != null && incoming.revision() <= existing.getCaptureRevision()) return false;
+        return qualityRank(incoming.captureQuality()) >= qualityRank(existing.getCaptureQuality());
+    }
+
+    private int qualityRank(String value) {
+        return switch (value == null ? "" : value) {
+            case "STRUCTURED" -> 2;
+            case "LOG_FINAL" -> 1;
+            default -> 0;
+        };
+    }
+
+    private void replaceSkillRelations(AiGenerationEntity generation, List<String> skillKeys,
+                                       List<SkillInvocationMetric> invocations) {
         generationSkills.deleteAll(generationSkills.findByGeneration_Id(generation.getId()));
+        if (invocations != null) {
+            Map<String, List<SkillInvocationMetric>> grouped = new LinkedHashMap<>();
+            for (SkillInvocationMetric invocation : invocations)
+                if (invocation.skillKey() != null) grouped.computeIfAbsent(invocation.skillKey(), key -> new ArrayList<>()).add(invocation);
+            List<AiGenerationSkillEntity> relations = new ArrayList<>();
+            for (SkillEntity skill : skills.findBySkillKeyIn(grouped.keySet())) {
+                List<SkillInvocationMetric> calls = grouped.get(skill.getSkillKey());
+                Instant first = calls.stream().map(SkillInvocationMetric::invokedAt).filter(t -> t != null)
+                        .min(Instant::compareTo).orElse(null);
+                Long versionId = calls.stream().map(SkillInvocationMetric::skillVersionId).filter(v -> v != null)
+                        .findFirst().orElse(null);
+                relations.add(new AiGenerationSkillEntity(generation, skill, versionId, first, calls.size()));
+            }
+            generationSkills.saveAll(relations);
+            generationSkills.flush();
+            return;
+        }
         if (skillKeys == null || skillKeys.isEmpty()) { generationSkills.flush(); return; }
         List<AiGenerationSkillEntity> relations = new ArrayList<>();
         Instant now = Instant.now();
@@ -156,7 +196,33 @@ public class GenerationTelemetryService {
             Instant startedAt, Instant endedAt, Long durationMs,
             String projectKey, String projectName, String projectSource,
             List<String> skillKeys, TokenUsage usage, CodeMetric code, List<FileTypeMetric> fileTypes,
-            Integer toolCallCount, Integer toolFailureCount, String status) {}
+            Integer toolCallCount, Integer toolFailureCount, String status,
+            Long revision, String captureQuality, String modelId, String modelName,
+            List<SkillInvocationMetric> skillInvocations, boolean observedLog, boolean observedStructured,
+            boolean tokenMismatch, String codeSource, Long ingestLagMs, String durationSource) {
+        public UpsertCommand(String generationId, String clientSessionId, String clientInstallationId,
+                Instant startedAt, Instant endedAt, Long durationMs, String projectKey, String projectName,
+                String projectSource, List<String> skillKeys, TokenUsage usage, CodeMetric code,
+                List<FileTypeMetric> fileTypes, Integer toolCallCount, Integer toolFailureCount, String status,
+                Long revision, String captureQuality, String modelId, String modelName,
+                List<SkillInvocationMetric> skillInvocations) {
+            this(generationId, clientSessionId, clientInstallationId, startedAt, endedAt, durationMs,
+                    projectKey, projectName, projectSource, skillKeys, usage, code, fileTypes,
+                    toolCallCount, toolFailureCount, status, revision, captureQuality, modelId, modelName,
+                    skillInvocations, false, false, false, null, null, null);
+        }
+        public UpsertCommand(String generationId, String clientSessionId, String clientInstallationId,
+                Instant startedAt, Instant endedAt, Long durationMs, String projectKey, String projectName,
+                String projectSource, List<String> skillKeys, TokenUsage usage, CodeMetric code,
+                List<FileTypeMetric> fileTypes, Integer toolCallCount, Integer toolFailureCount, String status) {
+            this(generationId, clientSessionId, clientInstallationId, startedAt, endedAt, durationMs,
+                    projectKey, projectName, projectSource, skillKeys, usage, code, fileTypes,
+                    toolCallCount, toolFailureCount, status, null, null, null, null, null,
+                    false, false, false, null, null, null);
+        }
+    }
+
+    public record SkillInvocationMetric(String skillKey, Long skillVersionId, Instant invokedAt) {}
 
     public record TokenUsage(Long inputTokens, Long outputTokens, Long totalTokens,
             Long cacheReadTokens, Long cacheWriteTokens, Long cacheMissTokens,

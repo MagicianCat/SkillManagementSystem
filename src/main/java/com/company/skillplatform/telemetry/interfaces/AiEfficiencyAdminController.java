@@ -28,6 +28,14 @@ public class AiEfficiencyAdminController {
                 new AiEfficiencyAdminService.Filters(from, to, teamId, userId));
     }
 
+    @GetMapping("/ingest-health")
+    public AiEfficiencyAdminService.IngestHealth ingestHealth(@RequestParam(required = false) Instant from,
+            @RequestParam(required = false) Instant to, @RequestParam(required = false) Long teamId,
+            @RequestParam(required = false) Long userId, Authentication authentication) {
+        return service.ingestHealth(userId(authentication), global(authentication),
+                new AiEfficiencyAdminService.Filters(from, to, teamId, userId));
+    }
+
     @GetMapping("/generations")
     public PageResponse<AiEfficiencyAdminService.GenerationRow> generations(
             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size,

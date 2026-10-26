@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class GenerationTelemetryServiceTest {
     private final AiGenerationRepository generations = mock(AiGenerationRepository.class);
@@ -135,5 +136,52 @@ class GenerationTelemetryServiceTest {
                 null, null, null, null, null);
         var view = service.upsert(7L, cmd);
         assertThat(view.generationId()).isEqualTo("g-3");
+    }
+
+    @Test
+    void countsRepeatedInvocationsOfOneSkill() {
+        when(generations.findByUser_IdAndHookGenerationId(7L, "g-calls")).thenReturn(Optional.empty());
+        SkillEntity skill = mock(SkillEntity.class);
+        when(skill.getSkillKey()).thenReturn("code-review");
+        when(skills.findBySkillKeyIn(anyCollection())).thenReturn(List.of(skill));
+        var base = command("g-calls", List.of("code-review"));
+        var call = new GenerationTelemetryService.SkillInvocationMetric("code-review", 283L,
+                Instant.parse("2026-09-18T10:01:00Z"));
+        var incoming = new GenerationTelemetryService.UpsertCommand(base.generationId(), base.clientSessionId(),
+                base.clientInstallationId(), base.startedAt(), base.endedAt(), base.durationMs(),
+                base.projectKey(), base.projectName(), base.projectSource(), base.skillKeys(), base.usage(),
+                base.code(), base.fileTypes(), base.toolCallCount(), base.toolFailureCount(), base.status(),
+                1L, "STRUCTURED", "glm-5.3", "GLM-5.3", List.of(call, call));
+
+        service.upsert(7L, incoming);
+
+        verify(generationSkills).saveAll(argThat(rows -> {
+            var values = (Iterable<com.company.skillplatform.telemetry.infrastructure.entity.AiGenerationSkillEntity>) rows;
+            var iterator = values.iterator();
+            return iterator.hasNext() && iterator.next().getInvocationCount() == 2 && !iterator.hasNext();
+        }));
+    }
+
+    @Test
+    void rejectsOlderAndLowerQualityUpdatesToStructuredGeneration() {
+        AiGenerationEntity existing = new AiGenerationEntity(user, "session-1", "g-merge", GenerationStatus.COMPLETED,
+                Instant.parse("2026-09-18T10:00:00Z"));
+        ReflectionTestUtils.setField(existing, "id", 42L);
+        var base = command("g-merge", List.of());
+        existing.apply(base.clientInstallationId(), null, null, null, null, base.endedAt(), base.durationMs(),
+                GenerationStatus.COMPLETED, 100L, 20L, 120L, null, null, null, null, null, null,
+                null, null, 0, 0, 0, 0, 0, 0, 3L, "STRUCTURED", "glm-5.3", "GLM-5.3",
+                true, true, false, "FILE_TREE_REQUEST_DIFF", 100L, "LOG_END");
+        when(generations.findByUser_IdAndHookGenerationId(7L, "g-merge")).thenReturn(Optional.of(existing));
+        var stale = new GenerationTelemetryService.UpsertCommand(base.generationId(), base.clientSessionId(),
+                base.clientInstallationId(), base.startedAt(), base.endedAt(), base.durationMs(),
+                base.projectKey(), base.projectName(), base.projectSource(), base.skillKeys(), base.usage(),
+                base.code(), base.fileTypes(), base.toolCallCount(), base.toolFailureCount(), base.status(),
+                2L, "LOG_FINAL", null, null, null);
+
+        service.upsert(7L, stale);
+
+        assertThat(existing.getCaptureRevision()).isEqualTo(3L);
+        verify(generations, never()).saveAndFlush(any());
     }
 }

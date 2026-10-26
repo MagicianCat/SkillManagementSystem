@@ -37,7 +37,12 @@ public class GenerationTelemetryController {
                         request.code.linesAdded, request.code.linesDeleted, request.code.filesCreated, request.code.filesModified),
                 request.fileTypes == null ? null : request.fileTypes.stream().map(f -> new GenerationTelemetryService.FileTypeMetric(
                         f.type, f.extension, f.linesAdded, f.linesDeleted, f.filesCreated, f.filesModified)).toList(),
-                request.toolCallCount, request.toolFailureCount, request.status));
+                request.toolCallCount, request.toolFailureCount, request.status,
+                request.revision, request.captureQuality, request.modelId, request.modelName,
+                request.skillInvocations == null ? null : request.skillInvocations.stream().map(s ->
+                        new GenerationTelemetryService.SkillInvocationMetric(s.skillKey, s.skillVersionId, s.invokedAt)).toList(),
+                request.observedLog, request.observedStructured, request.tokenMismatch, request.codeSource,
+                request.ingestLagMs, request.durationSource));
     }
 
     public static class UpsertRequest {
@@ -57,6 +62,23 @@ public class GenerationTelemetryController {
         public Integer toolCallCount;
         public Integer toolFailureCount;
         @Size(max = 32) public String status;
+        public Long revision;
+        @Size(max = 32) public String captureQuality;
+        @Size(max = 128) public String modelId;
+        @Size(max = 256) public String modelName;
+        @Valid public List<SkillInvocation> skillInvocations;
+        public boolean observedLog;
+        public boolean observedStructured;
+        public boolean tokenMismatch;
+        @Size(max = 64) public String codeSource;
+        public Long ingestLagMs;
+        @Size(max = 32) public String durationSource;
+    }
+
+    public static class SkillInvocation {
+        @NotBlank @Size(max = 128) public String skillKey;
+        public Long skillVersionId;
+        public Instant invokedAt;
     }
 
     public static class Usage {

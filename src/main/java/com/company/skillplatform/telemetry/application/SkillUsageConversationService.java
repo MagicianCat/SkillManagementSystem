@@ -41,7 +41,8 @@ public class SkillUsageConversationService {
             if (!body.isObject() || !body.path("messages").isArray()) throw error("CONVERSATION_INVALID", HttpStatus.BAD_REQUEST);
         }
         catch (IOException ex) { throw error("CONVERSATION_INVALID", HttpStatus.BAD_REQUEST); }
-        String key = "telemetry/codebuddy/" + userId + "/" + hash(event.getClientSessionId()) + "/chunks/" + eventUuid + ".json.gz.enc";
+        String key = "telemetry/codebuddy/" + userId + "/" + hash(event.getClientSessionId()) + "/chunks/" +
+                eventUuid + "-" + hashBytes(compressed) + ".json.gz.enc";
         if (!storage.exists(key)) { byte[] encrypted = cipher.encryptBytes(compressed); storage.put(key, new ByteArrayInputStream(encrypted), encrypted.length, "application/octet-stream"); }
         event.stageConversation(key); events.save(event);
     }
@@ -120,7 +121,8 @@ public class SkillUsageConversationService {
         }
         return out.toByteArray();
     }
-    private String hash(String value) { try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); } catch (Exception ex) { throw new IllegalStateException(ex); } }
+    private String hash(String value) { return hashBytes(value.getBytes(StandardCharsets.UTF_8)); }
+    private String hashBytes(byte[] value) { try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value)); } catch (Exception ex) { throw new IllegalStateException(ex); } }
     private BusinessException error(String code, HttpStatus status) { return new BusinessException(code, code, status); }
 
     public record ConversationPage(String status, long version, int totalMessages, List<JsonNode> messages) {}

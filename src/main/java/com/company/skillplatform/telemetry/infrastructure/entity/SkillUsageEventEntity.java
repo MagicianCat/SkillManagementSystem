@@ -60,4 +60,15 @@ public class SkillUsageEventEntity extends BaseJpaEntity {
     public void markConversationStatus(String status, String errorCode) { conversationStatus = status; conversationErrorCode = errorCode; }
     public void stageConversation(String objectKey) { conversationChunkObjectKey = objectKey; conversationStatus = "STAGED"; }
     public void incrementConversationAttempts() { conversationAttempts++; }
+    public boolean enrich(String actualModel, String workspace) {
+        boolean changed = false;
+        if ((model == null || model.isBlank()) && actualModel != null && !actualModel.isBlank()) {
+            model = actualModel; changed = true;
+        }
+        if ((localDirectory == null || "UNKNOWN".equals(localDirectory)) && workspace != null &&
+                !workspace.isBlank() && !"UNKNOWN".equals(workspace)) {
+            localDirectory = workspace; changed = true;
+        }
+        return changed;
+    }
 }

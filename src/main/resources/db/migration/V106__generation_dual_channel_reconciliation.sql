@@ -1,0 +1,12 @@
+ALTER TABLE ai_generation_event
+    ADD COLUMN capture_revision BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN capture_quality VARCHAR(32) NULL,
+    ADD COLUMN model_id VARCHAR(128) NULL,
+    ADD COLUMN model_name VARCHAR(256) NULL,
+    ADD COLUMN version_no INT NOT NULL DEFAULT 0,
+    ADD COLUMN observed_log BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN observed_structured BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN token_mismatch BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN code_source VARCHAR(64) NULL,
+    ADD COLUMN ingest_lag_ms BIGINT NULL,
+    ADD COLUMN duration_source VARCHAR(32) NULL;

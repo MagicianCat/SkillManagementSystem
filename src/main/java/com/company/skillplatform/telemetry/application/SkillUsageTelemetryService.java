@@ -33,7 +33,11 @@ public class SkillUsageTelemetryService {
     @Transactional
     public EventView record(Long userId, CreateCommand command) {
         validateUuid(command.eventUuid());
-        return events.findByEventUuid(command.eventUuid()).map(this::view).orElseGet(() -> {
+        return events.findByEventUuid(command.eventUuid()).map(existing -> {
+            if (!existing.getUserId().equals(userId)) throw error("EVENT_NOT_FOUND", HttpStatus.NOT_FOUND);
+            if (existing.enrich(command.model(), command.localDirectory())) events.saveAndFlush(existing);
+            return view(existing);
+        }).orElseGet(() -> {
             IamUserEntity user = users.findById(userId).orElseThrow(() -> error("USER_NOT_FOUND", HttpStatus.UNAUTHORIZED));
             SkillEntity skill = skills.findBySkillKey(command.skillKey()).orElseThrow(() -> error("SKILL_NOT_FOUND", HttpStatus.UNPROCESSABLE_ENTITY));
             if (command.skillVersionId() != null) {

@@ -26,6 +26,17 @@ public class AiGenerationEntity extends BaseJpaEntity {
     @Column(name = "project_key", length = 128) private String projectKey;
     @Column(name = "project_name", length = 256) private String projectName;
     @Column(name = "project_source", length = 32) private String projectSource;
+    @Column(name = "capture_revision", nullable = false) private long captureRevision;
+    @Column(name = "capture_quality", length = 32) private String captureQuality;
+    @Column(name = "model_id", length = 128) private String modelId;
+    @Column(name = "model_name", length = 256) private String modelName;
+    @Version @Column(name = "version_no", nullable = false) private int versionNo;
+    @Column(name = "observed_log", nullable = false) private boolean observedLog;
+    @Column(name = "observed_structured", nullable = false) private boolean observedStructured;
+    @Column(name = "token_mismatch", nullable = false) private boolean tokenMismatch;
+    @Column(name = "code_source", length = 64) private String codeSource;
+    @Column(name = "ingest_lag_ms") private Long ingestLagMs;
+    @Column(name = "duration_source", length = 32) private String durationSource;
 
     @Enumerated(EnumType.STRING) @Column(name = "primary_stage", length = 32) private GenerationStage primaryStage;
 
@@ -77,7 +88,10 @@ public class AiGenerationEntity extends BaseJpaEntity {
             Long inputTokens, Long outputTokens, Long totalTokens, Long cacheReadTokens, Long cacheWriteTokens,
             Long cacheMissTokens, Long thinkingTokens, Integer modelCallCount, Long lastTokens,
             TokenSource tokenSource, TokenQuality tokenQuality, long linesAdded, long linesDeleted,
-            int filesCreated, int filesModified, int toolCallCount, int toolFailureCount) {
+            int filesCreated, int filesModified, int toolCallCount, int toolFailureCount,
+            Long captureRevision, String captureQuality, String modelId, String modelName,
+            boolean observedLog, boolean observedStructured, boolean tokenMismatch, String codeSource,
+            Long ingestLagMs, String durationSource) {
         this.clientInstallationId = clientInstallationId;
         this.projectKey = projectKey; this.projectName = projectName; this.projectSource = projectSource;
         this.primaryStage = primaryStage;
@@ -89,6 +103,11 @@ public class AiGenerationEntity extends BaseJpaEntity {
         this.linesAdded = linesAdded; this.linesDeleted = linesDeleted;
         this.filesCreated = filesCreated; this.filesModified = filesModified;
         this.toolCallCount = toolCallCount; this.toolFailureCount = toolFailureCount;
+        this.captureRevision = captureRevision == null ? 0 : captureRevision;
+        this.captureQuality = captureQuality; this.modelId = modelId; this.modelName = modelName;
+        this.observedLog = observedLog; this.observedStructured = observedStructured;
+        this.tokenMismatch = tokenMismatch; this.codeSource = codeSource; this.ingestLagMs = ingestLagMs;
+        this.durationSource = durationSource;
     }
 
     public Long getId() { return super.getId(); }
@@ -98,6 +117,8 @@ public class AiGenerationEntity extends BaseJpaEntity {
     public String getClientSessionId() { return clientSessionId; }
     public GenerationStage getPrimaryStage() { return primaryStage; }
     public GenerationStatus getStatus() { return status; }
+    public long getCaptureRevision() { return captureRevision; }
+    public String getCaptureQuality() { return captureQuality; }
     public TokenQuality getTokenQuality() { return tokenQuality; }
     public Instant getStartedAt() { return startedAt; }
 }

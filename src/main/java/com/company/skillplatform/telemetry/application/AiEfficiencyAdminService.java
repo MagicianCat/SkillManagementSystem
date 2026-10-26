@@ -58,6 +58,37 @@ public class AiEfficiencyAdminService {
                 fileTypes, tokens, effective.from(), effective.to());
     }
 
+    @Transactional(readOnly = true)
+    public IngestHealth ingestHealth(Long actorId, boolean globalAdmin, Filters filters) {
+        QueryParts parts = queryParts(actorId, globalAdmin, effectiveFilters(filters), null);
+        var row = jdbc.queryForMap("SELECT COUNT(*) total, " +
+                "COALESCE(SUM(CASE WHEN e.observed_structured THEN 1 ELSE 0 END),0) structured_count, " +
+                "COALESCE(SUM(CASE WHEN e.observed_log THEN 1 ELSE 0 END),0) log_count, " +
+                "COALESCE(SUM(CASE WHEN e.observed_structured AND e.observed_log THEN 1 ELSE 0 END),0) merged_count, " +
+                "COALESCE(SUM(CASE WHEN e.token_mismatch THEN 1 ELSE 0 END),0) mismatch_count, " +
+                "COALESCE(SUM(CASE WHEN e.code_source='ROAMING_FILE_CHANGES_TIME_WINDOW' THEN 1 ELSE 0 END),0) fallback_count, " +
+                "COALESCE(SUM(CASE WHEN e.code_source IS NOT NULL THEN 1 ELSE 0 END),0) code_count, " +
+                "COUNT(e.ingest_lag_ms) lag_count FROM ai_generation_event e JOIN iam_user u ON u.id=e.user_id " +
+                parts.where(), parts.params());
+        long total = number(row.get("total"));
+        long code = number(row.get("code_count"));
+        long lagCount = number(row.get("lag_count"));
+        Long p95 = null;
+        if (lagCount > 0) {
+            var lagParams = new MapSqlParameterSource();
+            parts.params().getValues().forEach(lagParams::addValue);
+            lagParams.addValue("lagOffset", (long) Math.ceil(lagCount * 0.95) - 1);
+            p95 = jdbc.queryForObject("SELECT e.ingest_lag_ms FROM ai_generation_event e JOIN iam_user u ON u.id=e.user_id " +
+                    parts.where() + " AND e.ingest_lag_ms IS NOT NULL ORDER BY e.ingest_lag_ms LIMIT 1 OFFSET :lagOffset",
+                    lagParams, Long.class);
+        }
+        return new IngestHealth(total, ratio(number(row.get("structured_count")), total),
+                ratio(number(row.get("log_count")), total), ratio(number(row.get("merged_count")), total),
+                number(row.get("mismatch_count")), ratio(number(row.get("fallback_count")), code), p95);
+    }
+
+    private double ratio(long numerator, long denominator) { return denominator == 0 ? 0 : (double) numerator / denominator; }
+
     // ---- Generation 明细 ----
 
     @Transactional(readOnly = true)
@@ -451,6 +482,8 @@ public class AiEfficiencyAdminService {
     // ---- DTO ----
 
     public record Filters(Instant from, Instant to, Long teamId, Long userId) {}
+    public record IngestHealth(long generations, double structuredCoverage, double logCoverage,
+            double mergeRate, long tokenMismatchCount, double fileDiffFallbackRate, Long ingestLagP95Ms) {}
 
     public record Summary(long generations, long activeUsers, long linesAdded, long linesDeleted,
             long inputTokens, long outputTokens, long totalTokens, double tokenCoverageRate,
