@@ -56,7 +56,7 @@ public class ExternalResourceAdminService {
     }
 
     public List<Map<String,Object>> resources(Long roleId, String type, String keyword, int page, int size) {
-        StringBuilder sql = new StringBuilder("SELECT r.id,r.source_system AS sourceSystem,r.external_resource_id AS externalResourceId,r.resource_type AS resourceType,r.name,r.description,r.current_version_id AS currentVersionId,v.external_version AS externalVersion,v.size_bytes AS sizeBytes,v.received_at AS receivedAt,rr.role_id AS roleId FROM external_resource r JOIN external_role_resource rr ON rr.resource_id=r.id LEFT JOIN external_resource_version v ON v.id=r.current_version_id WHERE 1=1");
+        StringBuilder sql = new StringBuilder("SELECT r.id,r.source_system AS sourceSystem,r.external_resource_id AS externalResourceId,r.resource_type AS resourceType,r.name,r.description,r.development_stage AS developmentStage,r.sub_stage_key AS subStageKey,r.current_version_id AS currentVersionId,v.external_version AS externalVersion,v.size_bytes AS sizeBytes,v.received_at AS receivedAt,rr.role_id AS roleId FROM external_resource r JOIN external_role_resource rr ON rr.resource_id=r.id LEFT JOIN external_resource_version v ON v.id=r.current_version_id WHERE 1=1");
         List<Object> args = new ArrayList<>();
         if (roleId != null) { sql.append(" AND rr.role_id=?"); args.add(roleId); }
         if (type != null && !type.isBlank()) { sql.append(" AND r.resource_type=?"); args.add(type); }
@@ -68,7 +68,7 @@ public class ExternalResourceAdminService {
     }
 
     public List<Map<String,Object>> versions(Long resourceId) {
-        return db.queryForList("SELECT v.id,v.external_version AS externalVersion,v.file_name AS fileName,v.size_bytes AS sizeBytes,v.sha256,v.storage_status AS storageStatus,v.received_at AS receivedAt FROM external_resource_version v WHERE v.resource_id=? ORDER BY v.id DESC",resourceId);
+        return db.queryForList("SELECT v.id,v.external_version AS externalVersion,v.file_name AS fileName,v.size_bytes AS sizeBytes,v.sha256,v.storage_status AS storageStatus,v.development_stage AS developmentStage,v.sub_stage_key AS subStageKey,v.received_at AS receivedAt FROM external_resource_version v WHERE v.resource_id=? ORDER BY v.id DESC",resourceId);
     }
 
     public List<Map<String,Object>> imports(Long versionId) {

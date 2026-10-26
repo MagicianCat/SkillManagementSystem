@@ -17,7 +17,8 @@ class ExternalResourceServiceTest {
     private final JdbcTemplate db = mock(JdbcTemplate.class);
     private final TransactionTemplate transactions = mock(TransactionTemplate.class);
     private final ObjectStoragePort storage = mock(ObjectStoragePort.class);
-    private final ExternalResourceService service = new ExternalResourceService(db, transactions, storage, 50L * 1024 * 1024);
+    private final DevelopmentStageCatalogService stages = mock(DevelopmentStageCatalogService.class);
+    private final ExternalResourceService service = new ExternalResourceService(db, transactions, storage, stages, 50L * 1024 * 1024);
 
     @Test void stateOnlyRequestPersistsInactiveStatusAndReturnsZeroCounts() {
         var request = new ExternalResourceService.PushRequest("platform-a",
@@ -37,6 +38,7 @@ class ExternalResourceServiceTest {
     }
 
     @Test void omittedStatusPreservesExistingStatusEvenWhenResourceUploadFails() {
+        org.mockito.Mockito.when(stages.resolve(null, null)).thenReturn(new DevelopmentStageCatalogService.ResolvedStage(null, null));
         var request = new ExternalResourceService.PushRequest("platform-a",
                 new ExternalResourceService.RoleInput("role-1", "Renamed Role", null),
                 List.of(new ExternalResourceService.ResourceInput("resource-1", "Resource", "SKILL", "1.0", null, "file1")));
@@ -49,5 +51,16 @@ class ExternalResourceServiceTest {
                         "ON DUPLICATE KEY UPDATE role_name=VALUES(role_name)"),
                 eq("platform-a"), eq("role-1"), eq("Renamed Role"));
         verifyNoInteractions(transactions, storage);
+    }
+
+    @Test void rejectsDocumentWhenStageFieldIsExplicitlyPresentEvenIfNull() {
+        var resource = new ExternalResourceService.ResourceInput();
+        resource.setResourceId("doc-1"); resource.setResourceName("Doc"); resource.setResourceType("DOCUMENT");
+        resource.setFileKey("file1"); resource.setDevelopmentStage(null);
+        var request = new ExternalResourceService.PushRequest("platform-a",
+                new ExternalResourceService.RoleInput("role-1", "Role One", null), List.of(resource));
+        var result = service.push(request, new LinkedMultiValueMap<>(), "req-doc-stage");
+        assertEquals("INVALID_RESOURCE", result.failures().get(0).errorCode());
+        verifyNoInteractions(stages, transactions, storage);
     }
 }

@@ -63,6 +63,23 @@ class ExternalResourcePushControllerTest {
         assertEquals("INACTIVE",captured.getValue().role().status());
     }
 
+    @Test void acceptsOptionalStageMetadataForSkillWithoutChangingEnvelope() {
+        var files=new LinkedMultiValueMap<String,MultipartFile>();
+        var request=mock(HttpServletRequest.class);
+        when(request.getRequestId()).thenReturn("req-stage");
+        when(service.push(any(),eq(files),eq("req-stage"))).thenReturn(new ExternalResourceService.PushResult(1,1,0,0,0,List.of(),List.of(),"req-stage"));
+        String metadata="""
+                {"sourceSystem":"platform-a","role":{"roleId":"r","roleName":"R"},"resources":[
+                {"resourceId":"s1","resourceName":"Skill","resourceType":"SKILL","developmentStage":"BACKEND_CODING","subStageKey":"backend.jvm","fileKey":"file1"}]}
+                """;
+        var response=controller.push("secret",metadata,files,request);
+        assertEquals(0,response.getBody().code());
+        ArgumentCaptor<ExternalResourceService.PushRequest> captured=ArgumentCaptor.forClass(ExternalResourceService.PushRequest.class);
+        verify(service).push(captured.capture(),eq(files),eq("req-stage"));
+        assertEquals("BACKEND_CODING",captured.getValue().resources().get(0).developmentStage());
+        assertEquals("backend.jvm",captured.getValue().resources().get(0).subStageKey());
+    }
+
     @Test void rejectsInvalidRoleStatusBeforeCallingService() {
         var files=new LinkedMultiValueMap<String,MultipartFile>();
         var request=mock(HttpServletRequest.class);
