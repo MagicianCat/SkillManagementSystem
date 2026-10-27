@@ -88,18 +88,18 @@ public class AgentMcpConfiguration {
                 .contextExtractor(req -> io.modelcontextprotocol.common.McpTransportContext.create(Map.of("request", req)))
                 .maxRequestSize(256 * 1024).build();
         McpSyncServer server = McpServer.sync(transport).serverInfo("skill-platform", "1.0")
-                .instructions("Use search_knowledge first for natural-language Wiki and Skill discovery; use legacy search/read tools only when needed, then submit one structured recommendation.")
+                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. If no relevant platform evidence exists, search Feishu documents. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
                 .tools(tool("get_current_user_context", "Get the current user's visible teams before recommending skills.",
                         schema("object", List.of()), this::currentUserContext),
                         tool("search_skills", "Search published skills by development stage, platform and OS.",
                         schema("object", List.of()), this::search),
                         tool("get_skill_detail", "Get metadata and a segment of the root skill.md.",
                                 schema("object", List.of("skillKey")), this::detail),
-                        tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run.",
+                        tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run. Normal user results include sourceUrl and downloadUrl.",
                                 schema("object", List.of()), this::searchWiki),
-                        tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document.",
+                        tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. Normal user results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiDocument),
-                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token.",
+                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Results include sourceUrl and downloadUrl for each Wiki.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
@@ -229,10 +229,17 @@ public class AgentMcpConfiguration {
         return ok(Map.of("userId", agent.userId(), "knowledgeScope", agent.knowledgeScope(), "teams", teams,
                 "rankingRule", "Prefer skills linked from the current user's team Wiki; never infer access to another team."));
     }
-    private McpSchema.CallToolResult searchKnowledge(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args){var agent=run(ex,"knowledge.search");String query=required(args,"query");String stage=str(args,"developmentStage");if(stage!=null)DevelopmentStage.valueOf(stage);return ok(knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,integer(args,"limit",5)));}
+    private McpSchema.CallToolResult searchKnowledge(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args){
+        var agent=run(ex,"knowledge.search");String query=required(args,"query");String stage=str(args,"developmentStage");if(stage!=null)DevelopmentStage.valueOf(stage);
+        var result=knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,integer(args,"limit",5));
+        Map<String,Object> response=objectMapper.convertValue(result,new TypeReference<>() {});
+        List<Map<String,Object>> documents=objectMapper.convertValue(result.results(),new TypeReference<>() {});
+        for(Map<String,Object> document:documents) document.putAll(wikiLinks(((Number)document.get("documentId")).longValue()));
+        response.put("results",documents);return ok(response);
+    }
     private McpSchema.CallToolResult detail(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "skill.detail"); String key = required(args,"skillKey"); var view = skills.get(key); String content = readText(key, "skill.md", integer(args,"offset",0), bounded(args));
-        var docs = "PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ? List.of() : wiki.search(agent.userId(), null, key, null, null, PageRequest.of(0, 20)).items();
+        var docs = "PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ? List.of() : wiki.search(agent.userId(), null, key, null, null, PageRequest.of(0, 20)).items().stream().map(this::linkedWiki).toList();
         String platform = normalizePlatform(str(args,"platform")), osType = normalizeOs(str(args,"osType"));
         return ok(Map.of("skill", view, "target", target(platform, osType), "detailPath", detailPath(key, platform, osType), "file", "skill.md", "content", content, "offset", integer(args,"offset",0), "hasMore", content.length() >= bounded(args), "wikiDocuments", docs));
     }
@@ -242,7 +249,7 @@ public class AgentMcpConfiguration {
         if (workflowId != null) return workflowWikiSearch(workflowId, str(args, "keyword"));
         if (agent.sessionKey() != null) return ok(Map.of("items", documentAgents.searchSelectedWiki(agent.sessionKey(), agent.runRef(), str(args,"keyword")), "page", 0, "size", 10));
         requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"documentType"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
-        return ok(Map.of("items", result.items(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
+        return ok(Map.of("items", result.items().stream().map(this::linkedWiki).toList(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
     }
     private McpSchema.CallToolResult wikiDocument(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read"); long id = longRequired(args,"documentId"); int offset = integer(args,"offset",0); int max = bounded(args);
@@ -250,7 +257,8 @@ public class AgentMcpConfiguration {
         if (workflowId != null) return workflowWikiRead(workflowId, id, offset, max);
         if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
         requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
-        return ok(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
+        Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
+        response.putAll(wikiLinks(id));return ok(response);
     }
     private McpSchema.CallToolResult searchFeishu(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "feishu.search"); requireUserKnowledge(agent); String query = required(args, "query");
@@ -461,6 +469,14 @@ public class AgentMcpConfiguration {
         if (platform != null) query.add("platform=" + platform);
         if (osType != null) query.add("osType=" + osType);
         return webBaseUrl + path + (query.isEmpty() ? "" : "?" + String.join("&", query));
+    }
+    private Map<String,Object> linkedWiki(WikiDocumentService.DocumentView document) {
+        Map<String,Object> response=objectMapper.convertValue(document,new TypeReference<>() {});
+        response.putAll(wikiLinks(document.id()));return response;
+    }
+    private Map<String,Object> wikiLinks(long documentId) {
+        String page=webBaseUrl+"/wiki?documentId="+documentId;
+        return Map.of("sourceUrl",page,"downloadUrl",page+"&download=1");
     }
     private String normalizePlatform(String value) { return value == null || value.isBlank() ? null : value.trim().toUpperCase(Locale.ROOT); }
     private String normalizeOs(String value) { return value == null || value.isBlank() ? null : value.trim().toUpperCase(Locale.ROOT); }

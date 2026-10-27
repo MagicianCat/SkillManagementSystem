@@ -105,7 +105,7 @@ public class ExternalResourceAdminService {
     }
 
     public SkillImportResult importSkill(Long versionId, SkillImportRequest request, Long actorId, String requestId) {
-        versionOfType(versionId,"SKILL");
+        Map<String,Object> sourceVersion=versionOfType(versionId,"SKILL");
         if (request==null || request.skillKey()==null || !request.skillKey().matches("^[a-z0-9]+(-[a-z0-9]+)*$")) throw bad("INVALID_SKILL_KEY","请填写合法的 Skill Key");
         var preparation=prepareSkill(versionId);
         if (preparation.skillKey()!=null && !preparation.skillKey().equals(request.skillKey())) throw bad("SKILL_KEY_MISMATCH","Skill Key 与 SKILL.md 不一致");
@@ -115,12 +115,20 @@ public class ExternalResourceAdminService {
             if (!prior.isEmpty() && !request.reimport()) throw bad("ALREADY_IMPORTED","该版本已导入；重新导入请明确确认");
             var existing=skillRepository.findBySkillKey(request.skillKey()).orElse(null);
             if (existing!=null && !request.confirmExisting()) throw bad("SKILL_KEY_EXISTS","同 Key 已存在，请明确确认");
-            if (existing!=null && existing.getActiveDraftVersion()!=null) throw bad("DRAFT_CONFLICT","已存在草稿，请先处理现有草稿");
+            String subStageKey=(String)sourceVersion.get("sub_stage_key");
+            Long categoryId=request.categoryId();
+            if (subStageKey!=null) {
+                List<Long> categoryIds=db.query("SELECT id FROM skill_category WHERE category_key=? AND status='ACTIVE'",(rs,n)->rs.getLong(1),subStageKey);
+                if (categoryIds.isEmpty()) throw bad("INVALID_SUB_STAGE","推送的二级分类已不可用");
+                categoryId=categoryIds.get(0);
+            }
+            Long resolvedCategoryId=categoryId;
             if (existing==null) {
-                if (request.categoryId()==null || request.displayName()==null || request.displayName().isBlank() || request.description()==null || request.description().isBlank()) throw bad("METADATA_REQUIRED","请补齐 Skill 元数据");
-                skills.create(new SkillService.CreateCommand(request.skillKey(),request.displayName(),request.description(),request.categoryId(),List.of(actorId),List.of(),request.teamId(),null),actorId,requestId);
+                if (resolvedCategoryId==null || request.displayName()==null || request.displayName().isBlank() || request.description()==null || request.description().isBlank()) throw bad("METADATA_REQUIRED","请补齐 Skill 元数据");
+                skills.create(new SkillService.CreateCommand(request.skillKey(),request.displayName(),request.description(),resolvedCategoryId,List.of(actorId),List.of(),request.teamId(),null),actorId,requestId);
             }
             var uploaded=files.upload(request.skillKey(),new ByteMultipart(raw.fileName(),raw.bytes()),"从外部资源导入",actorId,requestId);
+            if (existing!=null) skills.updateExternalMetadata(request.skillKey(),request.displayName(),request.description(),resolvedCategoryId,actorId,requestId);
             Long skillId=skillRepository.findBySkillKey(request.skillKey()).orElseThrow().getId();
             db.update("INSERT INTO external_import_record(resource_version_id,target_type,target_id,draft_version_id,action,result,operator_id) VALUES(?,'SKILL',?,?,'IMPORT_DRAFT','SUCCESS',?)",versionId,skillId,uploaded.versionId(),actorId);
             return new SkillImportResult(request.skillKey(),skillId,uploaded.versionId());

@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 
 class AgentFastPathServiceTest {
     private final AgentFastPathService service = new AgentFastPathService(
-            mock(WikiDocumentRepository.class), mock(WikiDocumentSkillRepository.class), new ObjectMapper());
+            mock(WikiDocumentRepository.class), mock(WikiDocumentSkillRepository.class), new ObjectMapper(), "http://127.0.0.1:5173");
 
     @Test
     void recognizesFullDevelopmentFlowQueries() {

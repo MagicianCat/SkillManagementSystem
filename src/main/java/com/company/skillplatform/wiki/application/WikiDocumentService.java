@@ -96,6 +96,21 @@ public class WikiDocumentService {
     }
 
     @Transactional(readOnly = true)
+    public List<DocumentMatchView> findTeamDocumentsByTitle(Long userId, Long teamId, String requestedTitle) {
+        if (teamId == null || teamId <= 0) throw error("WIKI_TEAM_REQUIRED", "A team is required", HttpStatus.BAD_REQUEST);
+        String exactTitle = title(requestedTitle);
+        Specification<WikiDocumentEntity> spec = visibility(userId).and((root, q, cb) -> cb.and(
+                cb.equal(root.get("teamId"), teamId),
+                cb.equal(root.get("documentType"), "SKILL_GUIDE"),
+                cb.equal(cb.lower(root.get("title")), exactTitle.toLowerCase(Locale.ROOT))));
+        return documents.findAll(spec, Sort.by("id").ascending()).stream()
+                .map(document -> new DocumentMatchView(document.getId(), document.getTitle(),
+                        document.getCurrentRevision() == null ? 0 : document.getCurrentRevision().getRevisionNo(),
+                        canEdit(document, userId) && !hasPendingReview(document.getId())))
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
     public DocumentView get(Long id, Long userId) { return view(visibleDocument(id, userId)); }
 
     /** Validates that the actor may explicitly share this Wiki with a project stage. */
@@ -302,6 +317,7 @@ public class WikiDocumentService {
     public record TeamView(Long id, String name, Long parentId) {}
     public record SkillLinkView(Long id, String skillKey, String displayName) {}
     public record DocumentView(Long id, String title, String documentType, Long teamId, boolean platformVisible, String markdownContent, int revisionNo, int versionNo, List<SkillLinkView> skills, boolean canEdit, boolean active, Long pendingPlatformReviewId, String pendingPlatformReviewStatus) {}
+    public record DocumentMatchView(Long id, String title, int revisionNo, boolean canEdit) {}
     public record RevisionView(Long id, int revisionNo, String markdownContent, Long createdBy, String createdByName, java.time.Instant createdAt) {}
     public record PromotionDocument(WikiDocumentEntity document, WikiDocumentRevisionEntity revision) {}
     public record AgentDocumentView(Long id, String title, String documentType, int revisionNo, String markdownContent) {}

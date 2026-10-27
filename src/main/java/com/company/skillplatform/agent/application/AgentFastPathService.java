@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,11 +29,12 @@ public class AgentFastPathService {
     private final WikiDocumentRepository documents;
     private final WikiDocumentSkillRepository links;
     private final ObjectMapper json;
+    private final String webBaseUrl;
     private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
 
     public AgentFastPathService(WikiDocumentRepository documents, WikiDocumentSkillRepository links,
-            ObjectMapper json) {
-        this.documents = documents; this.links = links; this.json = json;
+            ObjectMapper json, @Value("${skill-platform.agent-web-base-url:${skill-platform.feishu.bot-web-base-url:http://127.0.0.1:5173}}") String webBaseUrl) {
+        this.documents = documents; this.links = links; this.json = json; this.webBaseUrl = webBaseUrl.replaceAll("/$", "");
     }
 
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
@@ -92,7 +94,9 @@ public class AgentFastPathService {
         String summary = "平台《研发全流程最佳实践》共推荐 " + items.size() + " 个 Skill，以下为当前平台维护的完整清单。";
         try {
             String payload = json.writeValueAsString(Map.of("accepted", true, "runRef", "", "summary", summary, "status", "VALID", "items", items));
-            return Optional.of(new FastPath(summary, items, payload));
+            String sourceUrl = webBaseUrl + "/wiki?documentId=" + current.wikiId();
+            String answer = summary + "\n\n来源：《" + WIKI_TITLE + "》[原文](" + sourceUrl + ") · [下载 Markdown](" + sourceUrl + "&download=1)";
+            return Optional.of(new FastPath(summary, answer, items, payload));
         } catch (JsonProcessingException ex) {
             log.warn("event=agent.fast_path.payload_failed", ex);
             return Optional.empty();
@@ -102,7 +106,7 @@ public class AgentFastPathService {
     public boolean matches(String content) { return content != null && FLOW.matcher(content).find() && ACTION.matcher(content).find(); }
 
     private String blankToNull(String value) { return value == null || value.isBlank() ? null : value.trim().toUpperCase(Locale.ROOT); }
-    public record FastPath(String summary, List<Map<String, Object>> items, String payload) {}
+    public record FastPath(String summary, String answer, List<Map<String, Object>> items, String payload) {}
     private record Snapshot(Long wikiId, int wikiVersion, List<CachedSkill> skills) {}
     private record CachedSkill(String skillKey, String displayName, String description, String stage, Long versionId, String version) {}
 }

@@ -64,10 +64,10 @@ public class AgentConversationService {
         run.running("cached-wiki:"+run.getRunKey());runs.save(run);
         String payload=preset.payload().replace("\"runRef\":\"\"","\"runRef\":\""+run.getRunKey()+"\"");
         recommendations.save(new AgentRecommendationEntity(run.getRunKey(),run,preset.summary(),"VALID",payload));
-        long sequence=messages.countBySession(session)+1;messages.save(new AgentMessageEntity(session,run,sequence,"ASSISTANT",preset.summary(),"COMPLETE"));
+        long sequence=messages.countBySession(session)+1;messages.save(new AgentMessageEntity(session,run,sequence,"ASSISTANT",preset.answer(),"COMPLETE"));
         run.succeeded();runs.save(run);
         events.publish(run.getRunKey(),"recommendation.completed",Map.of("runKey",run.getRunKey(),"summary",preset.summary(),"status","VALID","items",preset.items()));
-        events.publish(run.getRunKey(),"run.completed",Map.of("runKey",run.getRunKey(),"message",preset.summary()));
+        events.publish(run.getRunKey(),"run.completed",Map.of("runKey",run.getRunKey(),"message",preset.answer()));
         return new AcceptedRun(run.getRunKey(),run.getStatus(),session.getPlatform(),session.getOsType());
     }
     public org.springframework.web.servlet.mvc.method.annotation.SseEmitter subscribe(String runKey,Long owner,long after){AgentRunEntity run=requireRun(runKey,owner);restoreTerminalEvent(run);return events.subscribe(runKey,after);}
