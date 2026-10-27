@@ -115,6 +115,14 @@ public class NotificationService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void defaultRoleBackfillCompleted(Long actorId, boolean succeeded, String content) {
+        users.findById(actorId).ifPresent(actor -> save(java.util.List.of(actor),
+                succeeded ? NotificationType.DEFAULT_ROLE_BACKFILL_SUCCEEDED : NotificationType.DEFAULT_ROLE_BACKFILL_FAILED,
+                succeeded ? "普通用户权限补齐完成" : "普通用户权限补齐失败", content,
+                "IAM_DEFAULT_ROLE_BACKFILL", 0L, null));
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void wikiIndexFailed(Long documentId, String errorCode) {
         save(userRoles.findActiveSuperAdmins(), NotificationType.WIKI_INDEX_FAILED,
                 "Wiki 知识库更新失败", "Wiki 文档 ID " + documentId + " 索引更新已重试 10 次仍失败，错误码：" + errorCode + "。请检查知识库服务并手动修复。",

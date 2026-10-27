@@ -88,13 +88,17 @@ public class AuthService {
             user = users.save(new IamUserEntity(IdentityProviderType.FEISHU, identity.externalId(), identity.username(),
                     identity.displayName(), identity.email()));
             user.updateFeishuIds(identity.openId(), identity.unionId(), identity.userId());
-            IamRoleEntity consumer = roles.findByRoleKey("CONSUMER").orElse(null);
-            if (consumer != null) userRoles.save(new IamUserRoleEntity(user, consumer, user));
         } else {
             if (user.getStatus() != UserStatus.ACTIVE) throw new BusinessException("AUTHENTICATION_INVALID", "Authentication is no longer valid", HttpStatus.UNAUTHORIZED);
             user.updateExternalProfile(identity.username(), identity.displayName(), identity.email());
             user.updateFeishuIds(identity.openId(), identity.unionId(), identity.userId());
             users.save(user);
+        }
+        // Directory sync can create a Feishu user before their first login.
+        if (rolePermissions.findPermissionKeysByUserId(user.getId()).isEmpty()
+                && !userRoles.findRoleKeysByUserId(user.getId()).contains("CONSUMER")) {
+            IamRoleEntity consumer = roles.findByRoleKey("CONSUMER").orElse(null);
+            if (consumer != null) userRoles.save(new IamUserRoleEntity(user, consumer, user));
         }
         user.recordLogin(clock.instant());
         return user;
