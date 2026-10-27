@@ -3,6 +3,7 @@ package com.company.skillplatform.knowledge.application;
 import static org.mockito.Mockito.*;
 
 import com.company.skillplatform.notification.application.NotificationService;
+import com.company.skillplatform.knowledge.domain.EmbeddingProviderException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -38,10 +39,36 @@ class KnowledgeIndexEventListenerTest {
         for(int i=0;i<10;i++){clock.advanceSeconds(3600);listener.retryFailed();}
         clock.advanceSeconds(3600);listener.retryFailed();listener.scheduleRetry(12L);
         verify(index,times(11)).reindex(12L);
-        verify(notifications).wikiIndexFailed(12L);
+        verify(notifications).wikiIndexFailed(12L, "IllegalStateException");
         org.junit.jupiter.api.Assertions.assertTrue(listener.isExhausted(12L));
         listener.handle(new WikiKnowledgeChangedEvent(12L,WikiKnowledgeChangedEvent.Operation.UPSERT));
         org.junit.jupiter.api.Assertions.assertFalse(listener.isExhausted(12L));
+    }
+
+    @Test void quotaExhaustionStopsRetriesImmediatelyAndSendsSpecificNotification() {
+        var index=mock(KnowledgeIndexService.class);
+        var notifications=mock(NotificationService.class);
+        var quota=new EmbeddingProviderException(400,"provider_quota_exceeded",null);
+        doThrow(quota).when(index).reindex(12L);
+        var clock=new MutableClock();
+        var listener=new KnowledgeIndexEventListener(index,notifications,clock);
+
+        listener.handle(new WikiKnowledgeChangedEvent(12L,WikiKnowledgeChangedEvent.Operation.UPSERT));
+        listener.scheduleRetry(12L);
+        clock.advanceSeconds(3600);
+        listener.retryFailed();
+        listener.handle(new WikiKnowledgeChangedEvent(13L,WikiKnowledgeChangedEvent.Operation.UPSERT));
+
+        verify(index,times(1)).reindex(12L);
+        verify(index,never()).reindex(13L);
+        verify(notifications,times(1)).wikiIndexQuotaExhausted(12L,"provider_quota_exceeded");
+        org.junit.jupiter.api.Assertions.assertTrue(listener.isProviderQuotaExhausted());
+        org.junit.jupiter.api.Assertions.assertFalse(listener.isScheduled(12L));
+
+        listener.resetForManualReconcile();
+        org.junit.jupiter.api.Assertions.assertFalse(listener.isProviderQuotaExhausted());
+        listener.handle(new WikiKnowledgeChangedEvent(13L,WikiKnowledgeChangedEvent.Operation.UPSERT));
+        verify(index).reindex(13L);
     }
 
     private static final class MutableClock extends Clock {

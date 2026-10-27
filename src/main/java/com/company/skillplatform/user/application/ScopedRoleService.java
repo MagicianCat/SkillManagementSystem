@@ -3,14 +3,59 @@ import com.company.skillplatform.audit.application.AuditService;import com.compa
 @Service public class ScopedRoleService {private final OrgTeamRepository teams;private final OrgTeamMemberRepository members;private final ScopedRoleAssignmentRepository assignments;private final IamUserRepository users;private final AuditService audit;public ScopedRoleService(OrgTeamRepository t,OrgTeamMemberRepository m,ScopedRoleAssignmentRepository a,IamUserRepository u,AuditService audit){teams=t;members=m;assignments=a;users=u;this.audit=audit;}
  @Transactional(readOnly=true) public List<TeamView> tree(){return teamViews(teams.findByStatusOrderByTeamNameAsc("ACTIVE"));}
  @Transactional(readOnly=true) public List<TeamView> tree(Long userId,boolean globalAdmin){if(globalAdmin)return tree();List<Long> ids=assignments.findByUserId(userId).stream().filter(a->"TEAM_ADMIN".equals(a.getRoleKey())).map(a->a.getTeam()==null?null:a.getTeam().getId()).filter(Objects::nonNull).toList();return teamViews(teams.findAllById(ids));}
+ @Transactional(readOnly=true) public org.springframework.data.domain.Page<TeamView> tree(Long userId,boolean globalAdmin,String keyword,org.springframework.data.domain.Pageable pageable){
+  int pageNumber=Math.max(pageable.getPageNumber(),0);int size=Math.min(Math.max(pageable.getPageSize(),1),50);
+  var request=org.springframework.data.domain.PageRequest.of(pageNumber,size,org.springframework.data.domain.Sort.by("teamName").ascending());
+  String term=keyword==null?"":keyword.trim();
+  if(globalAdmin){
+   var page=term.isBlank()?teams.findByStatusOrderByTeamNameAsc("ACTIVE",request):teams.findByStatusAndTeamNameContainingIgnoreCaseOrderByTeamNameAsc("ACTIVE",term,request);
+   return page.map(this::teamView);
+  }
+  List<Long> ids=assignments.findByUserId(userId).stream().filter(a->"TEAM_ADMIN".equals(a.getRoleKey())).map(a->a.getTeam()==null?null:a.getTeam().getId()).filter(Objects::nonNull).distinct().toList();
+  List<OrgTeamEntity> visible=teams.findAllById(ids).stream().filter(t->"ACTIVE".equals(t.getStatus()))
+          .filter(t->term.isBlank()||t.getTeamName().toLowerCase(Locale.ROOT).contains(term.toLowerCase(Locale.ROOT)))
+          .sorted(Comparator.comparing(OrgTeamEntity::getTeamName,String.CASE_INSENSITIVE_ORDER)).toList();
+  int start=(int)Math.min((long)pageNumber*size,visible.size());int end=Math.min(start+size,visible.size());
+  return new org.springframework.data.domain.PageImpl<>(visible.subList(start,end).stream().map(this::teamView).toList(),request,visible.size());
+ }
+ @Transactional(readOnly=true) public List<TeamView> hierarchy(Long userId,boolean globalAdmin){
+  List<OrgTeamEntity> active=teams.findByStatusAndProviderOrderByTeamNameAsc("ACTIVE","FEISHU");
+  if(!globalAdmin){
+   Set<Long> allowed=assignments.findByUserId(userId).stream().filter(a->"TEAM_ADMIN".equals(a.getRoleKey())).map(a->a.getTeam()==null?null:a.getTeam().getId()).filter(Objects::nonNull).collect(java.util.stream.Collectors.toSet());
+   Map<Long,OrgTeamEntity> byId=active.stream().collect(java.util.stream.Collectors.toMap(OrgTeamEntity::getId,t->t));
+   Set<Long> visible=new HashSet<>(allowed);
+   for(Long id:allowed){
+    OrgTeamEntity current=byId.get(id);
+    while(current!=null&&current.getParent()!=null){
+     Long parentId=current.getParent().getId();
+     if(!visible.add(parentId))break;
+     current=byId.get(parentId);
+    }
+   }
+   return active.stream().filter(t->visible.contains(t.getId())).map(t->teamView(t,allowed.contains(t.getId()))).toList();
+  }
+  return active.stream().map(this::teamView).toList();
+ }
  @Transactional(readOnly=true) public List<MemberView> members(Long teamId){return members(teamId,null,true);}
  @Transactional(readOnly=true) public List<MemberView> members(Long teamId,Long userId,boolean globalAdmin){team(teamId);if(!globalAdmin&&!isTeamAdmin(teamId,userId))throw new org.springframework.security.access.AccessDeniedException("Team administrator permission required");List<OrgTeamMemberEntity> rows=members.findByTeamIdAndStatus(teamId,"ACTIVE");List<ScopedRoleAssignmentEntity> scoped=rows.isEmpty()?List.of():assignments.findByUserIdIn(rows.stream().map(m->m.getUser().getId()).toList());Map<Long,List<AssignmentView>> roles=scoped.stream().map(this::view).collect(java.util.stream.Collectors.groupingBy(AssignmentView::userId));return rows.stream().map(m->new MemberView(m.getUser().getId(),m.getUser().getUsername(),m.getUser().getDisplayName(),m.getMembershipType(),roles.getOrDefault(m.getUser().getId(),List.of()))).toList();}
+ @Transactional(readOnly=true) public org.springframework.data.domain.Page<MemberView> members(Long teamId,Long userId,boolean globalAdmin,String keyword,org.springframework.data.domain.Pageable pageable){
+  team(teamId);if(!globalAdmin&&!isTeamAdmin(teamId,userId))throw new org.springframework.security.access.AccessDeniedException("Team administrator permission required");
+  int pageNumber=Math.max(pageable.getPageNumber(),0);int size=Math.min(Math.max(pageable.getPageSize(),1),100);
+  var request=org.springframework.data.domain.PageRequest.of(pageNumber,size,org.springframework.data.domain.Sort.by("user.displayName").ascending().and(org.springframework.data.domain.Sort.by("user.id").ascending()));
+  String term=keyword==null?"":keyword.trim();
+  var page=term.isBlank()?members.findByTeamIdAndStatusWithUser(teamId,"ACTIVE",request):members.searchByTeamIdAndStatusWithUser(teamId,"ACTIVE",term,request);
+  List<Long> userIds=page.getContent().stream().map(m->m.getUser().getId()).toList();
+  Map<Long,List<AssignmentView>> roles=userIds.isEmpty()?Map.of():assignments.findByUserIdIn(userIds).stream().map(this::view).collect(java.util.stream.Collectors.groupingBy(AssignmentView::userId));
+  return page.map(m->new MemberView(m.getUser().getId(),m.getUser().getUsername(),m.getUser().getDisplayName(),m.getMembershipType(),roles.getOrDefault(m.getUser().getId(),List.of())));
+ }
  @Transactional(readOnly=true) public List<AssignmentView> assignments(Long userId){user(userId);return assignments.findByUserId(userId).stream().map(this::view).toList();}
  @Transactional public AssignmentView grant(Long teamId,Long userId,String roleKey,Long operatorId,String requestId){OrgTeamEntity team=team(teamId);IamUserEntity target=user(userId),operator=user(operatorId);if(!members.existsByTeamIdAndUserId(teamId,userId))throw error("TEAM_MEMBER_REQUIRED","User must belong to the team",HttpStatus.BAD_REQUEST);if(!Set.of("TEAM_ADMIN","TEAM_MAINTAINER","PROJECT_MANAGER").contains(roleKey))throw error("SCOPED_ROLE_INVALID","Unsupported team role",HttpStatus.BAD_REQUEST);var row=assignments.findByUserIdAndRoleKeyAndScopeTypeAndTeamId(userId,roleKey,"TEAM",teamId).orElseGet(()->assignments.save(new ScopedRoleAssignmentEntity(target,roleKey,"TEAM",team,operator)));audit.success("SCOPED_ROLE_GRANTED",operator,"IAM_USER",userId,requestId,null,Map.of("roleKey",roleKey,"teamId",teamId),Map.of());return view(row);}
  @Transactional public AssignmentView grantPlatform(Long userId,String roleKey,Long operatorId,String requestId){if(!"PLATFORM_MAINTAINER".equals(roleKey))throw error("SCOPED_ROLE_INVALID","Unsupported platform role",HttpStatus.BAD_REQUEST);IamUserEntity target=user(userId),operator=user(operatorId);var row=assignments.findByUserIdAndRoleKeyAndScopeTypeAndTeamId(userId,roleKey,"PLATFORM",null).orElseGet(()->assignments.save(new ScopedRoleAssignmentEntity(target,roleKey,"PLATFORM",null,operator)));audit.success("PLATFORM_ROLE_GRANTED",operator,"IAM_USER",userId,requestId,null,Map.of("roleKey",roleKey),Map.of());return view(row);}
  @Transactional public void revoke(Long teamId,Long userId,String roleKey,Long operatorId,String requestId){team(teamId);IamUserEntity operator=user(operatorId);assignments.deleteByUserIdAndRoleKeyAndScopeTypeAndTeamId(userId,roleKey,"TEAM",teamId);audit.success("SCOPED_ROLE_REVOKED",operator,"IAM_USER",userId,requestId,null,Map.of("roleKey",roleKey,"teamId",teamId),Map.of());}
  @Transactional public void revokePlatform(Long userId,String roleKey,Long operatorId,String requestId){IamUserEntity operator=user(operatorId);assignments.deleteByUserIdAndRoleKeyAndScopeTypeAndTeamId(userId,roleKey,"PLATFORM",null);audit.success("PLATFORM_ROLE_REVOKED",operator,"IAM_USER",userId,requestId,null,Map.of("roleKey",roleKey),Map.of());}
  @Transactional(readOnly=true) public boolean isTeamAdmin(Long teamId,Long userId){return assignments.findByUserIdAndRoleKeyAndScopeTypeAndTeamId(userId,"TEAM_ADMIN","TEAM",teamId).isPresent();}
- private List<TeamView> teamViews(Collection<OrgTeamEntity> values){return values.stream().map(t->new TeamView(t.getId(),t.getTeamName(),t.getParent()==null?null:t.getParent().getId(),t.getStatus(),t.getLastSyncedAt())).toList();}
- private OrgTeamEntity team(Long id){return teams.findById(id).orElseThrow(()->error("TEAM_NOT_FOUND","Team not found",HttpStatus.NOT_FOUND));}private IamUserEntity user(Long id){return users.findById(id).orElseThrow(()->error("USER_NOT_FOUND","User not found",HttpStatus.NOT_FOUND));}private AssignmentView view(ScopedRoleAssignmentEntity a){return new AssignmentView(a.getUser().getId(),a.getUser().getUsername(),a.getRoleKey(),a.getScopeType(),a.getTeam()==null?null:a.getTeam().getId(),a.getVersionNo());}private BusinessException error(String c,String m,HttpStatus s){return new BusinessException(c,m,s);}public record TeamView(Long id,String name,Long parentId,String status,java.time.Instant lastSyncedAt){}public record MemberView(Long userId,String username,String displayName,String membershipType,List<AssignmentView> roles){}public record AssignmentView(Long userId,String username,String roleKey,String scopeType,Long teamId,int versionNo){}
+ private List<TeamView> teamViews(Collection<OrgTeamEntity> values){return values.stream().map(this::teamView).toList();}
+ private TeamView teamView(OrgTeamEntity t){return teamView(t,true);}
+ private TeamView teamView(OrgTeamEntity t,boolean manageable){return new TeamView(t.getId(),t.getTeamName(),t.getParent()==null?null:t.getParent().getId(),t.getStatus(),t.getLastSyncedAt(),manageable);}
+ private OrgTeamEntity team(Long id){return teams.findById(id).orElseThrow(()->error("TEAM_NOT_FOUND","Team not found",HttpStatus.NOT_FOUND));}private IamUserEntity user(Long id){return users.findById(id).orElseThrow(()->error("USER_NOT_FOUND","User not found",HttpStatus.NOT_FOUND));}private AssignmentView view(ScopedRoleAssignmentEntity a){return new AssignmentView(a.getUser().getId(),a.getUser().getUsername(),a.getRoleKey(),a.getScopeType(),a.getTeam()==null?null:a.getTeam().getId(),a.getVersionNo());}private BusinessException error(String c,String m,HttpStatus s){return new BusinessException(c,m,s);}public record TeamView(Long id,String name,Long parentId,String status,java.time.Instant lastSyncedAt,boolean manageable){}public record MemberView(Long userId,String username,String displayName,String membershipType,List<AssignmentView> roles){}public record AssignmentView(Long userId,String username,String roleKey,String scopeType,Long teamId,int versionNo){}
 }

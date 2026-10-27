@@ -127,8 +127,11 @@ public class WikiDocumentService {
     public DocumentView create(CreateCommand command, Long userId, String requestId) {
         IamUserEntity actor = user(userId); String type = normalizeType(command.documentType());
         String title = title(command.title()); String content = content(command.markdownContent());
-        List<SkillEntity> selected = selectedSkills(command.skillIds());
         Long teamId = command.teamId();
+        if ("SKILL_README".equals(type) && (command.skillIds() == null || command.skillIds().size() != 1))
+            throw error("WIKI_README_SINGLE_SKILL_REQUIRED", "A README must be linked to exactly one Skill", HttpStatus.BAD_REQUEST);
+        boolean allowEmpty = "SKILL_GUIDE".equals(type) && teamId != null;
+        List<SkillEntity> selected = selectedSkills(command.skillIds(), allowEmpty);
         if ("SKILL_GUIDE".equals(type)) {
             if (teamId == null) {
                 if (!isAdmin()) throw error("PLATFORM_ADMIN_REQUIRED", "Platform administrator permission required", HttpStatus.FORBIDDEN);
@@ -162,7 +165,10 @@ public class WikiDocumentService {
         WikiDocumentEntity document = editable(id, userId); IamUserEntity actor = user(userId);
         if (document.getVersionNo() != command.versionNo()) throw error("OPTIMISTIC_LOCK_CONFLICT", "Resource version is stale", HttpStatus.CONFLICT);
         if (command.skillIds() != null) {
-            List<SkillEntity> selected = selectedSkills(command.skillIds());
+            if ("SKILL_README".equals(document.getDocumentType()) && command.skillIds().size() != 1)
+                throw error("WIKI_README_SINGLE_SKILL_REQUIRED", "A README must be linked to exactly one Skill", HttpStatus.BAD_REQUEST);
+            List<SkillEntity> selected = selectedSkills(command.skillIds(),
+                    "SKILL_GUIDE".equals(document.getDocumentType()) && document.getTeamId() != null);
             if ("SKILL_GUIDE".equals(document.getDocumentType())) {
                 if (document.getTeamId() == null && !isAdmin()) throw error("PLATFORM_ADMIN_REQUIRED", "Platform administrator permission required", HttpStatus.FORBIDDEN);
                 if (document.getTeamId() != null) validateTeamLinks(selected, document.getTeamId());
@@ -247,7 +253,18 @@ public class WikiDocumentService {
     private WikiDocumentEntity visibleDocument(Long id, Long userId) { return documents.findById(id).filter(d -> "ACTIVE".equals(d.getStatus())).filter(d -> isVisible(d, userId)).orElseThrow(() -> error("WIKI_DOCUMENT_NOT_FOUND", "Wiki document not found", HttpStatus.NOT_FOUND)); }
     private boolean isVisible(WikiDocumentEntity d, Long userId) { return isAdmin() || d.isPlatformVisible() || (d.getTeamId() != null && members.findByUserId(userId).stream().anyMatch(m -> "ACTIVE".equals(m.getStatus()) && d.getTeamId().equals(m.getTeam().getId()))); }
     private WikiDocumentEntity editable(Long id, Long userId) { WikiDocumentEntity d = visibleDocument(id, userId); if (hasPendingReview(id)) throw error("WIKI_REVIEW_PENDING", "Wiki document has a pending platform review", HttpStatus.CONFLICT); if (!canEdit(d, userId)) throw error("WIKI_EDIT_FORBIDDEN", "You cannot edit this Wiki document", HttpStatus.FORBIDDEN); return d; }
-    private List<SkillEntity> selectedSkills(List<Long> ids) { if (ids == null || ids.isEmpty() || ids.stream().anyMatch(Objects::isNull) || new HashSet<>(ids).size() != ids.size()) throw error("WIKI_SKILLS_REQUIRED", "At least one unique Skill is required", HttpStatus.BAD_REQUEST); List<SkillEntity> found = skills.findAllById(ids); if (found.size() != ids.size()) throw error("SKILL_NOT_FOUND", "A linked Skill was not found", HttpStatus.NOT_FOUND); Map<Long,SkillEntity> byId=found.stream().collect(Collectors.toMap(SkillEntity::getId, skill->skill)); return ids.stream().map(byId::get).toList(); }
+    private List<SkillEntity> selectedSkills(List<Long> ids, boolean allowEmpty) {
+        if (ids == null || ids.isEmpty()) {
+            if (allowEmpty) return List.of();
+            throw error("WIKI_SKILLS_REQUIRED", "At least one unique Skill is required", HttpStatus.BAD_REQUEST);
+        }
+        if (ids.stream().anyMatch(Objects::isNull) || new HashSet<>(ids).size() != ids.size())
+            throw error("WIKI_SKILLS_REQUIRED", "At least one unique Skill is required", HttpStatus.BAD_REQUEST);
+        List<SkillEntity> found = skills.findAllById(ids);
+        if (found.size() != ids.size()) throw error("SKILL_NOT_FOUND", "A linked Skill was not found", HttpStatus.NOT_FOUND);
+        Map<Long,SkillEntity> byId=found.stream().collect(Collectors.toMap(SkillEntity::getId, skill->skill));
+        return ids.stream().map(byId::get).toList();
+    }
     private void validateTeamLinks(List<SkillEntity> selected, Long teamId) { if (selected.stream().anyMatch(s -> "TEAM".equals(s.getScopeType()) && !teamId.equals(s.getTeamId()))) throw error("WIKI_CROSS_TEAM_SKILL", "A team Wiki cannot link another team's private Skill", HttpStatus.BAD_REQUEST); }
     private void saveLinks(WikiDocumentEntity document, List<SkillEntity> selected, String type) { int i = 0; for (SkillEntity skill : selected) links.save(new WikiDocumentSkillEntity(document, skill, "SKILL_README".equals(type) ? "PRIMARY" : "RELATED", i++)); }
     private void replaceLinks(WikiDocumentEntity document, List<SkillEntity> selected) {

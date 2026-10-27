@@ -160,9 +160,7 @@ public class WikiDocumentReviewService {
         if (document.getTeamId() == null) throw conflict("WIKI_ALREADY_PLATFORM_VISIBLE");
         if (document.isPlatformVisible()) throw conflict("WIKI_ALREADY_PLATFORM_VISIBLE");
         if (!"ACTIVE".equals(document.getStatus()) || document.getCurrentRevision() == null) throw conflict("WIKI_DOCUMENT_INVALID");
-        if (links.findByDocumentIdOrderBySortOrderAsc(document.getId()).isEmpty()) throw error("WIKI_SKILLS_REQUIRED", "Wiki must link at least one Skill", HttpStatus.BAD_REQUEST);
         List<WikiDocumentSkillEntity> linkedSkills = links.findByDocumentIdOrderBySortOrderAsc(document.getId());
-        if (linkedSkills.isEmpty()) throw error("WIKI_SKILLS_REQUIRED", "Wiki must link at least one Skill", HttpStatus.BAD_REQUEST);
         for (WikiDocumentSkillEntity link : linkedSkills) {
             var skill = link.getSkill();
             if (skill.getStatus() != SkillStatus.ACTIVE) throw error("WIKI_INACTIVE_SKILL_LINK", "A platform Wiki cannot expose an inactive Skill", HttpStatus.BAD_REQUEST);

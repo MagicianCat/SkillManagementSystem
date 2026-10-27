@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 @Service
 public class KnowledgeIndexService {
@@ -19,7 +20,7 @@ public class KnowledgeIndexService {
     private final EmbeddingPort embedding;private final VectorStorePort vectors;private final KnowledgeProperties properties;private final MeterRegistry metrics;
     public KnowledgeIndexService(WikiDocumentRepository documents,WikiDocumentSkillRepository links,MarkdownHeadingChunker chunker,
             EmbeddingPort embedding,VectorStorePort vectors,KnowledgeProperties properties,MeterRegistry metrics){this.documents=documents;this.links=links;this.chunker=chunker;this.embedding=embedding;this.vectors=vectors;this.properties=properties;this.metrics=metrics;}
-    @Transactional(readOnly=true)
+    @Transactional(readOnly=true, propagation=Propagation.REQUIRES_NEW)
     public synchronized void reindex(long documentId){
         if(!properties.isEnabled())return;long started=System.nanoTime();
         try{WikiDocumentEntity document=documents.findById(documentId).orElse(null);if(document==null||!"ACTIVE".equals(document.getStatus())||document.getCurrentRevision()==null){vectors.deleteDocument(documentId);return;}
@@ -28,7 +29,7 @@ public class KnowledgeIndexService {
             List<KnowledgeChunk> chunks=chunker.chunk(source);List<float[]> embedded=embedding.embedDocuments(chunks.stream().map(KnowledgeChunk::embeddingText).toList());if(embedded.size()!=chunks.size())throw new IllegalStateException("Embedding result count mismatch");
             List<KnowledgeVectorPoint> points=new java.util.ArrayList<>();for(int i=0;i<chunks.size();i++)points.add(KnowledgeVectorPoint.from(chunks.get(i),embedded.get(i)));vectors.replaceDocument(documentId,points);metrics.counter("knowledge.index.total").increment();metrics.summary("knowledge.index.chunk.count").record(chunks.size());
             log.info("event=knowledge.index documentId={} revisionNo={} chunkCount={} durationMs={}",documentId,revision.getRevisionNo(),chunks.size(),elapsed(started));
-        }catch(RuntimeException failure){metrics.counter("knowledge.index.failure").increment();log.warn("event=knowledge.index.failed documentId={} errorType={} durationMs={}",documentId,failure.getClass().getSimpleName(),elapsed(started));throw failure;}
+        }catch(RuntimeException failure){metrics.counter("knowledge.index.failure").increment();String errorCode=failure instanceof EmbeddingProviderException provider?provider.providerCode():failure.getClass().getSimpleName();log.warn("event=knowledge.index.failed documentId={} errorType={} errorCode={} durationMs={}",documentId,failure.getClass().getSimpleName(),errorCode,elapsed(started));throw failure;}
         finally{metrics.timer("knowledge.index.duration").record(java.time.Duration.ofNanos(System.nanoTime()-started));}
     }
     public synchronized void delete(long documentId){if(properties.isEnabled())vectors.deleteDocument(documentId);}

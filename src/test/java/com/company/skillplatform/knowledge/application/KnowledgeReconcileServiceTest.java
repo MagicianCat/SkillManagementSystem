@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
 import com.company.skillplatform.knowledge.domain.VectorStorePort;
+import com.company.skillplatform.knowledge.domain.EmbeddingProviderException;
 import com.company.skillplatform.knowledge.infrastructure.KnowledgeProperties;
 import com.company.skillplatform.wiki.infrastructure.entity.WikiDocumentEntity;
 import com.company.skillplatform.wiki.infrastructure.entity.WikiDocumentRevisionEntity;
@@ -28,6 +29,28 @@ class KnowledgeReconcileServiceTest {
 
         assertThat(result.failed()).isEqualTo(1);assertThat(result.rebuilt()).isEqualTo(1);
         verify(index).reindex(2L);verify(retry).scheduleRetry(1L);
+    }
+
+    @Test void quotaExhaustionStopsRemainingRebuildsWithoutDeletingActiveVectors() {
+        var documents=mock(WikiDocumentRepository.class);var links=mock(WikiDocumentSkillRepository.class);
+        var vectors=mock(VectorStorePort.class);var index=mock(KnowledgeIndexService.class);
+        var quota=new EmbeddingProviderException(400,"provider_quota_exceeded",null);
+        var first=document(1L);var second=document(2L);
+        when(documents.findByStatusOrderByIdAsc("ACTIVE")).thenReturn(List.of(first,second));
+        when(vectors.indexedDocumentIds()).thenReturn(Set.of(2L));
+        doThrow(quota).when(index).reindex(1L);
+        var retry=mock(KnowledgeIndexEventListener.class);
+        var reconcile=new KnowledgeReconcileService(documents,links,vectors,index,retry,new KnowledgeProperties());
+
+        var result=reconcile.reconcile();
+
+        assertThat(result.failed()).isEqualTo(1);
+        assertThat(result.rebuilt()).isZero();
+        assertThat(result.deleted()).isZero();
+        verify(retry).stopForQuota(1L,quota);
+        verify(retry,never()).scheduleRetry(1L);
+        verify(index,never()).reindex(2L);
+        verify(vectors,never()).deleteDocument(2L);
     }
 
     private static WikiDocumentEntity document(Long id) {

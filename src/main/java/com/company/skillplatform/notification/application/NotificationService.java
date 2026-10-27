@@ -21,6 +21,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 @Service
 public class NotificationService {
@@ -113,11 +114,27 @@ public class NotificationService {
                 "FEISHU_DIRECTORY", 0L, null);
     }
 
-    @Transactional
-    public void wikiIndexFailed(Long documentId) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void wikiIndexFailed(Long documentId, String errorCode) {
         save(userRoles.findActiveSuperAdmins(), NotificationType.WIKI_INDEX_FAILED,
-                "Wiki 知识库更新失败", "Wiki 文档 ID " + documentId + " 索引更新已重试 10 次仍失败，请检查知识库服务并手动修复。",
+                "Wiki 知识库更新失败", "Wiki 文档 ID " + documentId + " 索引更新已重试 10 次仍失败，错误码：" + errorCode + "。请检查知识库服务并手动修复。",
                 "WIKI_DOCUMENT", documentId, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void wikiIndexQuotaExhausted(Long documentId, String errorCode) {
+        save(userRoles.findActiveSuperAdmins(), NotificationType.WIKI_INDEX_FAILED,
+                "知识库 Embedding 额度耗尽", "Embedding 提供方返回 " + errorCode + "。Wiki 文档 ID " + documentId
+                        + " 的索引已停止自动重试；补充额度后，请在管理后台手动执行知识库对账重建。",
+                "WIKI_DOCUMENT", documentId, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void wikiIndexRebuildCompleted(Long actorId, boolean succeeded, String content) {
+        users.findById(actorId).ifPresent(actor -> save(java.util.List.of(actor),
+                succeeded ? NotificationType.WIKI_INDEX_REBUILD_SUCCEEDED : NotificationType.WIKI_INDEX_REBUILD_FAILED,
+                succeeded ? "Wiki 向量重建完成" : "Wiki 向量重建完成但存在失败", content,
+                "WIKI_RECONCILE", 0L, null));
     }
 
     @Transactional

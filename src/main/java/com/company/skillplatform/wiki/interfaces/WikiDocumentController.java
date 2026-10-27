@@ -25,7 +25,7 @@ public class WikiDocumentController {
     @PutMapping("/documents/{id}") public WikiDocumentService.DocumentView update(@PathVariable Long id, @Valid @RequestBody UpdateRequest r, Authentication a, HttpServletRequest h) { return service.update(id, new WikiDocumentService.UpdateCommand(r.title, r.markdownContent, r.versionNo, r.skillIds), (Long) a.getPrincipal(), h.getRequestId()); }
     @PostMapping("/documents/{id}:restore") public WikiDocumentService.DocumentView restore(@PathVariable Long id, @Valid @RequestBody RestoreRequest r, Authentication a, HttpServletRequest h) { return service.restore(id, r.revisionId, r.versionNo, (Long) a.getPrincipal(), h.getRequestId()); }
     @DeleteMapping("/documents/{id}") @ResponseStatus(HttpStatus.NO_CONTENT) public void archive(@PathVariable Long id, Authentication a, HttpServletRequest h) { service.archive(id, (Long) a.getPrincipal(), h.getRequestId()); }
-    public record CreateRequest(@NotBlank @Size(max=255) String title, @NotBlank String documentType, Long teamId, @NotEmpty List<@NotNull Long> skillIds, @NotBlank String markdownContent) {}
+    public record CreateRequest(@NotBlank @Size(max=255) String title, @NotBlank String documentType, Long teamId, List<@NotNull Long> skillIds, @NotBlank String markdownContent) {}
     public record UpdateRequest(@NotBlank @Size(max=255) String title, @NotBlank String markdownContent, int versionNo, List<@NotNull Long> skillIds) {}
     public record RestoreRequest(@NotNull Long revisionId, int versionNo) {}
 }
