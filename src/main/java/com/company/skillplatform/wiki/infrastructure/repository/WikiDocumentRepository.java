@@ -8,4 +8,6 @@ public interface WikiDocumentRepository extends JpaRepository<WikiDocumentEntity
     Optional<WikiDocumentEntity> findByIdAndStatus(Long id, String status);
     List<WikiDocumentEntity> findByTitleAndPlatformVisibleTrueAndStatus(String title, String status);
     List<WikiDocumentEntity> findByStatusOrderByIdAsc(String status);
+    List<WikiDocumentEntity> findByParentIdAndStatusOrderByIdAsc(Long parentId, String status);
+    Optional<WikiDocumentEntity> findFirstBySourceSystemAndSourceResourceIdAndTeamIdAndStatusOrderByIdDesc(String sourceSystem, String sourceResourceId, Long teamId, String status);
 }

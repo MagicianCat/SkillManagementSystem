@@ -147,6 +147,13 @@ public class ExternalResourceAdminService {
         return new String(content,StandardCharsets.UTF_8);
     }
 
+    public Map<String,String> documentContents(Long versionId) {
+        versionOfType(versionId,"DOCUMENT");
+        Map<String,String> result = new LinkedHashMap<>();
+        parseDocuments(versionId).forEach((path, bytes) -> result.put(path, new String(bytes, StandardCharsets.UTF_8)));
+        return result;
+    }
+
     public Readiness readiness(Long roleId) {
         List<Map<String,Object>> pending = new ArrayList<>(); Set<Long> ids = new LinkedHashSet<>();
         List<Map<String,Object>> resources=db.queryForList("SELECT r.id,r.name,r.external_resource_id AS externalResourceId,r.current_version_id AS versionId FROM external_role_resource rr JOIN external_resource r ON r.id=rr.resource_id WHERE rr.role_id=? AND r.resource_type='SKILL'",roleId);
@@ -173,7 +180,7 @@ public class ExternalResourceAdminService {
             try {
                 byte[] data=docs.get(path);
                 if (data==null) throw bad("DOCUMENT_NOT_FOUND","ZIP 中没有该文档");
-                List<Long> prior=db.query("SELECT target_id FROM external_import_record WHERE resource_version_id=? AND external_role_id=? AND entry_path=? AND target_type='WIKI' AND result='SUCCESS' ORDER BY id DESC LIMIT 1",(rs,n)->rs.getLong(1),versionId,request.externalRoleId(),path);
+                List<Long> prior=db.query("SELECT i.target_id FROM external_import_record i JOIN wiki_document d ON d.id=i.target_id AND d.status='ACTIVE' WHERE i.resource_version_id=? AND i.external_role_id=? AND i.entry_path=? AND i.target_type='WIKI' AND i.result='SUCCESS' ORDER BY i.id DESC LIMIT 1",(rs,n)->rs.getLong(1),versionId,request.externalRoleId(),path);
                 if (!prior.isEmpty()) { results.add(new DocumentImportResult(path,"UNCHANGED",prior.get(0),null,ready.skillIds())); continue; }
                 Long createdId=transactions.execute(status -> {
                     Readiness latest=readiness(request.externalRoleId());

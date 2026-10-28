@@ -24,7 +24,8 @@ import org.springframework.web.bind.annotation.RestController;
 @PreAuthorize("hasAuthority('admin:identity')")
 public class ExternalResourceAdminController {
     private final ExternalResourceAdminService service;
-    public ExternalResourceAdminController(ExternalResourceAdminService service) { this.service=service; }
+    private final ExternalBulkImportService bulk;
+    public ExternalResourceAdminController(ExternalResourceAdminService service, ExternalBulkImportService bulk) { this.service=service; this.bulk=bulk; }
 
     @GetMapping("/external-resources/roles") public List<Map<String,Object>> roles(){return service.roles();}
     @GetMapping("/external-resources") public List<Map<String,Object>> resources(@RequestParam(required=false)Long roleId,@RequestParam(required=false)String type,@RequestParam(required=false)String keyword,@RequestParam(defaultValue="0")int page,@RequestParam(defaultValue="50")int size){return service.resources(roleId,type,keyword,page,size);}
@@ -36,13 +37,13 @@ public class ExternalResourceAdminController {
     @GetMapping("/external-resource-versions/{id}/documents") public List<ExternalResourceAdminService.DocumentEntry> documents(@PathVariable Long id,Authentication auth,HttpServletRequest request){var result=service.documents(id);service.audit("EXTERNAL_DOCUMENTS_LISTED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId());return result;}
     @GetMapping("/external-resource-versions/{id}/documents/content") public String content(@PathVariable Long id,@RequestParam String path,Authentication auth,HttpServletRequest request){var result=service.documentContent(id,path);service.audit("EXTERNAL_DOCUMENT_PREVIEWED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId());return result;}
     @GetMapping("/external-resources/roles/{id}/import-readiness") public ExternalResourceAdminService.Readiness readiness(@PathVariable Long id){return service.readiness(id);}
-    @PostMapping("/external-resource-versions/{id}/documents:import") public ResponseEntity<BatchImportResponse> importDocuments(@PathVariable Long id,@RequestBody ExternalResourceAdminService.DocumentImportRequest body,Authentication auth,HttpServletRequest request){
-        var results=service.importDocuments(id,body,(Long)auth.getPrincipal(),request.getRequestId());
-        service.audit("EXTERNAL_DOCUMENTS_IMPORTED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId());
-        long failed=results.stream().filter(row->"FAILED".equals(row.status())).count();
-        int code=failed==0?0:failed==results.size()?1002:1001;
-        return ResponseEntity.status(code==1002?HttpStatus.UNPROCESSABLE_ENTITY:HttpStatus.OK)
-                .body(new BatchImportResponse(code,code==0?"success":code==1001?"partial_failure":"all_failed",results));
+    @PostMapping("/external-resources/roles/{id}/skills:import-all") public ResponseEntity<Map<String,Long>> importAllSkills(@PathVariable Long id, @RequestBody BulkSkillRequest body, Authentication auth) {
+        return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueSkills(id,body.resourceIds(),(Long)auth.getPrincipal())));
     }
-    public record BatchImportResponse(int code,String message,List<ExternalResourceAdminService.DocumentImportResult> data) {}
+    @PostMapping("/external-resources/roles/{id}/wikis:import-all") public ResponseEntity<Map<String,Long>> importAllWikis(@PathVariable Long id, @RequestBody BulkWikiRequest body, Authentication auth) {
+        return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueWikis(id,body.teamId(),body.parentWikiId(),body.linkRoleSkills(),body.selections(),(Long)auth.getPrincipal())));
+    }
+    @GetMapping("/external-import-jobs/{id}") public Map<String,Object> importJob(@PathVariable Long id) { return bulk.job(id); }
+    public record BulkSkillRequest(List<Long> resourceIds) {}
+    public record BulkWikiRequest(Long teamId,Long parentWikiId,boolean linkRoleSkills,List<ExternalBulkImportService.WikiSelection> selections) {}
 }

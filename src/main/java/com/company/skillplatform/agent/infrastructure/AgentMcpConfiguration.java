@@ -99,6 +99,8 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of()), this::searchWiki),
                         tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. Normal user results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiDocument),
+                        tool("list_wiki_children", "List direct child Wiki documents of a visible parent. Call again with a returned child documentId to drill down one level. Results include sourceUrl and downloadUrl.",
+                                schema("object", List.of("documentId")), this::wikiChildren),
                         tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Results include sourceUrl and downloadUrl for each Wiki.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
@@ -258,7 +260,20 @@ public class AgentMcpConfiguration {
         if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
         requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
+        response.put("parentId", document.parentId());
         response.putAll(wikiLinks(id));return ok(response);
+    }
+    private McpSchema.CallToolResult wikiChildren(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
+        var agent = run(ex, "wiki.read");
+        requireUserKnowledge(agent);
+        long id = longRequired(args, "documentId");
+        return ok(Map.of("parentId", id, "items", wiki.children(id, agent.userId()).stream().map(document -> {
+            Map<String,Object> item=new LinkedHashMap<>();
+            item.put("documentId", document.id()); item.put("title", document.title());
+            item.put("documentType", document.documentType()); item.put("parentId", document.parentId());
+            item.put("revisionNo", document.revisionNo()); item.putAll(wikiLinks(document.id()));
+            return item;
+        }).toList()));
     }
     private McpSchema.CallToolResult searchFeishu(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "feishu.search"); requireUserKnowledge(agent); String query = required(args, "query");

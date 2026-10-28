@@ -145,6 +145,17 @@ public class NotificationService {
                 "WIKI_RECONCILE", 0L, null));
     }
 
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void externalImportCompleted(Long actorId, Long jobId, String kind, int succeeded, int failed, String summary) {
+        LinkedHashMap<Long,IamUserEntity> recipients = new LinkedHashMap<>();
+        users.findById(actorId).ifPresent(actor -> recipients.put(actor.getId(), actor));
+        userRoles.findActiveUsersByPermission("admin:identity").forEach(admin -> recipients.put(admin.getId(), admin));
+        String content = "成功 " + succeeded + "，失败 " + failed + "。" + summary;
+        save(recipients.values(), NotificationType.EXTERNAL_IMPORT_COMPLETED,
+                "外部" + ("SKILL".equals(kind) ? " Skill" : " Wiki") + "批量导入完成",
+                content.substring(0, Math.min(2048, content.length())), "EXTERNAL_IMPORT_JOB", jobId, null);
+    }
+
     @Transactional
     public void feishuDocumentPublication(Long actorId, NotificationType type, String title, String content, Long taskId, String targetData) {
         users.findById(actorId).ifPresent(user -> notifications.save(new UserNotificationEntity(user, type, title, content, "FEISHU_DOCUMENT_PUBLICATION", taskId, null).withTargetData(targetData)));

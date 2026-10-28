@@ -40,28 +40,31 @@ class CollabApprovalFeedbackServiceTest {
         when(authorization.requireMemberOrThrow(REQUIREMENT, ACTOR)).thenReturn(new ProjectRef(
                 PROJECT, REQUIREMENT, ACTOR, "L2", "ACTIVE", 1, 3, 10L,
                 "group-key", ACTOR, "PUBLISHED", ACTOR, null, false, false));
-        when(jdbc.queryForList(contains("a.duty='OWNER'"), eq(PROJECT), eq(ACTOR)))
-                .thenReturn(List.of(Map.of("id", STAGE)));
-        when(jdbc.queryForList(contains("FEISHU_PUBLISHED"), eq(PROJECT))).thenReturn(List.of(roundRow()));
+        when(jdbc.queryForList(contains("frozen_at is not null"), eq(STAGE), eq(ACTOR)))
+                .thenReturn(List.of(Map.of("user_id", ACTOR)));
+        when(jdbc.queryForList(contains("FEISHU_PUBLISHED"), eq(PROJECT), eq("REQUIREMENT")))
+                .thenReturn(List.of(roundRow()));
+        when(jdbc.queryForList(contains("FEISHU_PUBLISHED"), eq(PROJECT), eq(SUBMISSION)))
+                .thenReturn(List.of(roundRow()));
     }
 
     @Test
-    void rejectsNonOwnerAndDoesNotQueryTheApprovalRound() {
-        when(jdbc.queryForList(contains("a.duty='OWNER'"), eq(PROJECT), eq(ACTOR))).thenReturn(List.of());
+    void rejectsNonOwnerOfTheResolvedStage() {
+        when(jdbc.queryForList(contains("frozen_at is not null"), eq(STAGE), eq(ACTOR))).thenReturn(List.of());
 
         assertThatThrownBy(() -> service.context(REQUIREMENT, "REQUIREMENT", ACTOR))
-                .hasMessageContaining("frozen requirement owner");
+                .hasMessageContaining("frozen owner of this stage");
 
-        verify(jdbc, never()).queryForList(contains("FEISHU_PUBLISHED"), anyLong());
+        verify(jdbc).queryForList(contains("FEISHU_PUBLISHED"), eq(PROJECT), eq("REQUIREMENT"));
     }
 
     @Test
-    void resolvesOnlyRequirementStageForMvp() {
-        assertThatThrownBy(() -> service.context(REQUIREMENT, "PRODUCT", ACTOR))
-                .hasMessageContaining("Only REQUIREMENT stage is supported");
+    void rejectsUnsupportedStage() {
+        assertThatThrownBy(() -> service.context(REQUIREMENT, "UNKNOWN", ACTOR))
+                .hasMessageContaining("Unsupported stage key");
 
         verifyNoInteractions(authorization);
-        verify(jdbc, never()).queryForList(contains("FEISHU_PUBLISHED"), anyLong());
+        verify(jdbc, never()).queryForList(contains("FEISHU_PUBLISHED"), eq(PROJECT), eq("UNKNOWN"));
     }
 
     @Test
@@ -76,9 +79,11 @@ class CollabApprovalFeedbackServiceTest {
     }
 
     @Test
-    void rejectsArtifactRequestsForAnySubmissionOtherThanTheResolvedApprovalRound() {
+    void rejectsArtifactRequestsForAnySubmissionOutsideTheCurrentApprovalRound() {
+        when(jdbc.queryForList(contains("FEISHU_PUBLISHED"), eq(PROJECT), eq(SUBMISSION + 1)))
+                .thenReturn(List.of());
         assertThatThrownBy(() -> service.artifacts(REQUIREMENT, SUBMISSION + 1, ACTOR))
-                .hasMessageContaining("does not match the current feedback round");
+                .hasMessageContaining("No pending approval or rejected round is available");
 
         verify(jdbc, never()).query(contains("p.artifact_version_id=?"), any(RowCallbackHandler.class), any());
     }
