@@ -273,8 +273,9 @@ public class WikiDocumentService {
         if (parentId == null) return null;
         if (parentId.equals(documentId)) throw error("WIKI_PARENT_CYCLE", "Wiki cannot be its own parent", HttpStatus.BAD_REQUEST);
         WikiDocumentEntity parent = visibleDocument(parentId, userId);
-        if (!"SKILL_GUIDE".equals(parent.getDocumentType()) || !Objects.equals(parent.getTeamId(), teamId))
-            throw error("WIKI_PARENT_SCOPE_INVALID", "Parent Wiki must be an active guide in the same team", HttpStatus.BAD_REQUEST);
+        boolean scopeMatches = teamId == null ? parent.isPlatformVisible() : Objects.equals(parent.getTeamId(), teamId);
+        if (!"SKILL_GUIDE".equals(parent.getDocumentType()) || !scopeMatches)
+            throw error("WIKI_PARENT_SCOPE_INVALID", "Parent Wiki must be an active guide visible in the target scope", HttpStatus.BAD_REQUEST);
         for (WikiDocumentEntity ancestor = parent; ancestor != null; ancestor = ancestor.getParent())
             if (ancestor.getId().equals(documentId)) throw error("WIKI_PARENT_CYCLE", "Wiki parent cycle", HttpStatus.BAD_REQUEST);
         return parent;

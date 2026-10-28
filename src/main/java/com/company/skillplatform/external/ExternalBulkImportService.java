@@ -65,8 +65,9 @@ public class ExternalBulkImportService {
         if (selectedIds.size()!=selections.size()) throw bad("EXTERNAL_WIKI_SELECTION_INVALID", "ZIP 选择包含重复资源");
         if (parentWikiId != null) {
             var parent = wiki.get(parentWikiId, actorId);
-            if (!java.util.Objects.equals(teamId,parent.teamId()) || !"SKILL_GUIDE".equals(parent.documentType()))
-                throw bad("WIKI_PARENT_SCOPE_INVALID", "父 Wiki 必须属于目标团队");
+            boolean scopeMatches=teamId==null?parent.platformVisible():java.util.Objects.equals(teamId,parent.teamId());
+            if (!scopeMatches || !"SKILL_GUIDE".equals(parent.documentType()))
+                throw bad("WIKI_PARENT_SCOPE_INVALID", "父 Wiki 必须在目标范围内可见");
         }
         return enqueue("DOCUMENT", roleId, teamId, parentWikiId, linkRoleSkills, null, selections, actorId);
     }
