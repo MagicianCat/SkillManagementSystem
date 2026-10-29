@@ -1,0 +1,22 @@
+CREATE TABLE external_asdm_tool_asset (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  resource_id BIGINT NOT NULL,
+  resource_version_id BIGINT NOT NULL,
+  wiki_document_id BIGINT NULL,
+  inner_entry_path VARCHAR(512) NOT NULL,
+  filename VARCHAR(512) NOT NULL,
+  object_key VARCHAR(512) NOT NULL,
+  sha256 CHAR(64) NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'STAGING',
+  created_by BIGINT NOT NULL,
+  created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uk_asdm_asset_resource_version (resource_version_id),
+  UNIQUE KEY uk_asdm_asset_object_key (object_key),
+  KEY idx_asdm_asset_wiki (wiki_document_id),
+  CONSTRAINT fk_asdm_asset_resource FOREIGN KEY (resource_id) REFERENCES external_resource(id),
+  CONSTRAINT fk_asdm_asset_version FOREIGN KEY (resource_version_id) REFERENCES external_resource_version(id),
+  CONSTRAINT fk_asdm_asset_wiki FOREIGN KEY (wiki_document_id) REFERENCES wiki_document(id),
+  CONSTRAINT fk_asdm_asset_created_by FOREIGN KEY (created_by) REFERENCES iam_user(id)
+);

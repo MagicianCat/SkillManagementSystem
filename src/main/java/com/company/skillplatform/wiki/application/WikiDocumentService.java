@@ -117,6 +117,39 @@ public class WikiDocumentService {
                 .filter(document -> isVisible(document, userId)).map(this::view).toList();
     }
 
+    /** Returns a bounded directory of visible descendants without loading their Markdown bodies. */
+    @Transactional(readOnly = true)
+    public DescendantDirectory visibleDescendants(Long parentId, Long userId, boolean platformOnly, int requestedDepth, int requestedLimit) {
+        WikiDocumentEntity parent = visibleDocument(parentId, userId);
+        if (platformOnly && !parent.isPlatformVisible()) throw error("WIKI_DOCUMENT_NOT_FOUND", "Wiki document not found", HttpStatus.NOT_FOUND);
+        int maxDepth = Math.min(Math.max(requestedDepth, 1), 3);
+        int maxItems = Math.min(Math.max(requestedLimit, 1), 20);
+        boolean admin = !platformOnly && isAdmin();
+        Set<Long> teamIds = platformOnly || admin ? Set.of() : members.findByUserId(userId).stream()
+                .filter(member -> "ACTIVE".equals(member.getStatus())).map(member -> member.getTeam().getId()).collect(Collectors.toSet());
+        List<DescendantSummary> found = new ArrayList<>();
+        Deque<DirectoryNode> queue = new ArrayDeque<>();
+        Set<Long> visited = new HashSet<>();
+        visited.add(parentId);
+        queue.addLast(new DirectoryNode(parentId, 0));
+        while (!queue.isEmpty()) {
+            DirectoryNode node = queue.removeFirst();
+            for (WikiDocumentEntity child : documents.findByParentIdAndStatusOrderByIdAsc(node.id(), "ACTIVE")) {
+                if (!child.isPlatformVisible() && (platformOnly || (!admin && !teamIds.contains(child.getTeamId())))) continue;
+                if (!visited.add(child.getId())) continue;
+                if (node.depth() >= maxDepth || found.size() >= maxItems) return new DescendantDirectory(List.copyOf(found), true);
+                int depth = node.depth() + 1;
+                found.add(new DescendantSummary(child.getId(), child.getTitle(), child.getDocumentType(), node.id(), depth));
+                queue.addLast(new DirectoryNode(child.getId(), depth));
+            }
+        }
+        return new DescendantDirectory(List.copyOf(found), false);
+    }
+
+    private record DirectoryNode(Long id, int depth) {}
+    public record DescendantSummary(Long documentId, String title, String documentType, Long parentId, int depth) {}
+    public record DescendantDirectory(List<DescendantSummary> items, boolean truncated) {}
+
     @Transactional
     public void markExternalSource(Long documentId, String sourceSystem, String resourceId, String entryPath) {
         WikiDocumentEntity document = documents.findByIdAndStatus(documentId, "ACTIVE")

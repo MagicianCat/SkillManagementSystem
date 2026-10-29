@@ -25,7 +25,8 @@ import org.springframework.web.bind.annotation.RestController;
 public class ExternalResourceAdminController {
     private final ExternalResourceAdminService service;
     private final ExternalBulkImportService bulk;
-    public ExternalResourceAdminController(ExternalResourceAdminService service, ExternalBulkImportService bulk) { this.service=service; this.bulk=bulk; }
+    private final AsdmToolImportService asdm;
+    public ExternalResourceAdminController(ExternalResourceAdminService service, ExternalBulkImportService bulk, AsdmToolImportService asdm) { this.service=service; this.bulk=bulk; this.asdm=asdm; }
 
     @GetMapping("/external-resources/roles") public List<Map<String,Object>> roles(){return service.roles();}
     @GetMapping("/external-resources") public List<Map<String,Object>> resources(@RequestParam(required=false)Long roleId,@RequestParam(required=false)String type,@RequestParam(required=false)String keyword,@RequestParam(defaultValue="0")int page,@RequestParam(defaultValue="50")int size){return service.resources(roleId,type,keyword,page,size);}
@@ -44,6 +45,13 @@ public class ExternalResourceAdminController {
         return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueWikis(id,body.teamId(),body.parentWikiId(),body.linkRoleSkills(),body.selections(),(Long)auth.getPrincipal())));
     }
     @GetMapping("/external-import-jobs/{id}") public Map<String,Object> importJob(@PathVariable Long id) { return bulk.job(id); }
+    @GetMapping("/external-resource-versions/{id}/asdm-tool/status") public AsdmToolImportService.Status asdmStatus(@PathVariable Long id) { return asdm.status(id); }
+    @PostMapping("/external-resource-versions/{id}/asdm-tool:import-wiki") public AsdmToolImportService.ImportResult importAsdm(@PathVariable Long id, @RequestBody(required=false) AsdmToolImportService.ImportCommand body, Authentication auth, HttpServletRequest request) {
+        return asdm.importWiki(id,body,(Long)auth.getPrincipal(),request.getRequestId());
+    }
+    @PostMapping("/external-resource-versions/{id}/asdm-tool:refresh-link") public AsdmToolImportService.ImportResult refreshAsdmLink(@PathVariable Long id, Authentication auth, HttpServletRequest request) {
+        return asdm.refreshLink(id,(Long)auth.getPrincipal(),request.getRequestId());
+    }
     public record BulkSkillRequest(List<Long> resourceIds) {}
     public record BulkWikiRequest(Long teamId,Long parentWikiId,boolean linkRoleSkills,List<ExternalBulkImportService.WikiSelection> selections) {}
 }

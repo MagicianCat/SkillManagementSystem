@@ -51,6 +51,9 @@ integration:
     max-file-bytes: ${INTEGRATION_EXTERNAL_MAX_FILE_BYTES:52428800}
     requests-per-minute: ${INTEGRATION_EXTERNAL_REQUESTS_PER_MINUTE:60}
     orphan-sweep-ms: ${INTEGRATION_EXTERNAL_ORPHAN_SWEEP_MS:3600000}
+    asdm-tool:
+      download-base-url: ${ASDM_TOOL_DOWNLOAD_BASE_URL:}
+      max-inner-zip-bytes: ${ASDM_TOOL_MAX_INNER_ZIP_BYTES:52428800}
 
 auth:
   browser:

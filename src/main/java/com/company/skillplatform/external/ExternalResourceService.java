@@ -30,11 +30,18 @@ public class ExternalResourceService {
     private final ObjectStoragePort storage;
     private final DevelopmentStageCatalogService stages;
     private final long maxBytes;
+    private final long maxInnerBytes;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ExternalResourceService(JdbcTemplate db, TransactionTemplate transactions, ObjectStoragePort storage,
             DevelopmentStageCatalogService stages,
-            @Value("${integration.external.max-file-bytes:52428800}") long maxBytes) {
-        this.db = db; this.transactions = transactions; this.storage = storage; this.stages = stages; this.maxBytes = maxBytes;
+            @Value("${integration.external.max-file-bytes:52428800}") long maxBytes,
+            @Value("${integration.external.asdm-tool.max-inner-zip-bytes:52428800}") long maxInnerBytes) {
+        this.db = db; this.transactions = transactions; this.storage = storage; this.stages = stages; this.maxBytes = maxBytes; this.maxInnerBytes = maxInnerBytes;
+    }
+    ExternalResourceService(JdbcTemplate db, TransactionTemplate transactions, ObjectStoragePort storage,
+            DevelopmentStageCatalogService stages, long maxBytes) {
+        this(db, transactions, storage, stages, maxBytes, 50L * 1024 * 1024);
     }
 
     public PushResult push(PushRequest request, MultiValueMap<String, MultipartFile> files, String requestId) {
@@ -67,7 +74,7 @@ public class ExternalResourceService {
 
     private Receipt receive(PushRequest request, ResourceInput input, MultipartFile file, String requestId) throws Exception {
         if (input == null || blank(input.resourceId()) || blank(input.resourceName()) || blank(input.fileKey())
-                || !("SKILL".equals(input.resourceType()) || "DOCUMENT".equals(input.resourceType()))
+                || !("SKILL".equals(input.resourceType()) || "DOCUMENT".equals(input.resourceType()) || "ASDM-TOOL".equals(input.resourceType()))
                 || input.resourceId().length() > 255 || input.resourceName().length() > 512 || input.fileKey().length() > 128
                 || (input.description() != null && input.description().length() > 10000)
                 || (input.version() != null && input.version().length() > 128)) {
@@ -75,8 +82,8 @@ public class ExternalResourceService {
         }
         DevelopmentStageCatalogService.ResolvedStage stage;
         try {
-            if ("DOCUMENT".equals(input.resourceType()) && (input.developmentStageProvided() || input.subStageKeyProvided()))
-                throw new ResourceFailure("INVALID_RESOURCE", "DOCUMENT 不允许携带研发阶段字段");
+            if (!"SKILL".equals(input.resourceType()) && (input.developmentStageProvided() || input.subStageKeyProvided()))
+                throw new ResourceFailure("INVALID_RESOURCE", "该资源类型不允许携带研发阶段字段");
             stage = "SKILL".equals(input.resourceType())
                     ? stages.resolve(input.developmentStage(), input.subStageKey())
                     : new DevelopmentStageCatalogService.ResolvedStage(null, null);
@@ -102,6 +109,10 @@ public class ExternalResourceService {
                 byte[] header = in.readNBytes(4);
                 if (header[0] != 'P' || header[1] != 'K' || !((header[2] == 3 && header[3] == 4) || (header[2] == 5 && header[3] == 6)))
                     throw new ResourceFailure("INVALID_FILE_TYPE", "文件不是 ZIP");
+            }
+            if ("ASDM-TOOL".equals(input.resourceType())) {
+                try { AsdmOuterArchive.inspect(temp, maxInnerBytes); }
+                catch (com.company.skillplatform.common.application.BusinessException ex) { throw new ResourceFailure(ex.getCode(), ex.getMessage()); }
             }
             String sha = HexFormat.of().formatHex(digest.digest());
             String objectKey = "external-resources/raw/" + UUID.randomUUID() + ".zip";

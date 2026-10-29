@@ -88,20 +88,20 @@ public class AgentMcpConfiguration {
                 .contextExtractor(req -> io.modelcontextprotocol.common.McpTransportContext.create(Map.of("request", req)))
                 .maxRequestSize(256 * 1024).build();
         McpSyncServer server = McpServer.sync(transport).serverInfo("skill-platform", "1.0")
-                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. If no relevant platform evidence exists, search Feishu documents. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
+                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. Matched Wiki results contain a bounded directory of visible descendants; inspect childDocuments before answering from a parent Wiki, and read relevant children with get_wiki_document. If no relevant platform evidence exists, search Feishu documents. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
                 .tools(tool("get_current_user_context", "Get the current user's visible teams before recommending skills.",
                         schema("object", List.of()), this::currentUserContext),
                         tool("search_skills", "Search published skills by development stage, platform and OS.",
                         schema("object", List.of()), this::search),
                         tool("get_skill_detail", "Get metadata and a segment of the root skill.md.",
                                 schema("object", List.of("skillKey")), this::detail),
-                        tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run. Normal user results include sourceUrl and downloadUrl.",
+                        tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run. Normal user results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
                                 schema("object", List.of()), this::searchWiki),
-                        tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. Normal user results include sourceUrl and downloadUrl.",
+                        tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. Normal user results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
                                 schema("object", List.of("documentId")), this::wikiDocument),
                         tool("list_wiki_children", "List direct child Wiki documents of a visible parent. Call again with a returned child documentId to drill down one level. Results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiChildren),
-                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Results include sourceUrl and downloadUrl for each Wiki.",
+                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Each Wiki result includes sourceUrl, downloadUrl, childDocuments and childrenTruncated; inspect children before treating a matched parent as complete.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
@@ -236,7 +236,10 @@ public class AgentMcpConfiguration {
         var result=knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,integer(args,"limit",5));
         Map<String,Object> response=objectMapper.convertValue(result,new TypeReference<>() {});
         List<Map<String,Object>> documents=objectMapper.convertValue(result.results(),new TypeReference<>() {});
-        for(Map<String,Object> document:documents) document.putAll(wikiLinks(((Number)document.get("documentId")).longValue()));
+        for(Map<String,Object> document:documents) {
+            long id=((Number)document.get("documentId")).longValue();
+            document.putAll(wikiLinks(id));addWikiDirectory(document,id,agent.userId(),"PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()),3,20);
+        }
         response.put("results",documents);return ok(response);
     }
     private McpSchema.CallToolResult detail(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
@@ -251,7 +254,9 @@ public class AgentMcpConfiguration {
         if (workflowId != null) return workflowWikiSearch(workflowId, str(args, "keyword"));
         if (agent.sessionKey() != null) return ok(Map.of("items", documentAgents.searchSelectedWiki(agent.sessionKey(), agent.runRef(), str(args,"keyword")), "page", 0, "size", 10));
         requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"documentType"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
-        return ok(Map.of("items", result.items().stream().map(this::linkedWiki).toList(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
+        return ok(Map.of("items", result.items().stream().map(document -> {
+            Map<String,Object> item=linkedWiki(document);addWikiDirectory(item,document.id(),agent.userId(),false,1,5);return item;
+        }).toList(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
     }
     private McpSchema.CallToolResult wikiDocument(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read"); long id = longRequired(args,"documentId"); int offset = integer(args,"offset",0); int max = bounded(args);
@@ -261,7 +266,7 @@ public class AgentMcpConfiguration {
         requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
         response.put("parentId", document.parentId());
-        response.putAll(wikiLinks(id));return ok(response);
+        response.putAll(wikiLinks(id));addWikiDirectory(response,id,agent.userId(),false,3,20);return ok(response);
     }
     private McpSchema.CallToolResult wikiChildren(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read");
@@ -492,6 +497,15 @@ public class AgentMcpConfiguration {
     private Map<String,Object> wikiLinks(long documentId) {
         String page=webBaseUrl+"/wiki?documentId="+documentId;
         return Map.of("sourceUrl",page,"downloadUrl",page+"&download=1");
+    }
+    private void addWikiDirectory(Map<String,Object> response,long documentId,long userId,boolean platformOnly,int depth,int limit) {
+        var directory=wiki.visibleDescendants(documentId,userId,platformOnly,depth,limit);
+        List<Map<String,Object>> children=directory.items().stream().map(child -> {
+            Map<String,Object> item=new LinkedHashMap<>(objectMapper.convertValue(child,new TypeReference<Map<String,Object>>() {}));
+            item.putAll(wikiLinks(child.documentId()));return item;
+        }).toList();
+        response.put("childDocuments",children);
+        response.put("childrenTruncated",directory.truncated());
     }
     private String normalizePlatform(String value) { return value == null || value.isBlank() ? null : value.trim().toUpperCase(Locale.ROOT); }
     private String normalizeOs(String value) { return value == null || value.isBlank() ? null : value.trim().toUpperCase(Locale.ROOT); }

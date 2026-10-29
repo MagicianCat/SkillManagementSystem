@@ -8,7 +8,13 @@ export INTEGRATION_EXTERNAL_API_KEYS_JSON='{"platform-a":"请替换为独立生�
 
 生产环境必须只在 HTTPS 后开放 `POST /api/integration/v1/resources/push`，不要把密钥写入 Git、前端或日志。一个密钥只对应一个 `sourceSystem`。可通过 `INTEGRATION_EXTERNAL_MAX_FILE_BYTES` 调整单 ZIP 大小上限（默认 50 MiB），同时检查 Spring `spring.servlet.multipart` 的文件/请求上限；单批最多 20 个资源。默认每来源每实例每分钟最多 60 次请求，超限返回 HTTP 429 / 业务码 4290；多实例部署时还需在入口网关配置全局限流。
 
-本实现遵循较新的《外部角色资源接入详细设计 V1.1》：`SKILL` 和 `DOCUMENT` 均推送原始 ZIP。早期《外部资源推送 API 接口文档》中的 DOCUMENT PDF 示例不再适用，需要联调时同步告知对接方。
+本实现遵循《外部资源推送 API 接口文档 V1.3》：`SKILL`、`DOCUMENT` 和 `ASDM-TOOL` 均推送原始 ZIP。`ASDM-TOOL` 外层 ZIP 必须恰好包含一篇非空 Markdown 和一个非空工具 ZIP；推送成功时仅归档外层 ZIP。
+
+管理员在“外部资源接入”选择 ASDM 工具版本并点击“导入平台 Wiki”，系统将内层工具 ZIP 存为受保护资产，创建或显式确认后更新同一篇平台 Wiki，并追加由 `ASDM_TOOL_DOWNLOAD_BASE_URL` 生成的登录下载链接。同一版本重复导入返回 `UNCHANGED`。管理员可使用“重建下载链接”修复部署地址变化后的 Wiki 链接；普通登录用户通过 `/asdm-tools/download/{assetId}` 下载内层 ZIP。
+
+- 管理接口：`GET /api/v1/external-resource-versions/{id}/asdm-tool/status`、`POST /api/v1/external-resource-versions/{id}/asdm-tool:import-wiki`、`POST /api/v1/external-resource-versions/{id}/asdm-tool:refresh-link`。
+- 登录下载接口：`GET /api/v1/asdm-tool-assets/{assetId}` 和 `GET /api/v1/asdm-tool-assets/{assetId}/download`。只有资产对应的 Wiki 仍为活动且全平台可见时才能下载。
+- 部署时必须在后端 `.env` 设置用户可访问的前端基址 `ASDM_TOOL_DOWNLOAD_BASE_URL`（含前端部署子路径），例如 `https://example.com/yantu`；未配置会阻断导入，避免写入错误链接。
 
 外部请求仅归档 ZIP 和元数据，不解压、不导入 Skill/Wiki。管理员在“外部资源接入”中按角色发起异步批量任务：
 

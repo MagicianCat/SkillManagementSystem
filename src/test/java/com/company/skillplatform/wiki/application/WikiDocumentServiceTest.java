@@ -29,6 +29,59 @@ import com.company.skillplatform.wiki.domain.WikiReviewStatus;
 class WikiDocumentServiceTest {
     @AfterEach void clearAuthentication() { SecurityContextHolder.clearContext(); }
 
+    @Test void visibleDescendantsFiltersPrivateBranchesAndReportsTruncation() {
+        var documents=mock(WikiDocumentRepository.class);
+        var root=wikiNode(10L,"目录",true, null);
+        var publicChild=wikiNode(11L,"公开子文档",true, null);
+        var privateChild=wikiNode(12L,"其他团队私有文档",false, 7L);
+        var grandchild=wikiNode(13L,"公开孙文档",true, null);
+        when(documents.findById(10L)).thenReturn(Optional.of(root));
+        when(documents.findByParentIdAndStatusOrderByIdAsc(10L,"ACTIVE")).thenReturn(List.of(publicChild,privateChild));
+        when(documents.findByParentIdAndStatusOrderByIdAsc(11L,"ACTIVE")).thenReturn(List.of(grandchild));
+        var service=new WikiDocumentService(documents,mock(WikiDocumentRevisionRepository.class),mock(WikiDocumentSkillRepository.class),
+                mock(SkillRepository.class),mock(SkillOwnerRepository.class),mock(OrgTeamRepository.class),
+                mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),mock(IamUserRepository.class),
+                mock(AuditService.class),mock(ApplicationEventPublisher.class));
+
+        var directory=service.visibleDescendants(10L,9L,false,3,20);
+        assertThat(directory.items()).extracting(WikiDocumentService.DescendantSummary::documentId).containsExactly(11L,13L);
+        assertThat(directory.items()).extracting(WikiDocumentService.DescendantSummary::depth).containsExactly(1,2);
+        assertThat(directory.truncated()).isFalse();
+        verify(documents,never()).findByParentIdAndStatusOrderByIdAsc(12L,"ACTIVE");
+
+        var limited=service.visibleDescendants(10L,9L,false,3,1);
+        assertThat(limited.items()).extracting(WikiDocumentService.DescendantSummary::documentId).containsExactly(11L);
+        assertThat(limited.truncated()).isTrue();
+    }
+
+    @Test void publicOnlyDirectoryExcludesPrivateChildrenEvenForAdministrator() {
+        var documents=mock(WikiDocumentRepository.class);
+        var root=wikiNode(10L,"目录",true,null);
+        var publicChild=wikiNode(11L,"公开文档",true,null);
+        var privateChild=wikiNode(12L,"私有文档",false,7L);
+        when(documents.findById(10L)).thenReturn(Optional.of(root));
+        when(documents.findByParentIdAndStatusOrderByIdAsc(10L,"ACTIVE")).thenReturn(List.of(
+                publicChild,privateChild));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,
+                List.of(new SimpleGrantedAuthority("admin:identity"))));
+        var service=new WikiDocumentService(documents,mock(WikiDocumentRevisionRepository.class),mock(WikiDocumentSkillRepository.class),
+                mock(SkillRepository.class),mock(SkillOwnerRepository.class),mock(OrgTeamRepository.class),
+                mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),mock(IamUserRepository.class),
+                mock(AuditService.class),mock(ApplicationEventPublisher.class));
+
+        var directory=service.visibleDescendants(10L,9L,true,1,20);
+        assertThat(directory.items()).extracting(WikiDocumentService.DescendantSummary::documentId).containsExactly(11L);
+        assertThat(directory.truncated()).isFalse();
+    }
+
+    private static WikiDocumentEntity wikiNode(Long id,String title,boolean publicVisible,Long teamId) {
+        var document=mock(WikiDocumentEntity.class);
+        when(document.getId()).thenReturn(id);when(document.getTitle()).thenReturn(title);
+        when(document.getStatus()).thenReturn("ACTIVE");when(document.isPlatformVisible()).thenReturn(publicVisible);
+        when(document.getTeamId()).thenReturn(teamId);when(document.getDocumentType()).thenReturn("SKILL_GUIDE");
+        return document;
+    }
+
     @Test void updatingTeamWikiReplacesLinkedSkillsAndPublishesReindexEvent() {
         var documents=mock(WikiDocumentRepository.class);var revisions=mock(WikiDocumentRevisionRepository.class);
         var links=mock(WikiDocumentSkillRepository.class);var skills=mock(SkillRepository.class);
