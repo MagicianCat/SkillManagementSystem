@@ -122,6 +122,9 @@ public class GenerationTelemetryService {
     private void replaceSkillRelations(AiGenerationEntity generation, List<String> skillKeys,
                                        List<SkillInvocationMetric> invocations) {
         generationSkills.deleteAll(generationSkills.findByGeneration_Id(generation.getId()));
+        // ai_generation_skill has UNIQUE (generation_id, skill_id). Execute deletes before inserts
+        // when a higher revision rebuilds the same skill relation.
+        generationSkills.flush();
         if (invocations != null) {
             Map<String, List<SkillInvocationMetric>> grouped = new LinkedHashMap<>();
             for (SkillInvocationMetric invocation : invocations)

@@ -15,6 +15,7 @@ import com.company.skillplatform.skill.infrastructure.repository.SkillRepository
 import com.company.skillplatform.telemetry.domain.GenerationStage;
 import com.company.skillplatform.telemetry.domain.GenerationStatus;
 import com.company.skillplatform.telemetry.infrastructure.entity.AiGenerationEntity;
+import com.company.skillplatform.telemetry.infrastructure.entity.AiGenerationSkillEntity;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationFileMetricRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationSkillRepository;
@@ -24,6 +25,7 @@ import com.company.skillplatform.user.infrastructure.repository.IamUserRepositor
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import org.mockito.InOrder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -160,6 +162,33 @@ class GenerationTelemetryServiceTest {
             var iterator = values.iterator();
             return iterator.hasNext() && iterator.next().getInvocationCount() == 2 && !iterator.hasNext();
         }));
+    }
+
+    @Test
+    void flushesOldSkillRelationsBeforeReinsertingSameSkillOnRevision() {
+        AiGenerationEntity existing = new AiGenerationEntity(user, "session-1", "g-revision", GenerationStatus.COMPLETED,
+                Instant.parse("2026-09-18T10:00:00Z"));
+        ReflectionTestUtils.setField(existing, "id", 42L);
+        when(generations.findByUser_IdAndHookGenerationId(7L, "g-revision")).thenReturn(Optional.of(existing));
+        SkillEntity skill = mock(SkillEntity.class);
+        when(skill.getSkillKey()).thenReturn("code-review");
+        when(skills.findBySkillKeyIn(anyCollection())).thenReturn(List.of(skill));
+        AiGenerationSkillEntity prior = new AiGenerationSkillEntity(existing, skill, null, null, 1);
+        when(generationSkills.findByGeneration_Id(42L)).thenReturn(List.of(prior));
+        var base = command("g-revision", List.of("code-review"));
+        var incoming = new GenerationTelemetryService.UpsertCommand(base.generationId(), base.clientSessionId(),
+                base.clientInstallationId(), base.startedAt(), base.endedAt(), base.durationMs(),
+                base.projectKey(), base.projectName(), base.projectSource(), base.skillKeys(), base.usage(),
+                base.code(), base.fileTypes(), base.toolCallCount(), base.toolFailureCount(), base.status(),
+                2L, "STRUCTURED", null, null,
+                List.of(new GenerationTelemetryService.SkillInvocationMetric("code-review", null, base.startedAt())));
+
+        service.upsert(7L, incoming);
+
+        InOrder order = inOrder(generationSkills);
+        order.verify(generationSkills).deleteAll(List.of(prior));
+        order.verify(generationSkills).flush();
+        order.verify(generationSkills).saveAll(any());
     }
 
     @Test
