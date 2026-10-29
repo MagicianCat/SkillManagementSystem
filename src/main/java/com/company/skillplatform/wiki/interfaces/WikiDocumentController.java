@@ -31,6 +31,10 @@ public class WikiDocumentController {
     @GetMapping("/documents") public PageResponse<WikiDocumentService.DocumentView> search(@RequestParam(required=false) Long teamId, @RequestParam(required=false) String skillKey, @RequestParam(required=false) String documentType, @RequestParam(required=false) String keyword, Pageable pageable, Authentication a) { return service.search((Long) a.getPrincipal(), teamId, skillKey, documentType, keyword, pageable); }
     @GetMapping("/documents/matches") public List<WikiDocumentService.DocumentMatchView> matches(@RequestParam Long teamId, @RequestParam String title, Authentication a) { return service.findTeamDocumentsByTitle((Long) a.getPrincipal(), teamId, title); }
     @GetMapping("/documents/{id}") public WikiDocumentService.DocumentView get(@PathVariable Long id, Authentication a) { return service.get(id, (Long) a.getPrincipal()); }
+    @GetMapping("/documents/{id}/metadata") public DocumentMetadata metadata(@PathVariable Long id, Authentication a) {
+        var wiki = service.get(id, (Long) a.getPrincipal());
+        return new DocumentMetadata(wiki.id(), wiki.title());
+    }
     @GetMapping("/documents/{id}/download") public ResponseEntity<ByteArrayResource> download(@PathVariable Long id, Authentication a) {
         var wiki = service.get(id, (Long) a.getPrincipal());
         byte[] content = wiki.markdownContent().getBytes(StandardCharsets.UTF_8);
@@ -63,4 +67,5 @@ public class WikiDocumentController {
     public record UpdateRequest(@NotBlank @Size(max=255) String title, @NotBlank String markdownContent, int versionNo, List<@NotNull Long> skillIds, Long parentId, Boolean parentSpecified) {}
     public record RestoreRequest(@NotNull Long revisionId, int versionNo) {}
     public record DownloadRequest(@NotEmpty @Size(max=20) List<@NotNull @Positive Long> documentIds) {}
+    public record DocumentMetadata(Long id, String title) {}
 }

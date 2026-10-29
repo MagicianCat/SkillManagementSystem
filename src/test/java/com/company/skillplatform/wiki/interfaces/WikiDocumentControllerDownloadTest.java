@@ -17,6 +17,16 @@ class WikiDocumentControllerDownloadTest {
     private final WikiDocumentController controller = new WikiDocumentController(service);
 
     @Test
+    void metadataUsesTheVisibleDocumentTitle() {
+        when(auth.getPrincipal()).thenReturn(42L);
+        when(service.get(246L, 42L)).thenReturn(document(246L, "示例文档标题", "# 内容"));
+
+        assertThat(controller.metadata(246L, auth)).isEqualTo(
+                new WikiDocumentController.DocumentMetadata(246L, "示例文档标题"));
+        verify(service).get(246L, 42L);
+    }
+
+    @Test
     void packagesOnlyDocumentsReadForTheCurrentUser() throws Exception {
         when(auth.getPrincipal()).thenReturn(42L);
         when(service.get(11L, 42L)).thenReturn(document(11L, "需求规范", "# 需求"));
