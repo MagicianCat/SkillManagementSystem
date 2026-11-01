@@ -73,8 +73,8 @@ public class CollabStagePromptCardService {
             int attemptNo = Math.toIntExact(parseLong(value.get("attemptNo")));
             String promptType = String.valueOf(value.getOrDefault("promptType", "")).toUpperCase(Locale.ROOT);
             var project = authorization.requireMemberOrThrow(projectKey, actors.get(0));
-            Map<String, Object> stage = jdbc.query("select s.title,s.stage_order,s.git_required from collab_stage s where s.id=? and s.project_id=?",
-                    rs -> rs.next() ? Map.of("title", rs.getString("title"), "stage_order", rs.getInt("stage_order"), "git_required", rs.getBoolean("git_required")) : null,
+            Map<String, Object> stage = jdbc.query("select s.title,s.stage_key,s.stage_order,s.git_required from collab_stage s where s.id=? and s.project_id=?",
+                    rs -> rs.next() ? Map.of("title", rs.getString("title"), "stage_key", rs.getString("stage_key"), "stage_order", rs.getInt("stage_order"), "git_required", rs.getBoolean("git_required")) : null,
                     stageId, project.projectId());
             if (stage == null) return result(response, toast, "error", "阶段已不存在，请打开项目页面");
             if (attemptNo < 1) return result(response, toast, "error", "提示词卡片已失效");
@@ -82,20 +82,18 @@ public class CollabStagePromptCardService {
             String prompt = switch (promptType) {
                 case "CONTEXT" -> {
                     if (((Number) stage.get("stage_order")).intValue() <= 1) yield null;
-                    yield CollabStagePromptFactory.context(projectKey, String.valueOf(stage.get("title")));
+                    yield CollabStagePromptFactory.context(projectKey, String.valueOf(stage.get("stage_key")), String.valueOf(stage.get("title")));
                 }
-                case "SUBMIT" -> CollabStagePromptFactory.submit(projectKey, String.valueOf(stage.get("title")),
+                case "SUBMIT" -> CollabStagePromptFactory.submit(projectKey, String.valueOf(stage.get("stage_key")), String.valueOf(stage.get("title")),
                         stageId, attemptNo, Boolean.TRUE.equals(stage.get("git_required")));
                 default -> null;
             };
             if (prompt == null) return result(response, toast, "error", "提示词卡片已失效，请刷新项目页面");
-            String chatId = jdbc.query("SELECT CASE WHEN p.inherited_template_version IS NOT NULL THEN gb.chat_id ELSE b.chat_id END "
-                            + "FROM collab_project p LEFT JOIN collab_group_feishu_binding gb ON gb.group_id=p.group_id "
-                            + "LEFT JOIN collab_feishu_binding b ON b.project_id=p.id WHERE p.id=?",
+            String chatId = jdbc.query("SELECT b.chat_id FROM collab_feishu_binding b WHERE b.project_id=?",
                     rs -> rs.next() ? rs.getString(1) : null, project.projectId());
-            if (blank(chatId)) return result(response, toast, "error", "项目群暂不可用，请稍后重试");
+            if (blank(chatId)) return result(response, toast, "error", "需求群暂不可用，请稍后重试");
             chats.sendText(chatId, prompt, "collab-prompt-" + UUID.randomUUID());
-            return result(response, toast, "success", "已单独发送到项目群");
+            return result(response, toast, "success", "已单独发送到需求群");
         } catch (BusinessException denied) {
             return result(response, toast, "error", "当前飞书账号无权在此项目群发送提示词");
         } catch (Exception failure) {

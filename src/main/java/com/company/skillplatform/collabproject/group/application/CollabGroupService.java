@@ -116,7 +116,7 @@ public class CollabGroupService {
         Map<String,Object> g=groupRowForUpdate(key);requireOwner(g,actorId);requireActive(userId);long id=num(g,"id");Instant now=Instant.now();
         jdbc.update("insert into collab_group_member(group_id,user_id,member_type,status,updated_by,time_created,time_updated) values(?,?,'MEMBER','ACTIVE',?,?,?) on duplicate key update status='ACTIVE',updated_by=values(updated_by),time_updated=values(time_updated)",id,userId,actorId,now,now);
         templateChanged(g,actorId,Map.of("action","GROUP_MEMBER_ADDED","userId",userId));
-        if("PUBLISHED".equals(g.get("status"))){outbox.enqueue(id,"ADD_MEMBER",userId,"group:"+id+":member:"+userId+":"+UUID.randomUUID(),Map.of("userId",userId));syncRequirementChatMembers(id,userId,"ADD_MEMBER");}
+        if("PUBLISHED".equals(g.get("status"))){syncRequirementChatMembers(id,userId,"ADD_MEMBER");}
         return member(id,userId);
     }
 
@@ -128,7 +128,7 @@ public class CollabGroupService {
         Integer reviewing=jdbc.queryForObject("select count(*) from collab_approval ap join collab_submission sub on sub.id=ap.submission_id join collab_stage s on s.id=sub.stage_id join collab_project p on p.id=s.project_id where p.group_id=? and ap.reviewer_user_id=? and ap.state='PENDING'",Integer.class,id,userId);
         if((assigned!=null&&assigned>0)||(reviewing!=null&&reviewing>0))throw error("COLLAB_GROUP_MEMBER_HAS_RESPONSIBILITIES","Transfer active stage or pending review responsibilities before removing this member",HttpStatus.CONFLICT);
         int changed=jdbc.update("update collab_group_member set status='REMOVED',updated_by=?,time_updated=now(3) where group_id=? and user_id=? and status='ACTIVE'",actorId,id,userId);
-        if(changed>0){jdbc.update("delete rm from collab_group_role_member rm join collab_group_role r on r.id=rm.role_id where r.group_id=? and rm.user_id=?",id,userId);templateChanged(g,actorId,Map.of("action","GROUP_MEMBER_REMOVED","userId",userId));if("PUBLISHED".equals(g.get("status"))){outbox.enqueue(id,"REMOVE_MEMBER",userId,"group:"+id+":member:"+userId+":"+UUID.randomUUID(),Map.of("userId",userId));syncRequirementChatMembers(id,userId,"REMOVE_MEMBER");}}
+        if(changed>0){jdbc.update("delete rm from collab_group_role_member rm join collab_group_role r on r.id=rm.role_id where r.group_id=? and rm.user_id=?",id,userId);templateChanged(g,actorId,Map.of("action","GROUP_MEMBER_REMOVED","userId",userId));if("PUBLISHED".equals(g.get("status"))){syncRequirementChatMembers(id,userId,"REMOVE_MEMBER");}}
     }
 
     private void syncRequirementChatMembers(long groupId,long userId,String action){
@@ -202,7 +202,7 @@ public class CollabGroupService {
         TemplatePreview preview=preview(key,actorId);if(!preview.valid())throw new BusinessException("COLLAB_GROUP_PUBLISH_INVALID", "Project group is not ready to publish: "+preview.issues().stream().map(Issue::code).distinct().toList(),HttpStatus.UNPROCESSABLE_ENTITY);
         jdbc.update("update collab_group set status='PUBLISHED',published_at=now(3),version_no=version_no+1,time_updated=now(3) where id=?",id);
         jdbc.update("update collab_group_feishu_binding set publish_actor_user_id=?,time_updated=now(3) where group_id=?",actorId,id);
-        outbox.enqueue(id,"CREATE_CHAT",id,"group:"+id+":create-chat",Map.of());outbox.enqueue(id,"CREATE_WIKI_FOLDER",id,"group:"+id+":create-wiki-folder",Map.of());
+        outbox.enqueue(id,"CREATE_WIKI_FOLDER",id,"group:"+id+":create-wiki-folder",Map.of());
         audit(id,((Number)g.get("template_version")).intValue(),actorId,Map.of("action","GROUP_PUBLISHED"));return get(key,actorId);
     }
 
@@ -214,7 +214,7 @@ public class CollabGroupService {
         Map<String,Object> previous=binding(id);
         if(Boolean.TRUE.equals(g.get("legacy_import"))&&previous.get("wiki_group_node_token")!=null&&!Objects.equals(previous.get("wiki_root_node_token"),target.nodeToken()))throw error("COLLAB_GROUP_WIKI_ROOT_LOCKED","The legacy group Wiki directory already exists",HttpStatus.CONFLICT);
         jdbc.update("insert into collab_group_feishu_binding(group_id,wiki_space_id,wiki_root_node_token,wiki_root_url,publish_actor_user_id,status,time_created,time_updated) values(?,?,?,?,?,'READY',?,?) on duplicate key update wiki_space_id=values(wiki_space_id),wiki_root_node_token=values(wiki_root_node_token),wiki_root_url=values(wiki_root_url),publish_actor_user_id=values(publish_actor_user_id),status='READY',last_error=null,time_updated=values(time_updated)",id,target.spaceId(),target.nodeToken(),url,actorId,now,now);
-        if(Boolean.TRUE.equals(g.get("legacy_import"))){if(previous.get("chat_id")==null)outbox.enqueue(id,"CREATE_CHAT",id,"group:"+id+":create-chat",Map.of());if(previous.get("wiki_group_node_token")==null)outbox.enqueue(id,"CREATE_WIKI_FOLDER",id,"group:"+id+":create-wiki-folder",Map.of());}
+        if(Boolean.TRUE.equals(g.get("legacy_import"))&&previous.get("wiki_group_node_token")==null)outbox.enqueue(id,"CREATE_WIKI_FOLDER",id,"group:"+id+":create-wiki-folder",Map.of());
         jdbc.update("update collab_group set version_no=version_no+1,time_updated=now(3) where id=?",id);
         return bindingView(id);
     }

@@ -352,7 +352,7 @@ public class CollabFeishuWorker {
         int stageOrder = ((Number) row.get("stage_order")).intValue();
         int attemptNo = ((Number) row.get("attempt_no")).intValue();
         String stageUrl = stageUrl(projectKey, stageKey, newRequirement);
-        String submitPrompt = CollabStagePromptFactory.submit(projectKey, stageTitle, stageId, attemptNo,
+        String submitPrompt = CollabStagePromptFactory.submit(projectKey, stageKey, stageTitle, stageId, attemptNo,
                 Boolean.TRUE.equals(row.get("git_required")));
         boolean asdmEnabled = newRequirement && row.get("asdm_branch") != null
                 && !row.get("asdm_branch").toString().isBlank();
@@ -371,7 +371,7 @@ public class CollabFeishuWorker {
         }
         if (!asdmEnabled) {
             if (stageOrder > 1) {
-                String contextPrompt = CollabStagePromptFactory.context(projectKey, stageTitle);
+                String contextPrompt = CollabStagePromptFactory.context(projectKey, stageKey, stageTitle);
                 elements.add(Map.of("tag", "markdown", "content",
                         promptMarkdown("获取前序阶段产物提示词", contextPrompt)));
                 if (callbacksEnabled) elements.add(promptButton(projectKey, stageId, attemptNo, "CONTEXT"));
@@ -406,7 +406,7 @@ public class CollabFeishuWorker {
         String stageTitle = String.valueOf(row.get("stage_title"));
         int attemptNo = ((Number) row.get("attempt_no")).intValue();
         String stageUrl = stageUrl(projectKey, stageKey, newRequirement);
-        String prompt = CollabStagePromptFactory.submit(projectKey, stageTitle, stageId, attemptNo,
+        String prompt = CollabStagePromptFactory.submit(projectKey, stageKey, stageTitle, stageId, attemptNo,
                 Boolean.TRUE.equals(row.get("git_required")));
         String comment = row.get("decision_comment") == null ? "（未填写）" : String.valueOf(row.get("decision_comment"));
         List<Object> elements = new ArrayList<>();
@@ -549,10 +549,6 @@ public class CollabFeishuWorker {
 
     private String chatId(long projectId) {
         String id = (String) binding(projectId).get("chat_id");
-        // Older group requirements used the shared group chat until their own room is created.
-        if ((id == null || id.isBlank()) && isNewRequirement(projectId))
-            id = jdbc.queryForObject("SELECT gb.chat_id FROM collab_project p "
-                    + "JOIN collab_group_feishu_binding gb ON gb.group_id=p.group_id WHERE p.id=?", String.class, projectId);
         if (id == null || id.isBlank()) {
             if (isNewRequirement(projectId)) throw new FeishuDependencyNotReadyException("Requirement chat is not ready");
             throw new IllegalStateException("Project chat is not ready");

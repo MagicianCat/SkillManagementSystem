@@ -72,7 +72,7 @@ public class GroupFeishuWorker {
         String type = String.valueOf(event.get("event_type"));
         try {
             switch (type) {
-                case "CREATE_CHAT" -> createChat(groupId);
+                case "CREATE_CHAT" -> { /* Group chats were retired; each requirement owns its chat. */ }
                 case "CREATE_WIKI_FOLDER" -> createWikiFolder(groupId);
                 case "ADD_MEMBER" -> syncMember(groupId, aggregateId, true);
                 case "REMOVE_MEMBER" -> syncMember(groupId, aggregateId, false);
