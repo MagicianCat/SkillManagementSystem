@@ -20,7 +20,7 @@ class CommandUsageTelemetryServiceTest {
     private final String eventId = "11111111-2222-4333-8444-555555555555";
 
     private CommandUsageTelemetryService.CreateCommand command(String name) {
-        return new CommandUsageTelemetryService.CreateCommand(eventId, name, "code-dev", "MENU",
+        return new CommandUsageTelemetryService.CreateCommand(eventId, name, null, null, "code-dev", "MENU",
                 "STRUCTURED_COMMAND", null, "install-1", "session-1", "log-request-1", null,
                 "CodeBuddyIDE", null, Instant.parse("2026-11-02T02:33:17Z"));
     }
@@ -43,5 +43,27 @@ class CommandUsageTelemetryServiceTest {
         verify(events, times(1)).saveAndFlush(any());
         assertThatThrownBy(() -> service.record(7L, command("other-command")))
                 .hasMessageContaining("EVENT_ID_CONFLICT");
+    }
+
+    @Test
+    void enrichesExistingEventWithReqIdAndRejectsConflictingAttribution() {
+        IamUserEntity user = mock(IamUserEntity.class);
+        when(user.getId()).thenReturn(7L);
+        CommandUsageEventEntity saved = new CommandUsageEventEntity(eventId, user, "req-workflow", "req-analyzer",
+                "MENU", "STRUCTURED_COMMAND", null, "install-1", "session-1", "log-request-1",
+                null, "CodeBuddyIDE", null, Instant.parse("2026-11-02T02:33:17Z"), Instant.now());
+        when(events.findByEventUuid(eventId)).thenReturn(Optional.of(saved));
+        var base = command("req-workflow");
+        var enriched = new CommandUsageTelemetryService.CreateCommand(base.eventId(), base.commandName(),
+                "REQ-001-secondshelf-mvp", "REQUEST_FILE_TREE", base.toolsetName(), base.triggerType(),
+                base.evidenceType(), base.commandVersion(), base.installationId(), base.clientSessionId(),
+                base.generationId(), base.projectKey(), base.client(), base.clientVersion(), base.invokedAt());
+        assertThat(service.record(7L, enriched).reqId()).isEqualTo("REQ-001-secondshelf-mvp");
+        verify(events).saveAndFlush(saved);
+        var conflict = new CommandUsageTelemetryService.CreateCommand(base.eventId(), base.commandName(),
+                "REQ-002-other", "ARGUMENT", base.toolsetName(), base.triggerType(), base.evidenceType(),
+                base.commandVersion(), base.installationId(), base.clientSessionId(), base.generationId(),
+                base.projectKey(), base.client(), base.clientVersion(), base.invokedAt());
+        assertThatThrownBy(() -> service.record(7L, conflict)).hasMessageContaining("REQ_ID_CONFLICT");
     }
 }

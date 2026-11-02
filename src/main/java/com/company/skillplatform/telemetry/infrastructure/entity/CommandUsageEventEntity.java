@@ -11,6 +11,8 @@ public class CommandUsageEventEntity extends BaseJpaEntity {
     @Column(name = "event_uuid", nullable = false, unique = true, length = 64) private String eventUuid;
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "user_id", nullable = false) private IamUserEntity user;
     @Column(name = "command_name", nullable = false, length = 128) private String commandName;
+    @Column(name = "req_id", length = 256) private String reqId;
+    @Column(name = "req_id_source", length = 32) private String reqIdSource;
     @Column(name = "toolset_name", length = 128) private String toolsetName;
     @Column(name = "trigger_type", nullable = false, length = 32) private String triggerType;
     @Column(name = "evidence_type", nullable = false, length = 32) private String evidenceType;
@@ -41,6 +43,12 @@ public class CommandUsageEventEntity extends BaseJpaEntity {
     public String getEventUuid() { return eventUuid; }
     public Long getUserId() { return user.getId(); }
     public String getCommandName() { return commandName; }
+    public String getReqId() { return reqId; }
+    public String getReqIdSource() { return reqIdSource; }
+    public boolean enrichReqId(String nextReqId, String nextSource) {
+        if (nextReqId == null || nextReqId.isBlank() || reqId != null) return false;
+        reqId = nextReqId; reqIdSource = nextSource; return true;
+    }
     public Instant getInvokedAt() { return invokedAt; }
     public boolean sameIdentity(Long userId, String command, String session, String generation) {
         return getUserId().equals(userId) && commandName.equals(command)

@@ -18,7 +18,8 @@ public class CommandUsageTelemetryController {
     @PostMapping("/command-usage-events")
     CommandUsageTelemetryService.EventView create(@Valid @RequestBody CreateRequest request, Authentication authentication) {
         return service.record((Long) authentication.getPrincipal(), new CommandUsageTelemetryService.CreateCommand(
-                request.eventId, request.commandName, request.toolsetName, request.triggerType,
+                request.eventId, request.commandName, request.reqId, request.reqIdSource,
+                request.toolsetName, request.triggerType,
                 request.evidenceType, request.commandVersion, request.installationId, request.clientSessionId,
                 request.generationId, request.projectKey, request.client, request.clientVersion, request.invokedAt));
     }
@@ -26,6 +27,8 @@ public class CommandUsageTelemetryController {
     public static class CreateRequest {
         @NotBlank @Size(max = 64) public String eventId;
         @NotBlank @Size(max = 128) public String commandName;
+        @Size(max = 256) public String reqId;
+        @Size(max = 32) public String reqIdSource;
         @Size(max = 128) public String toolsetName;
         @NotBlank @Size(max = 32) public String triggerType;
         @NotBlank @Size(max = 32) public String evidenceType;
