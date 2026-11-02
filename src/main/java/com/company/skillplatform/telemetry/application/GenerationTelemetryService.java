@@ -15,6 +15,7 @@ import com.company.skillplatform.telemetry.infrastructure.entity.AiGenerationSki
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationFileMetricRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationSkillRepository;
+import com.company.skillplatform.telemetry.infrastructure.repository.CommandUsageEventRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.SkillUsageEventRepository;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
@@ -41,12 +42,14 @@ public class GenerationTelemetryService {
     private final IamUserRepository users;
     private final SkillRepository skills;
     private final SkillUsageEventRepository skillUsageEvents;
+    private final CommandUsageEventRepository commandUsageEvents;
 
     public GenerationTelemetryService(AiGenerationRepository generations, AiGenerationSkillRepository generationSkills,
             AiGenerationFileMetricRepository fileMetrics, IamUserRepository users, SkillRepository skills,
-            SkillUsageEventRepository skillUsageEvents) {
+            SkillUsageEventRepository skillUsageEvents, CommandUsageEventRepository commandUsageEvents) {
         this.generations = generations; this.generationSkills = generationSkills; this.fileMetrics = fileMetrics;
         this.users = users; this.skills = skills; this.skillUsageEvents = skillUsageEvents;
+        this.commandUsageEvents = commandUsageEvents;
     }
 
     @Transactional
@@ -168,6 +171,7 @@ public class GenerationTelemetryService {
     private void linkSkillUsageEvents(Long userId, String generationId) {
         if (generationId == null || generationId.isBlank()) return;
         skillUsageEvents.linkGenerationByExternalId(userId, generationId);
+        commandUsageEvents.linkGenerationByExternalId(userId, generationId);
     }
 
     private long nz(Long v) { return v == null ? 0L : v; }

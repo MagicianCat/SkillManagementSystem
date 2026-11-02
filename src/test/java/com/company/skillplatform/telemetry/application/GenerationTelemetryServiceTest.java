@@ -19,6 +19,7 @@ import com.company.skillplatform.telemetry.infrastructure.entity.AiGenerationSki
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationFileMetricRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.AiGenerationSkillRepository;
+import com.company.skillplatform.telemetry.infrastructure.repository.CommandUsageEventRepository;
 import com.company.skillplatform.telemetry.infrastructure.repository.SkillUsageEventRepository;
 import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import com.company.skillplatform.user.infrastructure.repository.IamUserRepository;
@@ -37,8 +38,9 @@ class GenerationTelemetryServiceTest {
     private final IamUserRepository users = mock(IamUserRepository.class);
     private final SkillRepository skills = mock(SkillRepository.class);
     private final SkillUsageEventRepository skillUsageEvents = mock(SkillUsageEventRepository.class);
+    private final CommandUsageEventRepository commandUsageEvents = mock(CommandUsageEventRepository.class);
     private final GenerationTelemetryService service = new GenerationTelemetryService(
-            generations, generationSkills, fileMetrics, users, skills, skillUsageEvents);
+            generations, generationSkills, fileMetrics, users, skills, skillUsageEvents, commandUsageEvents);
 
     private IamUserEntity user;
 
