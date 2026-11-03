@@ -88,7 +88,7 @@ public class AgentMcpConfiguration {
                 .contextExtractor(req -> io.modelcontextprotocol.common.McpTransportContext.create(Map.of("request", req)))
                 .maxRequestSize(256 * 1024).build();
         McpSyncServer server = McpServer.sync(transport).serverInfo("skill-platform", "1.0")
-                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. Matched Wiki results contain a bounded directory of visible descendants; inspect childDocuments before answering from a parent Wiki, and read relevant children with get_wiki_document. If no relevant platform evidence exists, search Feishu documents. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
+                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. Matched Wiki results contain a bounded directory of visible descendants; inspect childDocuments before answering from a parent Wiki, and read relevant children with get_wiki_document. If the user asks to download an ASDM tool package, search the platform Wiki for that tool, read its Markdown with get_wiki_document, and include the exact /asdm-tools/download/{assetId} Markdown link from the document in the answer. Do not invent an asset ID or link. If no relevant platform evidence exists, search Feishu documents. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
                 .tools(tool("get_current_user_context", "Get the current user's visible teams before recommending skills.",
                         schema("object", List.of()), this::currentUserContext),
                         tool("search_skills", "Search published skills by development stage, platform and OS.",
@@ -266,6 +266,8 @@ public class AgentMcpConfiguration {
         requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
         response.put("parentId", document.parentId());
+        String asdmLink = asdmDownloadLink(text);
+        if (asdmLink != null) response.put("asdmToolDownloadUrl", asdmLink);
         response.putAll(wikiLinks(id));addWikiDirectory(response,id,agent.userId(),false,3,20);return ok(response);
     }
     private McpSchema.CallToolResult wikiChildren(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
@@ -492,7 +494,14 @@ public class AgentMcpConfiguration {
     }
     private Map<String,Object> linkedWiki(WikiDocumentService.DocumentView document) {
         Map<String,Object> response=objectMapper.convertValue(document,new TypeReference<>() {});
+        String asdmLink = asdmDownloadLink(document.markdownContent());
+        if (asdmLink != null) response.put("asdmToolDownloadUrl", asdmLink);
         response.putAll(wikiLinks(document.id()));return response;
+    }
+    private String asdmDownloadLink(String markdown) {
+        if (markdown == null) return null;
+        var matcher=java.util.regex.Pattern.compile("https?://[^\\s)]+/asdm-tools/download/[1-9][0-9]*").matcher(markdown);
+        return matcher.find() ? matcher.group() : null;
     }
     private Map<String,Object> wikiLinks(long documentId) {
         String page=webBaseUrl+"/wiki?documentId="+documentId;
