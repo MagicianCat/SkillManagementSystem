@@ -2,6 +2,8 @@ package com.company.skillplatform.collabproject.asdm.application;
 
 import com.company.skillplatform.agent.infrastructure.FeishuDocumentMcpProxy;
 import com.company.skillplatform.collabproject.application.CollabProjectAuthorizationService;
+import com.company.skillplatform.collabproject.application.CollabFeishuCardLayout;
+import com.company.skillplatform.collabproject.application.CollabFeishuChatGateway;
 import com.company.skillplatform.collabproject.asdm.infrastructure.CollabAsdmGitlabClient;
 import com.company.skillplatform.collabproject.asdm.infrastructure.CollabAsdmProperties;
 import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmFeishuAttachmentGateway;
@@ -9,8 +11,6 @@ import com.company.skillplatform.collabproject.asdm.publication.CollabAsdmSnapsh
 import com.company.skillplatform.common.application.BusinessException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -28,7 +28,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** Explicit rule synchronization. Supplemental publication is isolated from stage submissions. */
+/** Explicit rule synchronization, including in-place updates of completed-stage publications. */
 @Service
 public class CollabAsdmSyncService {
     private static final Logger log = LoggerFactory.getLogger(CollabAsdmSyncService.class);
@@ -44,16 +44,31 @@ public class CollabAsdmSyncService {
     private final CollabAsdmSnapshotStore snapshots;
     private final CollabAsdmFeishuAttachmentGateway attachments;
     private final FeishuDocumentMcpProxy documents;
+    private final CollabFeishuChatGateway chats;
 
     public CollabAsdmSyncService(JdbcTemplate jdbc, CollabProjectAuthorizationService authorization,
             CollabAsdmRuleService ruleService, CollabAsdmStageRules stageRules,
             CollabAsdmConfigurationService configuration, CollabAsdmGitlabClient gitlab,
             CollabAsdmProperties properties, CollabAsdmMultiStageDetectionService detection,
             CollabAsdmSnapshotStore snapshots, CollabAsdmFeishuAttachmentGateway attachments,
-            FeishuDocumentMcpProxy documents) {
+            FeishuDocumentMcpProxy documents, CollabFeishuChatGateway chats) {
         this.jdbc=jdbc; this.authorization=authorization; this.ruleService=ruleService; this.stageRules=stageRules;
         this.configuration=configuration; this.gitlab=gitlab; this.properties=properties; this.detection=detection;
-        this.snapshots=snapshots; this.attachments=attachments; this.documents=documents;
+        this.snapshots=snapshots; this.attachments=attachments; this.documents=documents; this.chats=chats;
+    }
+
+    /** Enqueued in the same transaction as the owner's publish click. The current stage keeps its normal gate. */
+    public void enqueuePriorCompleted(long candidateId,int revision,long actorId) {
+        if(!properties.enabled()||!properties.multiStageEnabled()||!properties.multiFilePublishEnabled()) return;
+        try {
+            jdbc.update("insert ignore into collab_asdm_sync_job(requirement_id,requested_by,idempotency_key,group_revision,default_version,rule_hash,head_sha,status,trigger_kind,source_candidate_id,source_stage_order) "
+                    +"select c.requirement_id,?,concat('auto-prior:',c.id,':',c.detected_revision),b.group_revision,b.default_version,b.effective_hash,c.source_commit_sha,'QUEUED','AUTO_PRIOR',c.id,s.stage_order "
+                    +"from collab_asdm_candidate c join collab_stage s on s.id=c.stage_id join collab_asdm_requirement_rule_binding b on b.requirement_id=c.requirement_id "
+                    +"where c.id=? and c.detected_revision=? and c.source_commit_sha is not null",
+                    actorId,candidateId,revision);
+        } catch(RuntimeException ex) {
+            log.warn("event=asdm.prior_sync.enqueue_failed candidateId={} errorType={}",candidateId,ex.getClass().getSimpleName());
+        }
     }
 
     @Transactional
@@ -81,7 +96,7 @@ public class CollabAsdmSyncService {
         jdbc.update("insert into collab_asdm_sync_job(requirement_id,requested_by,idempotency_key,group_revision,default_version,rule_hash,status) values(?,?,?,?,?,?,'QUEUED')",
                 requirement.projectId(),actorId,idempotencyKey,rules.groupRevision(),rules.defaultVersion(),rules.effectiveHash());
         Long id=jdbc.queryForObject("select id from collab_asdm_sync_job where requirement_id=? and idempotency_key=?",Long.class,requirement.projectId(),idempotencyKey);
-        return new SyncAccepted(id,"QUEUED","已受理；进行中阶段重新检测，已完成阶段执行补充归档");
+        return new SyncAccepted(id,"QUEUED","已受理；进行中阶段重新检测，已完成阶段更新已发布产物");
     }
 
     public JobView job(String requirementKey, long actorId, long jobId) {
@@ -104,7 +119,7 @@ public class CollabAsdmSyncService {
         if("FAILED".equals(old.status())) {
             jdbc.update("delete f from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id where s.job_id=?",jobId);
             jdbc.update("delete from collab_asdm_sync_stage where job_id=?",jobId);
-            jdbc.update("update collab_asdm_sync_job set status='QUEUED',last_error_code=NULL,head_sha=NULL,time_updated=now(3) where id=?",jobId);
+            jdbc.update("update collab_asdm_sync_job set status='QUEUED',last_error_code=NULL,head_sha=if(trigger_kind='AUTO_PRIOR',head_sha,NULL),time_updated=now(3) where id=?",jobId);
             return job(requirementKey,actorId,jobId);
         }
         Integer unreconciled=jdbc.queryForObject("select (select count(*) from collab_asdm_sync_stage where job_id=? and last_error_code like '%RECONCILE_REQUIRED%')+(select count(*) from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id where s.job_id=? and f.publish_status='RECONCILE_REQUIRED')",Integer.class,jobId,jobId);
@@ -128,21 +143,78 @@ public class CollabAsdmSyncService {
         for(Long id:publishing)try {
             if(jdbc.update("update collab_asdm_sync_job set status='PROCESSING',time_updated=now(3) where id=? and status='PUBLISHING'",id)==1)publish(id);
         }catch(Exception ex){ failJob(id,ex); }
+        sendPendingSummaries();
+    }
+
+    private void sendPendingSummaries() {
+        List<Long> ids=jdbc.query("select id from collab_asdm_sync_job where trigger_kind='AUTO_PRIOR' and status in ('COMPLETED','PARTIAL_FAILED','FAILED') "
+                +"and (summary_sent_status is null or summary_sent_status<>status) order by id limit 10",(rs,n)->rs.getLong(1));
+        for(Long id:ids)try { sendSummary(id); }
+        catch(Exception ex) { log.warn("event=asdm.prior_sync.summary_failed job={} type={}",id,ex.getClass().getSimpleName()); }
+    }
+
+    private void sendSummary(long jobId) {
+        Map<String,Object> job=jdbc.queryForMap("select j.status,j.head_sha,j.summary_sent_status,j.last_error_code,p.name requirement_name,g.name group_name,"
+                +"s.title source_stage_title,b.chat_id from collab_asdm_sync_job j "
+                +"join collab_project p on p.id=j.requirement_id join collab_group g on g.id=p.group_id "
+                +"join collab_stage s on s.id=(select c.stage_id from collab_asdm_candidate c where c.id=j.source_candidate_id) "
+                +"join collab_feishu_binding b on b.project_id=p.id where j.id=? and j.trigger_kind='AUTO_PRIOR'",jobId);
+        String status=str(job,"status");
+        if(status.equals(job.get("summary_sent_status"))) return;
+        List<Map<String,Object>> stages=jdbc.queryForList("select s.title,ss.status,ss.new_count,ss.updated_count,ss.supplemental_index_url,ss.last_error_code "
+                +"from collab_asdm_sync_stage ss join collab_stage s on s.id=ss.stage_id where ss.job_id=? order by s.stage_order",jobId);
+        int added=0,updated=0,failed=0;
+        for(var stage:stages) {
+            added+=((Number)stage.get("new_count")).intValue();
+            updated+=((Number)stage.get("updated_count")).intValue();
+            if("FAILED".equals(stage.get("status"))) failed++;
+        }
+        String title="COMPLETED".equals(status)?"前序阶段产物同步完成":"前序阶段产物同步需处理";
+        List<Object> elements=new ArrayList<>();
+        elements.add(CollabFeishuCardLayout.markdown("项目组：**"+CollabFeishuCardLayout.escape(str(job,"group_name"))
+                +"**\n需求：**"+CollabFeishuCardLayout.escape(str(job,"requirement_name"))+"**"));
+        elements.add(CollabFeishuCardLayout.markdown("触发阶段：**"+CollabFeishuCardLayout.escape(str(job,"source_stage_title"))
+                +"**\n状态：**"+("COMPLETED".equals(status)?"已完成":"部分失败，请在需求页查看并重试")
+                +"**\n前序已完成阶段："+stages.size()+" 个；新增："+added+" 份；更新："+updated+" 份；失败阶段："+failed+" 个。"));
+        elements.add(CollabFeishuCardLayout.markdown("已直接更新前序阶段的已发布产物；原阶段审批结果保持不变。"));
+        String head=str(job,"head_sha");
+        if(!head.isBlank()) elements.add(CollabFeishuCardLayout.markdown("Git commit：`"+head+"`"));
+        for(var stage:stages) {
+            String line="**"+CollabFeishuCardLayout.escape(str(stage,"title"))+"**：";
+            String stageStatus=str(stage,"status");
+            if("NO_CHANGES".equals(stageStatus)) line+="无变化";
+            else if("COMPLETED".equals(stageStatus)) line+="新增 "+stage.get("new_count")+"，更新 "+stage.get("updated_count");
+            else line+="同步失败";
+            String url=str(stage,"supplemental_index_url");
+            if(!url.isBlank()) line+=" · [打开阶段产物]("+url+")";
+            elements.add(CollabFeishuCardLayout.markdown(line));
+        }
+        if(stages.isEmpty()&&"COMPLETED".equals(status)) elements.add(CollabFeishuCardLayout.markdown("当前位置之前没有已完成阶段，无需同步。"));
+        if(!"COMPLETED".equals(status)&&!str(job,"last_error_code").isBlank())
+            elements.add(CollabFeishuCardLayout.markdown("失败原因：`"+CollabFeishuCardLayout.escape(str(job,"last_error_code"))+"`"));
+        chats.sendInteractive(str(job,"chat_id"),CollabFeishuCardLayout.card(title,"COMPLETED".equals(status)?"green":"orange",elements),
+                "asdm-prior-sync:"+jobId+":"+status);
+        jdbc.update("update collab_asdm_sync_job set summary_sent_status=?,summary_sent_at=now(3),time_updated=now(3) where id=? and status=?",status,jobId,status);
     }
 
     private void scan(long jobId) {
         if (jdbc.update("update collab_asdm_sync_job set status='SCANNING',time_updated=now(3) where id=? and status='QUEUED'",jobId)!=1)return;
+        Map<String,Object> job=jdbc.queryForMap("select trigger_kind,source_stage_order,head_sha from collab_asdm_sync_job where id=?",jobId);
+        boolean autoPrior="AUTO_PRIOR".equals(job.get("trigger_kind"));
         Map<String,Object> request=jdbc.queryForMap("select j.requirement_id,p.group_id,p.name,p.asdm_branch,p.asdm_requirement_path,g.asdm_repository_url from collab_asdm_sync_job j join collab_project p on p.id=j.requirement_id join collab_group g on g.id=p.group_id where j.id=?",jobId);
         long requirementId=num(request,"requirement_id"); long groupId=num(request,"group_id");
         String branch=str(request,"asdm_branch"), reqPath=str(request,"asdm_requirement_path"), name=str(request,"name");
         var access=configuration.requireAccess(groupId);
-        String head=gitlab.getBranch(access.projectId(),branch,access.token(),access.repositoryBase()).headSha();
+        String head=autoPrior?str(job,"head_sha"):gitlab.getBranch(access.projectId(),branch,access.token(),access.repositoryBase()).headSha();
+        if(head.isBlank()) throw new IllegalStateException("ASDM_AUTO_PRIOR_HEAD_MISSING");
         List<CollabAsdmGitlabClient.TreeEntry> tree=gitlab.listTreeRecursive(access.projectId(),head,"workspace",access.token(),properties.maxDiscoveryEntries(),access.repositoryBase());
         var rules=ruleService.effectiveForRequirement(requirementId,false).rules();
         Map<String,CollabAsdmGitlabClient.FileContent> rawByPath=new LinkedHashMap<>();
         long loadedBytes=0;
         jdbc.update("update collab_asdm_sync_job set head_sha=?,time_updated=now(3) where id=?",head,jobId);
-        List<Map<String,Object>> stages=jdbc.queryForList("select id,stage_key,status,attempt_no from collab_stage where project_id=? order by stage_order",requirementId);
+        List<Map<String,Object>> stages=autoPrior
+                ?jdbc.queryForList("select id,stage_key,status,attempt_no from collab_stage where project_id=? and stage_order<? and status='COMPLETED' order by stage_order",requirementId,job.get("source_stage_order"))
+                :jdbc.queryForList("select id,stage_key,status,attempt_no from collab_stage where project_id=? order by stage_order",requirementId);
         for(Map<String,Object> stage:stages) {
             String key=str(stage,"stage_key"), status=str(stage,"status"); long stageId=num(stage,"id");
             String action= !rules.containsKey(key)||!rules.get(key).enabled()||"SKIPPED".equals(status)?"SKIPPED":
@@ -176,7 +248,7 @@ public class CollabAsdmSyncService {
             }
         }
         // The existing detector preserves its debounce, Feishu card and submit gate.
-        if(stages.stream().anyMatch(s->ACTIVE.contains(str(s,"status"))))detection.scanRequirementAtHead(requirementId,head,tree,rawByPath);
+        if(!autoPrior&&stages.stream().anyMatch(s->ACTIVE.contains(str(s,"status"))))detection.scanRequirementAtHead(requirementId,head,tree,rawByPath);
         Integer pending=jdbc.queryForObject("select count(*) from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id where s.job_id=? and f.publish_status='PENDING'",Integer.class,jobId);
         jdbc.update("update collab_asdm_sync_job set status=?,time_updated=now(3) where id=?",pending!=null&&pending>0?"PUBLISHING":"COMPLETED",jobId);
     }
@@ -184,8 +256,13 @@ public class CollabAsdmSyncService {
     private void prepareBackfill(long syncStageId,long requirementId,long stageId,String head,
             CollabAsdmConfigurationService.RepositoryAccess access,CollabAsdmStageRules.Evaluation evaluated,
             Map<String,CollabAsdmGitlabClient.FileContent> rawByPath) {
-        // Formal ASDM publication is the baseline; the approved index is never rewritten.
-        jdbc.update("insert ignore into collab_asdm_published_file_registry(requirement_id,stage_id,source_path_sha256,source_path,latest_content_sha256,version_no,last_feishu_url) select ?,?,f.source_path_sha256,f.source_path,f.source_file_sha256,1,f.feishu_url from collab_asdm_package_file f join collab_asdm_package p on p.id=f.package_id where p.stage_id=? and f.publish_status='PUBLISHED' and f.source_file_sha256 is not null",requirementId,stageId,stageId);
+        // Formal ASDM publication is the baseline for later in-place updates.
+        jdbc.update("insert ignore into collab_asdm_published_file_registry(requirement_id,stage_id,source_path_sha256,source_path,latest_content_sha256,version_no,last_feishu_url) "
+                +"select ?,?,f.source_path_sha256,f.source_path,f.source_file_sha256,1,f.feishu_url from collab_asdm_package_file f "
+                +"join collab_asdm_package p on p.id=f.package_id where p.stage_id=? and f.publish_status='PUBLISHED' and f.source_file_sha256 is not null "
+                +"and f.id=(select max(f2.id) from collab_asdm_package_file f2 join collab_asdm_package p2 on p2.id=f2.package_id "
+                +"where p2.stage_id=p.stage_id and f2.source_path_sha256=f.source_path_sha256 and f2.publish_status='PUBLISHED')",
+                requirementId,stageId,stageId);
         int news=0,updates=0;
         for(var file:evaluated.files()) {
             if(!file.selected()||!Set.of("CONFIRMED","LIKELY").contains(file.association()))continue;
@@ -193,7 +270,13 @@ public class CollabAsdmSyncService {
             if(blob==null)blob=gitlab.getFileBytes(access.projectId(),file.path(),head,access.token(),access.repositoryBase(),properties.maxFileBytes());
             String hash=sha256(blob.content()),pathHash=sha256(file.path().getBytes(StandardCharsets.UTF_8));
             String before=jdbc.query("select latest_content_sha256 from collab_asdm_published_file_registry where requirement_id=? and stage_id=? and source_path_sha256=?",rs->rs.next()?rs.getString(1):null,requirementId,stageId,pathHash);
-            if(hash.equals(before))continue;
+            // Repair older supplemental DOCX publications by writing the current content to the original document.
+            String registryUrl=jdbc.query("select last_feishu_url from collab_asdm_published_file_registry where requirement_id=? and stage_id=? and source_path_sha256=?",
+                    rs->rs.next()?rs.getString(1):null,requirementId,stageId,pathHash);
+            PublishedTarget original=previousTarget(stageId,pathHash);
+            boolean needsCanonicalRepair="DOCX".equals(file.deliveryMode())&&original!=null
+                    &&"DOCX".equals(original.mode())&&registryUrl!=null&&!registryUrl.equals(original.url());
+            if(hash.equals(before)&&!needsCanonicalRepair)continue;
             String action=before==null?"NEW":"UPDATED";
             if(before==null)news++;else updates++;
             var snapshot=snapshots.store(syncStageId,file.path(),blob.content(),mime(file.path()));
@@ -223,7 +306,7 @@ public class CollabAsdmSyncService {
     }
 
     private void publish(long jobId) {
-        var stages=jdbc.queryForList("select id,stage_id,stage_key,status,supplemental_node_token,supplemental_index_token from collab_asdm_sync_stage where job_id=? and action='BACKFILL' and status in ('PENDING','PUBLISHING')",jobId);
+        var stages=jdbc.queryForList("select id,stage_id,stage_key,status from collab_asdm_sync_stage where job_id=? and action='BACKFILL' and status in ('PENDING','PUBLISHING')",jobId);
         for(var stage:stages)try {publishStage(jobId,stage);}catch(Exception ex){stageStatus(num(stage,"id"),"FAILED",code(ex));}
         Integer failures=jdbc.queryForObject("select count(*) from collab_asdm_sync_stage where job_id=? and status='FAILED'",Integer.class,jobId);
         Integer pending=jdbc.queryForObject("select count(*) from collab_asdm_sync_stage where job_id=? and status in ('PENDING','PUBLISHING')",Integer.class,jobId);
@@ -233,25 +316,22 @@ public class CollabAsdmSyncService {
 
     private void publishStage(long jobId,Map<String,Object> stage) {
         long syncStageId=num(stage,"id"); long stageId=num(stage,"stage_id");
-        var target=jdbc.queryForMap("select b.wiki_space_id,b.wiki_parent_node_token,b.publish_actor_user_id,b.chat_id,p.id requirement_id,s.title stage_title,s.stage_order,j.head_sha,j.rule_hash,j.default_version,j.group_revision,j.requested_by from collab_asdm_sync_job j join collab_project p on p.id=j.requirement_id join collab_stage s on s.id=? join collab_feishu_binding b on b.project_id=p.id where j.id=?",stageId,jobId);
+        var target=jdbc.queryForMap("select b.wiki_space_id,b.publish_actor_user_id,b.chat_id,p.id requirement_id,s.title stage_title,s.stage_order from collab_asdm_sync_job j join collab_project p on p.id=j.requirement_id join collab_stage s on s.id=? join collab_feishu_binding b on b.project_id=p.id where j.id=?",stageId,jobId);
         long actor=num(target,"publish_actor_user_id");String space=str(target,"wiki_space_id");
-        String node=(String)stage.get("supplemental_node_token");
-        if(node==null||node.isBlank()) {
-            if("PUBLISHING".equals(stage.get("status")))throw new IllegalStateException("ASDM_FEISHU_FOLDER_RECONCILE_REQUIRED");
-            String stageParent=jdbc.query("select stage_wiki_node_token from collab_asdm_package where stage_id=? and stage_wiki_node_token is not null order by id desc limit 1",rs->rs.next()?rs.getString(1):null,stageId);
-            String title=stageParent==null
-                    ?String.format("%02d-%s-补充同步-%s",((Number)target.get("stage_order")).intValue(),str(target,"stage_title"),LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")))
-                    :"补充同步-"+LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-            stageStatus(syncStageId,"PUBLISHING",null);
-            var folder=attachments.createWikiFolder(actor,space,stageParent==null?str(target,"wiki_parent_node_token"):stageParent,title);
-            node=folder.nodeToken();
-            jdbc.update("update collab_asdm_sync_stage set supplemental_node_token=?,status='PUBLISHING',time_updated=now(3) where id=?",node,syncStageId);
-        }
+        var publication=jdbc.query("select p.stage_wiki_node_token,p.source_index_artifact_version_id,pub.document_token,pub.url,v.markdown_content "
+                +"from collab_asdm_package p join collab_feishu_publication pub on pub.artifact_version_id=p.source_index_artifact_version_id "
+                +"join collab_artifact_version v on v.id=p.source_index_artifact_version_id "
+                +"where p.stage_id=? and p.stage_wiki_node_token is not null and pub.publish_status='PUBLISHED' "
+                +"order by p.id desc limit 1",rs->rs.next()?new StagePublication(rs.getString(1),rs.getString(3),rs.getString(4),rs.getString(5)):null,stageId);
+        if(publication==null||publication.nodeToken()==null||publication.indexToken()==null)
+            throw new IllegalStateException("ASDM_PUBLISHED_STAGE_TARGET_MISSING");
+        String node=publication.nodeToken();
+        stageStatus(syncStageId,"PUBLISHING",null);
         List<Map<String,Object>> files=jdbc.queryForList("select * from collab_asdm_sync_file where sync_stage_id=? order by id",syncStageId);
         for(var file:files) {
             if("PUBLISHED".equals(file.get("publish_status")))continue;
             if("RECONCILE_REQUIRED".equals(file.get("publish_status")))continue;
-            try {publishFile(actor,space,node,str(target,"chat_id"),file);}
+            try {publishFile(actor,space,node,str(target,"chat_id"),stageId,num(target,"requirement_id"),file);}
             catch(Exception ex){
                 String error=code(ex);
                 String status=error.contains("99991679")||error.startsWith("Feishu API rejected request")
@@ -260,26 +340,18 @@ public class CollabAsdmSyncService {
             }
         }
         Integer failed=jdbc.queryForObject("select count(*) from collab_asdm_sync_file where sync_stage_id=? and publish_status<>'PUBLISHED'",Integer.class,syncStageId);
-        if(failed!=null&&failed>0){stageStatus(syncStageId,"FAILED","ASDM_SUPPLEMENTAL_FILE_FAILED");return;}
-        String indexToken=(String)stage.get("supplemental_index_token");
-        if(indexToken==null||indexToken.isBlank()) {
-            var doc=documents.createWikiDocx(actor,space,node,"补充同步索引");
-            indexToken=doc.path("documentToken").asText();
-            jdbc.update("update collab_asdm_sync_stage set supplemental_index_token=?,supplemental_index_url=?,time_updated=now(3) where id=?",indexToken,doc.path("documentUrl").asText(),syncStageId);
-        }
-        StringBuilder index=new StringBuilder("# 补充同步索引\n\n**同步归档，未重新审批。** 原阶段审批结果和正式产物保持不变。\n\n")
-                .append("Git commit: `").append(target.get("head_sha")).append("`\n\n规则哈希: `").append(target.get("rule_hash")).append("`\n\n同步人 ID: ").append(target.get("requested_by")).append("\n\n")
-                .append("规则版本: ").append(target.get("default_version")).append("+g").append(target.get("group_revision")).append("\n\n")
-                .append("| 来源路径 | 类型 | 飞书链接 |\n|---|---|---|\n");
-        files=jdbc.queryForList("select source_path,sync_action,feishu_url from collab_asdm_sync_file where sync_stage_id=? order by id",syncStageId);
-        for(var file:files)index.append("| `").append(str(file,"source_path").replace("|","\\|"))
-                .append("` | ").append(file.get("sync_action")).append(" | [打开](").append(file.get("feishu_url")).append(") |\n");
-        documents.replaceNativeDocx(actor,indexToken,index.toString());
-        documents.grantChatReadAccess(actor,indexToken,"docx",str(target,"chat_id"));
+        if(failed!=null&&failed>0){stageStatus(syncStageId,"FAILED","ASDM_STAGE_FILE_UPDATE_FAILED");return;}
+        var registry=jdbc.queryForList("select source_path,last_feishu_url from collab_asdm_published_file_registry where stage_id=? order by source_path",stageId);
+        StringBuilder index=new StringBuilder(publication.sourceMarkdown()).append("\n\n## 飞书发布文件\n\n| 来源路径 | 状态 | 飞书链接 |\n|---|---|---|\n");
+        for(var file:registry)index.append("| `").append(str(file,"source_path").replace("|","\\|"))
+                .append("` | PUBLISHED | ").append(str(file,"last_feishu_url").isBlank()?"—":"[打开]("+file.get("last_feishu_url")+")").append(" |\n");
+        documents.replaceNativeDocx(actor,publication.indexToken(),index.toString());
+        documents.grantChatReadAccess(actor,publication.indexToken(),"docx",str(target,"chat_id"));
+        jdbc.update("update collab_asdm_sync_stage set supplemental_node_token=?,supplemental_index_token=?,supplemental_index_url=?,time_updated=now(3) where id=?",node,publication.indexToken(),publication.indexUrl(),syncStageId);
         stageStatus(syncStageId,"COMPLETED",null);
     }
 
-    private void publishFile(long actor,String space,String parent,String chatId,Map<String,Object> file) {
+    private void publishFile(long actor,String space,String parent,String chatId,long stageId,long requirementId,Map<String,Object> file) {
         long fileId=num(file,"id");
         if("UPLOADING".equals(file.get("publish_status")))throw new IllegalStateException("ASDM_FEISHU_RECONCILE_REQUIRED");
         byte[] bytes=snapshots.read(str(file,"snapshot_storage_key"),num(file,"size_bytes"),str(file,"content_sha256"));
@@ -287,15 +359,24 @@ public class CollabAsdmSyncService {
             jdbc.update("update collab_asdm_sync_file set publish_status='UPLOADING',time_updated=now(3) where id=?",fileId);
             String title=basename(str(file,"source_path"));
             String token=(String)file.get("feishu_target_id"),node=(String)file.get("feishu_node_token"),url=(String)file.get("feishu_url");
+            PublishedTarget previous=previousTarget(stageId,str(file,"source_path_sha256"));
             if("DOCX".equals(file.get("delivery_mode"))) {
                 if(token==null) {
-                    var created=documents.createWikiDocx(actor,space,parent,title);
-                    token=created.path("documentToken").asText();node=created.path("nodeToken").asText();url=created.path("documentUrl").asText();
+                    if(previous!=null&&"DOCX".equals(previous.mode())) {
+                        token=previous.targetId();node=previous.nodeToken();url=previous.url();
+                    } else {
+                        var created=documents.createWikiDocx(actor,space,parent,title);
+                        token=created.path("documentToken").asText();node=created.path("nodeToken").asText();url=created.path("documentUrl").asText();
+                    }
                     jdbc.update("update collab_asdm_sync_file set feishu_target_id=?,feishu_node_token=?,feishu_url=? where id=?",token,node,url,fileId);
                 }
                 documents.replaceNativeDocx(actor,token,new String(bytes,StandardCharsets.UTF_8));
                 documents.grantChatReadAccess(actor,token,"docx",chatId);
-            } else {
+                // Older sync jobs created a second document. Keep it as history after repairing the original.
+                PublishedTarget olderCopy=lastSyncedTarget(stageId,str(file,"source_path_sha256"));
+                if(olderCopy!=null&&"DOCX".equals(olderCopy.mode())&&olderCopy.nodeToken()!=null
+                        &&!token.equals(olderCopy.targetId())) archivePreviousAttachment(actor,space,stageId,olderCopy.nodeToken());
+            } else if("DRIVE_FILE".equals(file.get("delivery_mode"))) {
                 if(token==null) {
                     token=attachments.uploadToDrive(actor,attachments.rootDriveFolderToken(actor),title,str(file,"media_type"),bytes);
                     jdbc.update("update collab_asdm_sync_file set feishu_target_id=? where id=?",token,fileId);
@@ -306,14 +387,67 @@ public class CollabAsdmSyncService {
                     jdbc.update("update collab_asdm_sync_file set feishu_node_token=?,feishu_url=? where id=?",node,url,fileId);
                 }
                 documents.grantChatReadAccess(actor,token,"file",chatId);
+                if(previous!=null&&"DRIVE_FILE".equals(previous.mode())&&previous.nodeToken()!=null
+                        &&!previous.nodeToken().equals(node)) archivePreviousAttachment(actor,space,stageId,previous.nodeToken());
+                PublishedTarget original=originalTarget(stageId,str(file,"source_path_sha256"));
+                if(original!=null&&"DRIVE_FILE".equals(original.mode())&&original.nodeToken()!=null
+                        &&!original.nodeToken().equals(node)
+                        &&(previous==null||!original.nodeToken().equals(previous.nodeToken())))
+                    archivePreviousAttachment(actor,space,stageId,original.nodeToken());
+            } else if("LINK_ONLY".equals(file.get("delivery_mode"))) {
+                url=str(file,"source_git_url");
+                jdbc.update("update collab_asdm_sync_file set feishu_url=? where id=?",url,fileId);
+            } else {
+                throw new IllegalStateException("ASDM_DELIVERY_MODE_UNSUPPORTED");
             }
-            long stageId=jdbc.queryForObject("select s.stage_id from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id where f.id=?",Long.class,fileId);
-            long requirementId=jdbc.queryForObject("select j.requirement_id from collab_asdm_sync_file f join collab_asdm_sync_stage s on s.id=f.sync_stage_id join collab_asdm_sync_job j on j.id=s.job_id where f.id=?",Long.class,fileId);
             jdbc.update("insert into collab_asdm_published_file_registry(requirement_id,stage_id,source_path_sha256,source_path,latest_content_sha256,last_feishu_url,last_sync_file_id) values(?,?,?,?,?,?,?) on duplicate key update version_no=if(latest_content_sha256=values(latest_content_sha256),version_no,version_no+1),latest_content_sha256=values(latest_content_sha256),last_feishu_url=values(last_feishu_url),last_sync_file_id=values(last_sync_file_id),time_updated=now(3)",requirementId,stageId,file.get("source_path_sha256"),file.get("source_path"),file.get("content_sha256"),url,fileId);
             jdbc.update("update collab_asdm_sync_file set publish_status='PUBLISHED',last_error_code=NULL,attempts=attempts+1,time_updated=now(3) where id=?",fileId);
             snapshots.delete(str(file,"snapshot_storage_key"));
         } finally {Arrays.fill(bytes,(byte)0);}
     }
+
+    private PublishedTarget previousTarget(long stageId,String pathHash) {
+        PublishedTarget original=originalTarget(stageId,pathHash);
+        if(original!=null&&"DOCX".equals(original.mode()))return original;
+        PublishedTarget synced=lastSyncedTarget(stageId,pathHash);
+        return synced!=null?synced:original;
+    }
+
+    private PublishedTarget originalTarget(long stageId,String pathHash) {
+        return jdbc.query("select f.delivery_mode,f.feishu_target_id,f.feishu_node_token,f.feishu_url from collab_asdm_package_file f "
+                +"join collab_asdm_package p on p.id=f.package_id where p.stage_id=? and f.source_path_sha256=? "
+                +"and f.publish_status='PUBLISHED' and f.feishu_target_id is not null order by p.id desc,f.id desc limit 1",
+                rs->rs.next()?new PublishedTarget(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)):null,stageId,pathHash);
+    }
+
+    private PublishedTarget lastSyncedTarget(long stageId,String pathHash) {
+        return jdbc.query("select f.delivery_mode,f.feishu_target_id,f.feishu_node_token,f.feishu_url from collab_asdm_published_file_registry r "
+                +"join collab_asdm_sync_file f on f.id=r.last_sync_file_id where r.stage_id=? and r.source_path_sha256=? "
+                +"and f.publish_status='PUBLISHED' and f.feishu_target_id is not null",
+                rs->rs.next()?new PublishedTarget(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)):null,stageId,pathHash);
+    }
+
+    private void archivePreviousAttachment(long actor,String space,long stageId,String previousNode) {
+        var archive=jdbc.query("select wiki_node_token from collab_asdm_stage_archive where stage_id=?",
+                rs->rs.next()?rs.getString(1):null,stageId);
+        if(archive==null) {
+            var indexNode=jdbc.query("select pub.node_token from collab_asdm_package p join collab_feishu_publication pub "
+                    +"on pub.artifact_version_id=p.source_index_artifact_version_id where p.stage_id=? and pub.node_token is not null "
+                    +"order by p.id desc limit 1",rs->rs.next()?rs.getString(1):null,stageId);
+            if(indexNode==null)throw new IllegalStateException("ASDM_FEISHU_INDEX_NOT_PUBLISHED");
+            var stage=jdbc.queryForMap("select stage_order,title from collab_stage where id=?",stageId);
+            var created=attachments.createWikiFolder(actor,space,indexNode,
+                    String.format("%02d-%s-历史产物",num(stage,"stage_order"),str(stage,"title")));
+            jdbc.update("insert into collab_asdm_stage_archive(stage_id,wiki_node_token,wiki_obj_token) values(?,?,?)",
+                    stageId,created.nodeToken(),created.objectToken());
+            archive=created.nodeToken();
+        }
+        if(!archive.equals(attachments.wikiParentNodeToken(actor,previousNode)))
+            attachments.moveWikiNode(actor,space,previousNode,archive);
+    }
+
+    private record PublishedTarget(String mode,String targetId,String nodeToken,String url) {}
+    private record StagePublication(String nodeToken,String indexToken,String indexUrl,String sourceMarkdown) {}
 
     private List<FileView> files(long stageId) {return jdbc.query("select id,source_path,sync_action,publish_status,feishu_url,last_error_code from collab_asdm_sync_file where sync_stage_id=? order by id",(rs,n)->new FileView(rs.getLong(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5),rs.getString(6)),stageId);}
     private void stageStatus(long id,String status,String error){jdbc.update("update collab_asdm_sync_stage set status=?,last_error_code=?,time_updated=now(3) where id=?",status,error,id);}

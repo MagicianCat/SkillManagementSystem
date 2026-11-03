@@ -52,11 +52,12 @@ public class CollabAsdmDetectionService {
     private final CollabFeishuOutbox outbox;
     private final ObjectMapper mapper;
     private final CollabAsdmMultiStageDetectionService multiStageDetection;
+    private final CollabAsdmSyncService syncService;
 
     public CollabAsdmDetectionService(JdbcTemplate jdbc, CollabAsdmProperties properties,
             CollabAsdmConfigurationService configuration, CollabAsdmGitlabClient gitlab,
             CollabProjectAuthorizationService authorization, CollabFeishuOutbox outbox, ObjectMapper mapper,
-            CollabAsdmMultiStageDetectionService multiStageDetection) {
+            CollabAsdmMultiStageDetectionService multiStageDetection, CollabAsdmSyncService syncService) {
         this.jdbc = jdbc;
         this.properties = properties;
         this.configuration = configuration;
@@ -65,6 +66,7 @@ public class CollabAsdmDetectionService {
         this.outbox = outbox;
         this.mapper = mapper;
         this.multiStageDetection = multiStageDetection;
+        this.syncService = syncService;
     }
 
     @Scheduled(fixedDelayString = "#{T(org.springframework.boot.convert.DurationStyle).detectAndParse('${ASDM_GITLAB_POLL_INTERVAL:60s}').toMillis()}")
@@ -273,6 +275,7 @@ public class CollabAsdmDetectionService {
         int changed=jdbc.update("update collab_asdm_candidate set status='CONFIRM_REQUESTED',confirmed_by=?,confirmed_at=?,version_no=version_no+1,time_updated=? where id=? and status='NOTIFIED' and detected_revision=? and notified_revision=? and attempt_no=?",actorId,now,now,candidateId,revision,revision,expectedAttempt);
         if(changed!=1)throw error("ASDM_CANDIDATE_STALE","Candidate card is outdated or already used",HttpStatus.CONFLICT);
         outbox.enqueueAsdmConfirmPublish(project.projectId(),candidateId,revision,actorId);
+        syncService.enqueuePriorCompleted(candidateId,revision,actorId);
         audit(requirement(project.projectId()),"ASDM_PUBLISH_CLICKED",Map.of("candidateId",candidateId,"revision",revision,"actorId",actorId));
         return new ConfirmRequest(candidateId,revision,"CONFIRM_REQUESTED");
     }
