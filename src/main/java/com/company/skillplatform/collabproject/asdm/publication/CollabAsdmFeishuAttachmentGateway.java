@@ -69,6 +69,29 @@ public class CollabAsdmFeishuAttachmentGateway {
         } catch(Exception ex) { throw normalize("ASDM_FEISHU_FILE_MOUNT_FAILED",ex); }
     }
 
+    public void moveWikiNode(long actorId,String spaceId,String nodeToken,String targetParentNodeToken) {
+        try {
+            var body=json.createObjectNode().put("target_parent_token",targetParentNodeToken)
+                    .put("target_space_id",spaceId);
+            JsonNode data=request(actorId,"POST","/wiki/v2/spaces/"+segment(spaceId)+"/nodes/"+segment(nodeToken)+"/move",
+                    json.writeValueAsBytes(body),"application/json").path("data");
+            String taskId=text(data,"task_id");
+            if(!taskId.isBlank()) awaitMoveTask(actorId,taskId);
+        } catch(Exception ex) { throw normalize("ASDM_FEISHU_NODE_MOVE_FAILED",ex); }
+    }
+
+    public String wikiParentNodeToken(long actorId,String nodeToken) {
+        try {
+            JsonNode data=request(actorId,"GET","/wiki/v2/spaces/get_node?token="+segment(nodeToken),
+                    new byte[0],"application/json").path("data");
+            JsonNode node=data.path("node");
+            if(!node.isObject()) node=data;
+            String parent=text(node,"parent_node_token","parentNodeToken");
+            if(parent.isBlank()) throw new IllegalStateException("ASDM_FEISHU_NODE_PARENT_MISSING");
+            return parent;
+        } catch(Exception ex) { throw normalize("ASDM_FEISHU_NODE_LOOKUP_FAILED",ex); }
+    }
+
     public String rootDriveFolderToken(long actorId) {
         try {
             JsonNode data=request(actorId,"GET","/drive/explorer/v2/root_folder/meta",new byte[0],"application/json")

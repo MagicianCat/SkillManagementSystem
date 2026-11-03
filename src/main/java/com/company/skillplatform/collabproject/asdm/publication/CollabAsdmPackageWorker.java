@@ -43,11 +43,35 @@ public class CollabAsdmPackageWorker {
         }
     }
 
+    /** Reparents existing stage folders and archives after the index document is published. */
+    @Scheduled(fixedDelayString="${skill-platform.asdm-gitlab.hierarchy-worker-delay:60000}")
+    public void repairStageHierarchy() {
+        if(!properties.multiFilePublishEnabled()) return;
+        for(var stage:packages.dueStageHierarchies(20)) {
+            try {
+                var target=wikiTarget(stage.requirementId());
+                long actor=asLong(target,"publish_actor_user_id");
+                String space=str(target,"wiki_space_id");
+                reparentIfNeeded(actor,space,stage.stageNodeToken(),stage.indexNodeToken());
+                if(stage.archiveNodeToken()!=null&&!stage.archiveNodeToken().isBlank())
+                    reparentIfNeeded(actor,space,stage.archiveNodeToken(),stage.indexNodeToken());
+                packages.markStageHierarchy(stage);
+            } catch(Exception ex) {
+                log.warn("event=asdm.stage.hierarchy.failed stageId={} errorType={}",stage.stageId(),ex.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private void reparentIfNeeded(long actor,String space,String node,String parent) {
+        if(!parent.equals(attachments.wikiParentNodeToken(actor,node)))
+            attachments.moveWikiNode(actor,space,node,parent);
+    }
+
     public void process(long packageId) {
         var manifest=packages.findPackage(packageId).orElse(null);
         if(manifest==null) return;
         if(!"PUBLISHED".equals(manifest.packageStatus())) {
-            ensureStageFolder(manifest);
+            if(!ensureStageFolder(manifest)) return;
             List<Long> due=packages.dueFileIds(packageId,Math.max(1,properties.filePublishWorkers()));
             for(Long fileId:due) publishFile(fileId,manifest);
             var progress=packages.progress(packageId);
@@ -59,19 +83,32 @@ public class CollabAsdmPackageWorker {
         publishIndexAndRelease(packageId);
     }
 
-    private void ensureStageFolder(CollabAsdmPackageRepository.Manifest manifest) {
-        if(manifest.stageWikiNodeToken()!=null&&!manifest.stageWikiNodeToken().isBlank()) return;
+    private boolean ensureStageFolder(CollabAsdmPackageRepository.Manifest manifest) {
+        String indexNode=packages.findPublishedIndexNode(manifest.sourceIndexArtifactVersionId()).orElse(null);
+        if(indexNode==null||indexNode.isBlank()) return false;
+        if(manifest.stageWikiNodeToken()!=null&&!manifest.stageWikiNodeToken().isBlank()) return true;
+        var previous=packages.previousStageFolder(manifest.stageId(),manifest.attemptNo());
+        if(previous.isPresent()) {
+            var folder=previous.get();
+            var target=wikiTarget(manifest.requirementId());
+            reparentIfNeeded(asLong(target,"publish_actor_user_id"),str(target,"wiki_space_id"),folder.nodeToken(),indexNode);
+            packages.saveStageFolder(manifest.id(),folder.nodeToken(),folder.objectToken());
+            if("PUBLISHING_FILES".equals(manifest.packageStatus()))
+                stageFolders.put(manifest.id(),new CollabAsdmFeishuAttachmentGateway.WikiFolder(folder.nodeToken(),folder.objectToken()));
+            return true;
+        }
         Map<String,Object> target=wikiTarget(manifest.requirementId());
-        String title=String.format("%02d-%s-第%d轮",stageOrder(manifest.stageId()),stageTitle(manifest.stageId()),manifest.attemptNo());
+        String title=String.format("%02d-%s",stageOrder(manifest.stageId()),stageTitle(manifest.stageId()));
         CollabAsdmFeishuAttachmentGateway.WikiFolder folder;
         try { folder=attachments.createWikiFolder(asLong(target,"publish_actor_user_id"),str(target,"wiki_space_id"),
-                str(target,"wiki_parent_node_token"),title); }
+                indexNode,title); }
         catch(RuntimeException ex) { packages.markPackageStatus(manifest.id(),"RECONCILE_REQUIRED","ASDM_FEISHU_RECONCILE_REQUIRED");throw ex; }
         packages.saveStageFolder(manifest.id(),folder.nodeToken(),folder.objectToken());
         if("PUBLISHING_FILES".equals(manifest.packageStatus())) {
             // The package record is reloaded on the next scheduled pass; this pass can use the created target directly.
             stageFolders.put(manifest.id(),folder);
         }
+        return true;
     }
 
     private final java.util.concurrent.ConcurrentMap<Long,CollabAsdmFeishuAttachmentGateway.WikiFolder> stageFolders=new java.util.concurrent.ConcurrentHashMap<>();
@@ -129,6 +166,14 @@ public class CollabAsdmPackageWorker {
                 documents.replaceNativeDocx(actor,f.feishuTargetId(),markdown);
                 return new PublishedResult("PUBLISHED",f.feishuTargetId(),f.feishuUrl());
             }
+            var previous=packages.previousPublishedFile(m.stageId(),m.attemptNo(),f.sourcePathSha256());
+            if(previous.isPresent()&&"DOCX".equals(previous.get().deliveryMode())) {
+                var old=previous.get();
+                if(!packages.recordRemoteTarget(f.id(),old.targetId())||!packages.recordMountedNode(f.id(),old.nodeToken(),old.url()))
+                    throw new IllegalStateException("ASDM_FEISHU_REMOTE_TARGET_PERSISTENCE_FAILED");
+                documents.replaceNativeDocx(actor,old.targetId(),markdown);
+                return new PublishedResult("PUBLISHED",old.targetId(),old.url());
+            }
             var created=documents.createWikiDocx(actor,space,parent,title);
             String docToken=created.path("documentToken").asText("");
             if(docToken.isBlank())throw new IllegalStateException("ASDM_FEISHU_DOCX_TOKEN_MISSING");
@@ -142,8 +187,20 @@ public class CollabAsdmPackageWorker {
 
     private PublishedResult publishDrive(CollabAsdmPackageRepository.FileRecord f,CollabAsdmPackageRepository.Manifest m,
             long actor,String space,String wikiNode,String fileName) {
-        if(f.feishuNodeToken()!=null&&!f.feishuNodeToken().isBlank())
+        if(f.feishuNodeToken()!=null&&!f.feishuNodeToken().isBlank()) {
+            archivePreviousDriveFile(f,m,actor,space);
             return new PublishedResult("PUBLISHED",f.feishuTargetId(),f.feishuUrl());
+        }
+        if(f.feishuTargetId()==null||f.feishuTargetId().isBlank()) {
+            var previous=packages.previousPublishedFile(m.stageId(),m.attemptNo(),f.sourcePathSha256());
+            if(previous.isPresent()&&"DRIVE_FILE".equals(previous.get().deliveryMode())
+                    &&f.sourceFileSha256().equals(previous.get().sha256())) {
+                var old=previous.get();
+                if(!packages.recordRemoteTarget(f.id(),old.targetId())||!packages.recordMountedNode(f.id(),old.nodeToken(),old.url()))
+                    throw new IllegalStateException("ASDM_FEISHU_REMOTE_TARGET_PERSISTENCE_FAILED");
+                return new PublishedResult("PUBLISHED",old.targetId(),old.url());
+            }
+        }
         byte[] bytes=snapshots.read(f.snapshotStorageKey(),f.sourceSizeBytes(),f.sourceFileSha256());
         try {
             String fileToken=f.feishuTargetId();
@@ -154,8 +211,29 @@ public class CollabAsdmPackageWorker {
             var result=attachments.mountDriveFile(actor,space,wikiNode,fileToken,fileName);
             if(!packages.recordMountedNode(f.id(),result.nodeToken(),result.url()))
                 throw new IllegalStateException("ASDM_FEISHU_REMOTE_TARGET_PERSISTENCE_FAILED");
+            archivePreviousDriveFile(f,m,actor,space);
             return new PublishedResult("PUBLISHED",fileToken,result.url());
         } finally {java.util.Arrays.fill(bytes,(byte)0);}
+    }
+
+    private void archivePreviousDriveFile(CollabAsdmPackageRepository.FileRecord f,
+            CollabAsdmPackageRepository.Manifest m,long actor,String space) {
+        var previous=packages.previousPublishedFile(m.stageId(),m.attemptNo(),f.sourcePathSha256());
+        if(previous.isEmpty()||!"DRIVE_FILE".equals(previous.get().deliveryMode())
+                ||f.sourceFileSha256().equals(previous.get().sha256())) return;
+        var old=previous.get();
+        if(old.nodeToken()==null||old.nodeToken().isBlank())
+            throw new IllegalStateException("ASDM_FEISHU_PREVIOUS_NODE_MISSING");
+        var archive=packages.stageArchive(m.stageId()).orElseGet(()->{
+            var target=wikiTarget(m.requirementId());
+            String title=String.format("%02d-%s-历史产物",stageOrder(m.stageId()),stageTitle(m.stageId()));
+            String indexNode=packages.findPublishedIndexNode(m.sourceIndexArtifactVersionId())
+                    .orElseThrow(()->new IllegalStateException("ASDM_FEISHU_INDEX_NOT_PUBLISHED"));
+            var created=attachments.createWikiFolder(actor,space,indexNode,title);
+            packages.saveStageArchive(m.stageId(),created.nodeToken(),created.objectToken());
+            return new CollabAsdmPackageRepository.WikiFolder(created.nodeToken(),created.objectToken());
+        });
+        attachments.moveWikiNode(actor,space,old.nodeToken(),archive.nodeToken());
     }
 
     private void publishIndexAndRelease(long packageId) {

@@ -49,6 +49,33 @@ public class CollabAsdmPackageRepository {
                 rs -> rs.next() ? Optional.of(new IndexPublication(rs.getString("publish_status"), rs.getString("url"))) : Optional.empty(), artifactVersionId);
     }
 
+    public Optional<String> findPublishedIndexNode(Long artifactVersionId) {
+        if (artifactVersionId == null) return Optional.empty();
+        return jdbc.query("SELECT node_token FROM collab_feishu_publication WHERE artifact_version_id=? AND publish_status='PUBLISHED' AND node_token IS NOT NULL",
+                rs -> rs.next() ? Optional.of(rs.getString(1)) : Optional.empty(), artifactVersionId);
+    }
+
+    public List<StageHierarchy> dueStageHierarchies(int limit) {
+        int bounded=Math.max(1,Math.min(20,limit));
+        return jdbc.query("SELECT p.stage_id,p.requirement_id,p.stage_wiki_node_token,a.wiki_node_token archive_node,pub.node_token index_node "
+                +"FROM collab_asdm_package p JOIN collab_feishu_publication pub ON pub.artifact_version_id=p.source_index_artifact_version_id "
+                +"LEFT JOIN collab_asdm_stage_archive a ON a.stage_id=p.stage_id "
+                +"LEFT JOIN collab_asdm_stage_hierarchy h ON h.stage_id=p.stage_id "
+                +"WHERE p.id=(SELECT MAX(p2.id) FROM collab_asdm_package p2 WHERE p2.stage_id=p.stage_id AND p2.stage_wiki_node_token IS NOT NULL) "
+                +"AND pub.publish_status='PUBLISHED' AND pub.node_token IS NOT NULL "
+                +"AND (h.stage_id IS NULL OR NOT (h.index_node_token <=> pub.node_token AND h.stage_node_token <=> p.stage_wiki_node_token AND h.archive_node_token <=> a.wiki_node_token)) "
+                +"ORDER BY p.id DESC LIMIT "+bounded,
+                (rs,n)->new StageHierarchy(rs.getLong("stage_id"),rs.getLong("requirement_id"),rs.getString("stage_wiki_node_token"),rs.getString("archive_node"),rs.getString("index_node")));
+    }
+
+    public void markStageHierarchy(StageHierarchy stage) {
+        jdbc.update("INSERT INTO collab_asdm_stage_hierarchy(stage_id,index_node_token,stage_node_token,archive_node_token,time_updated) VALUES(?,?,?,?,NOW(3)) "
+                +"ON DUPLICATE KEY UPDATE index_node_token=VALUES(index_node_token),stage_node_token=VALUES(stage_node_token),archive_node_token=VALUES(archive_node_token),time_updated=NOW(3)",
+                stage.stageId(),stage.indexNodeToken(),stage.stageNodeToken(),stage.archiveNodeToken());
+    }
+
+    public record StageHierarchy(long stageId,long requirementId,String stageNodeToken,String archiveNodeToken,String indexNodeToken) {}
+
     public boolean belongsToStage(long packageId, long requirementId, String stageKey) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM collab_asdm_package ap JOIN collab_stage s ON s.id=ap.stage_id WHERE ap.id=? AND ap.requirement_id=? AND s.stage_key=?",
                 Integer.class, packageId, requirementId, stageKey);
@@ -123,6 +150,28 @@ public class CollabAsdmPackageRepository {
 
     public void saveStageFolder(long packageId,String nodeToken,String objectToken) {
         jdbc.update("UPDATE collab_asdm_package SET stage_wiki_node_token=?,stage_wiki_obj_token=?,time_updated=NOW(3) WHERE id=? AND stage_wiki_node_token IS NULL",nodeToken,objectToken,packageId);
+    }
+
+    public Optional<WikiFolder> previousStageFolder(long stageId,int attemptNo) {
+        return jdbc.query("SELECT stage_wiki_node_token,stage_wiki_obj_token FROM collab_asdm_package WHERE stage_id=? AND attempt_no<? AND stage_wiki_node_token IS NOT NULL AND stage_wiki_obj_token IS NOT NULL ORDER BY attempt_no DESC LIMIT 1",
+                rs->rs.next()?Optional.of(new WikiFolder(rs.getString(1),rs.getString(2))):Optional.empty(),stageId,attemptNo);
+    }
+
+    public Optional<PreviousFile> previousPublishedFile(long stageId,int attemptNo,String sourcePathSha256) {
+        return jdbc.query("SELECT f.delivery_mode,f.source_file_sha256,f.feishu_target_id,f.feishu_node_token,f.feishu_url FROM collab_asdm_package_file f JOIN collab_asdm_package p ON p.id=f.package_id WHERE p.stage_id=? AND p.attempt_no<? AND f.source_path_sha256=? AND f.publish_status='PUBLISHED' AND f.feishu_target_id IS NOT NULL ORDER BY p.attempt_no DESC LIMIT 1",
+                rs->rs.next()?Optional.of(new PreviousFile(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5))):Optional.empty(),stageId,attemptNo,sourcePathSha256);
+    }
+
+    public record WikiFolder(String nodeToken,String objectToken) {}
+    public record PreviousFile(String deliveryMode,String sha256,String targetId,String nodeToken,String url) {}
+
+    public Optional<WikiFolder> stageArchive(long stageId) {
+        return jdbc.query("SELECT wiki_node_token,wiki_obj_token FROM collab_asdm_stage_archive WHERE stage_id=?",
+                rs->rs.next()?Optional.of(new WikiFolder(rs.getString(1),rs.getString(2))):Optional.empty(),stageId);
+    }
+
+    public void saveStageArchive(long stageId,String nodeToken,String objectToken) {
+        jdbc.update("INSERT INTO collab_asdm_stage_archive(stage_id,wiki_node_token,wiki_obj_token) VALUES(?,?,?)",stageId,nodeToken,objectToken);
     }
 
     public void setPackageStatus(long packageId,String expected,String status,String error) {
