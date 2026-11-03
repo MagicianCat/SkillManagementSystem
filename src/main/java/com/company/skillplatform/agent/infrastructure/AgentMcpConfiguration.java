@@ -101,7 +101,7 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of("documentId")), this::wikiDocument),
                         tool("list_wiki_children", "List direct child Wiki documents of a visible parent. Call again with a returned child documentId to drill down one level. Results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiChildren),
-                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Each Wiki result includes sourceUrl, downloadUrl, childDocuments and childrenTruncated; inspect children before treating a matched parent as complete.",
+                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Each Wiki result includes sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when the Wiki contains an ASDM package; inspect children before treating a matched parent as complete.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
@@ -238,6 +238,8 @@ public class AgentMcpConfiguration {
         List<Map<String,Object>> documents=objectMapper.convertValue(result.results(),new TypeReference<>() {});
         for(Map<String,Object> document:documents) {
             long id=((Number)document.get("documentId")).longValue();
+            String asdmLink=asdmDownloadLink(wiki.get(id,agent.userId()).markdownContent());
+            if(asdmLink!=null) document.put("asdmToolDownloadUrl",asdmLink);
             document.putAll(wikiLinks(id));addWikiDirectory(document,id,agent.userId(),"PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()),3,20);
         }
         response.put("results",documents);return ok(response);
