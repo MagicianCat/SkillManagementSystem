@@ -16,6 +16,7 @@ public class TelemetryEtlService {
         synchronizeDevelopmentStages();
         synchronizeGenerations();
         synchronizeSkillUsage();
+        synchronizeCommandUsage();
     }
 
     private void synchronizeDevelopmentStages() {
@@ -166,6 +167,41 @@ public class TelemetryEtlService {
               AND d.detail_key=SHA2(CONCAT('ORPHAN_EVENT:',e.event_uuid),256)
             LEFT JOIN ai_generation_event g ON g.id=e.ai_generation_id
             WHERE d.record_type='UNLINKED_EVENT' AND (e.id IS NULL OR g.id IS NOT NULL)
+            """);
+    }
+
+    private void synchronizeCommandUsage() {
+        jdbc.update("""
+            INSERT INTO dwd_command_usage_detail (
+              command_event_id,generation_id,user_oa,project_key,req_id,req_id_source,
+              command_name,toolset_name,command_version,trigger_type,evidence_type,
+              client,client_version,invoked_at,received_at,etl_updated_at
+            )
+            SELECT e.event_uuid,
+              CASE WHEN g.id IS NULL THEN NULL ELSE CONCAT('u',g.user_id,':',g.hook_generation_id) END,
+              CASE WHEN u.email REGEXP '^[A-Za-z0-9][A-Za-z0-9._-]*@[^@[:space:]]+$'
+                     AND CHAR_LENGTH(SUBSTRING_INDEX(u.email,'@',1)) <= 128
+                   THEN SUBSTRING_INDEX(u.email,'@',1) ELSE NULL END,
+              COALESCE(g.project_key,e.project_key),e.req_id,e.req_id_source,
+              e.command_name,e.toolset_name,e.command_version,e.trigger_type,e.evidence_type,
+              e.client,e.client_version,e.invoked_at,e.received_at,NOW(3)
+            FROM command_usage_event e
+            JOIN iam_user u ON u.id=e.user_id
+            LEFT JOIN ai_generation_event g
+              ON g.user_id=e.user_id AND g.hook_generation_id=e.generation_id
+            ON DUPLICATE KEY UPDATE
+              generation_id=VALUES(generation_id),user_oa=VALUES(user_oa),
+              project_key=VALUES(project_key),req_id=VALUES(req_id),req_id_source=VALUES(req_id_source),
+              command_name=VALUES(command_name),toolset_name=VALUES(toolset_name),
+              command_version=VALUES(command_version),trigger_type=VALUES(trigger_type),
+              evidence_type=VALUES(evidence_type),client=VALUES(client),
+              client_version=VALUES(client_version),invoked_at=VALUES(invoked_at),
+              received_at=VALUES(received_at),etl_updated_at=VALUES(etl_updated_at)
+            """);
+        jdbc.update("""
+            DELETE d FROM dwd_command_usage_detail d
+            LEFT JOIN command_usage_event e ON e.event_uuid=d.command_event_id
+            WHERE e.id IS NULL
             """);
     }
 }
