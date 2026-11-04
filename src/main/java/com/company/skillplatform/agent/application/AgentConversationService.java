@@ -18,12 +18,13 @@ public class AgentConversationService {
     private final AgentSessionRepository sessions;private final AgentRunRepository runs;private final AgentMessageRepository messages;
     private final AgentRecommendationRepository recommendations;private final AgentRunService tokens;private final AgentRuntimeClient runtime;
     private final AgentEventHub events;private final AgentMcpAuditService mcpAudits;private final ExecutorService executor;private final ObjectMapper json;private final String runtimeVersion;private final String modelKey;
-    private final AgentTargetContextResolver targetContextResolver; private final AgentFastPathService fastPath;
+    private final AgentTargetContextResolver targetContextResolver; private final AgentFastPathService fastPath; private final IntentPlanService intentPlans;
     @org.springframework.beans.factory.annotation.Autowired
     public AgentConversationService(AgentSessionRepository sessions,AgentRunRepository runs,AgentMessageRepository messages,
             AgentRecommendationRepository recommendations,AgentRunService tokens,AgentRuntimeClient runtime,AgentEventHub events,AgentMcpAuditService mcpAudits,
             ExecutorService executor,ObjectMapper json,@Value("${agent.runtime.version:local}")String runtimeVersion,
-            @Value("${agent.runtime.model-key:deepseek-v4-pro}")String modelKey,AgentTargetContextResolver targetContextResolver,AgentFastPathService fastPath){this.sessions=sessions;this.runs=runs;this.messages=messages;this.recommendations=recommendations;this.tokens=tokens;this.runtime=runtime;this.events=events;this.mcpAudits=mcpAudits;this.executor=executor;this.json=json;this.runtimeVersion=runtimeVersion;this.modelKey=modelKey;this.targetContextResolver=targetContextResolver;this.fastPath=fastPath;}
+            @Value("${agent.runtime.model-key:deepseek-v4-pro}")String modelKey,AgentTargetContextResolver targetContextResolver,AgentFastPathService fastPath,IntentPlanService intentPlans){this.sessions=sessions;this.runs=runs;this.messages=messages;this.recommendations=recommendations;this.tokens=tokens;this.runtime=runtime;this.events=events;this.mcpAudits=mcpAudits;this.executor=executor;this.json=json;this.runtimeVersion=runtimeVersion;this.modelKey=modelKey;this.targetContextResolver=targetContextResolver;this.fastPath=fastPath;this.intentPlans=intentPlans;}
+    public AgentConversationService(AgentSessionRepository sessions,AgentRunRepository runs,AgentMessageRepository messages,AgentRecommendationRepository recommendations,AgentRunService tokens,AgentRuntimeClient runtime,AgentEventHub events,AgentMcpAuditService mcpAudits,ExecutorService executor,ObjectMapper json,String runtimeVersion,String modelKey,AgentTargetContextResolver targetContextResolver,AgentFastPathService fastPath){this(sessions,runs,messages,recommendations,tokens,runtime,events,mcpAudits,executor,json,runtimeVersion,modelKey,targetContextResolver,fastPath,null);}
     public AgentConversationService(AgentSessionRepository sessions,AgentRunRepository runs,AgentMessageRepository messages,
             AgentRecommendationRepository recommendations,AgentRunService tokens,AgentRuntimeClient runtime,AgentEventHub events,AgentMcpAuditService mcpAudits,
             ExecutorService executor,ObjectMapper json,String runtimeVersion,String modelKey,AgentTargetContextResolver targetContextResolver){this(sessions,runs,messages,recommendations,tokens,runtime,events,mcpAudits,executor,json,runtimeVersion,modelKey,targetContextResolver,null);}
@@ -52,10 +53,8 @@ public class AgentConversationService {
             String nextPlatform=resolved.platformSpecified()?resolved.platform():session.getPlatform();
             String nextOsType=resolved.osTypeSpecified()?resolved.osType():session.getOsType();
             if(resolved.platformSpecified()||resolved.osTypeSpecified()){session.updateContext(nextPlatform,nextOsType);sessions.save(session);}}
-        var preset=fastPath==null?Optional.<AgentFastPathService.FastPath>empty():fastPath.resolve(content,session.getPlatform(),session.getOsType());
-        int runNo=(int)runs.countBySession(session)+1;AgentRunEntity run=runs.save(new AgentRunEntity(session,runNo,preset.isPresent()?"cached-wiki-v1":runtimeVersion,preset.isPresent()?"none":modelKey));
+        int runNo=(int)runs.countBySession(session)+1;AgentRunEntity run=runs.save(new AgentRunEntity(session,runNo,runtimeVersion,modelKey));
         long sequence=messages.countBySession(session)+1;messages.save(new AgentMessageEntity(session,run,sequence,"USER",content.trim(),"COMPLETE"));session.touch(content.trim());sessions.save(session);
-        if(preset.isPresent()) return completePreset(run,session,preset.get());
         Runnable launch=()->executor.submit(()->dispatch(run.getRunKey(),owner));
         if(TransactionSynchronizationManager.isSynchronizationActive())TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization(){@Override public void afterCommit(){launch.run();}});else launch.run();
         return new AcceptedRun(run.getRunKey(),run.getStatus(),session.getPlatform(),session.getOsType());
@@ -76,10 +75,18 @@ public class AgentConversationService {
 
     private void dispatch(String runKey,Long owner){
         AgentRunEntity run=requireRun(runKey,owner);AgentSessionEntity session=run.getSession();
-        var issued=tokens.issueForRun(runKey,owner,session.getProfileKey(),session.getPlatform(),session.getOsType(),session.getKnowledgeScope());
         run.running(runKey);runs.save(run);events.publish(runKey,"run.started",Map.of("runKey",runKey));
         List<AgentRuntimeClient.Message> history=messages.findBySessionOrderBySequenceNoAsc(session).stream().map(m->new AgentRuntimeClient.Message(m.getRole(),m.getContent())).toList();
-        try{runtime.run(new AgentRuntimeClient.RunRequest(runKey,session.getSessionKey(),history,issued.token(),session.getPlatform(),session.getOsType(),run.getRunNo()==1),event->handleRuntime(runKey,event));}
+        try{
+            events.publish(runKey,"run.phase",Map.of("runKey",runKey,"phase","RECOGNIZING_INTENT","message","正在理解本轮需求"));
+            String current=history.get(history.size()-1).content();
+            List<String> recent=history.stream().limit(Math.max(0,history.size()-1)).skip(Math.max(0,history.size()-5)).map(AgentRuntimeClient.Message::content).toList();
+            Map<String,Object> plan=intentPlans.classify(runKey,current,recent);
+            if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
+            if("CONFLICT".equals(plan.get("status"))){completeRun(runKey,"你同时要求推荐和排除 Skill，请明确本轮是否需要 Skill 推荐。");return;}
+            if(Boolean.TRUE.equals(plan.get("recommendSkills"))&&Set.of("SKILL_RECOMMEND").equals(plan.get("intents"))&&fastPath!=null){var preset=fastPath.resolve(current,session.getPlatform(),session.getOsType());if(preset.isPresent()){completePreset(run,session,preset.get());return;}}
+            var issued=tokens.issueForRun(runKey,owner,session.getProfileKey(),session.getPlatform(),session.getOsType(),session.getKnowledgeScope());
+            runtime.run(new AgentRuntimeClient.RunRequest(runKey,session.getSessionKey(),history,issued.token(),session.getPlatform(),session.getOsType(),run.getRunNo()==1,plan),event->handleRuntime(runKey,event));}
         catch(Exception e){AgentRunEntity failed=runs.findByRunKey(runKey).orElseThrow();if(List.of("PENDING","RUNNING").contains(failed.getStatus())){failed.failed("AGENT_RUNTIME_UNAVAILABLE","Agent runtime is temporarily unavailable");runs.save(failed);events.publish(runKey,"run.failed",Map.of("runKey",runKey,"code","AGENT_RUNTIME_UNAVAILABLE","message","Agent 服务暂时不可用，请稍后重试"));}}
     }
     private void handleRuntime(String runKey,AgentRuntimeClient.RuntimeEvent event){

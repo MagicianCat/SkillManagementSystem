@@ -224,3 +224,8 @@ skill-platform:
     max-file-count: ${UPLOAD_MAX_FILE_COUNT:2000}
   telemetry:
     encryption-key: ${SKILL_USAGE_ENCRYPTION_KEY:}
+agent:
+  intent:
+    endpoint: ${DECISION_MODEL_BASE_URL:https://tai.taikang.com}
+    api-key: ${DECISION_MODEL_API_KEY:}
+    model: ${DECISION_MODEL_NAME:decision-model-preview}

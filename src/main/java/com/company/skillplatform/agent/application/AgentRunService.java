@@ -28,6 +28,8 @@ public class AgentRunService {
     private final Duration documentSessionTtl;
     private final DocumentAgentSessionRepository documentSessions;
     private final JdbcTemplate jdbc;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private IntentPlanService intentPlans;
 
     @org.springframework.beans.factory.annotation.Autowired
     public AgentRunService(AgentRunRepository persistentRuns,
@@ -174,6 +176,8 @@ public class AgentRunService {
                 "knowledge.search", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
             throw new BusinessException("AGENT_CAPABILITY_DENIED", "Agent capability is not allowed", HttpStatus.FORBIDDEN);
         }
+        if (run.runRef()!=null && intentPlans!=null && !intentPlans.allows(run.runRef(),capability))
+            throw new BusinessException("AGENT_INTENT_CAPABILITY_DENIED", "Capability is not allowed by this run's intent plan", HttpStatus.FORBIDDEN);
     }
     public record IssuedRun(AgentRun run, String token) {}
 }
