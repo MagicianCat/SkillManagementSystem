@@ -62,6 +62,15 @@ class IntentConversationLiveE2ETest {
             assertNotNull(skillRun.recommendation(),"Skill recommendation card was not submitted");
             assertFalse(skillRun.recommendation().items().isEmpty(),"No Skill was recommended");
             assertTrue(skillRun.recommendation().items().stream().allMatch(item->item.get("detailPath") instanceof String path&&!path.isBlank()),"Skill detail links are missing");
+            String chatRunKey=conversations.send(session.session().sessionKey(),userId,"你好").runKey();
+            long chatDeadline=System.nanoTime()+Duration.ofMinutes(2).toNanos();
+            AgentConversationService.RunView chatRun;
+            do {
+                Thread.sleep(1000);
+                chatRun=conversations.run(chatRunKey,userId);
+            } while((chatRun.status().equals("PENDING")||chatRun.status().equals("RUNNING"))&&System.nanoTime()<chatDeadline);
+            assertEquals("SUCCEEDED",chatRun.status(),"Chat run failed: "+chatRun.errorCode()+" "+chatRun.errorMessage());
+            assertNull(chatRun.recommendation(),"Greeting should not produce Skill recommendations");
         } finally {
             process.destroy();
             process.waitFor(5,TimeUnit.SECONDS);

@@ -18,6 +18,8 @@ agent:
     max-successful-reads: ${AGENT_FEISHU_MAX_SUCCESSFUL_READS:3}
     guard-cleanup-ms: ${AGENT_FEISHU_GUARD_CLEANUP_MS:600000}
   runtime:
+    max-concurrent-runs: ${AGENT_RUNTIME_MAX_CONCURRENT_RUNS:8}
+    max-queued-runs: ${AGENT_RUNTIME_MAX_QUEUED_RUNS:32}
     base-url: ${DSH_BASE_URL:http://127.0.0.1:3090}
     service-token: ${DSH_SERVICE_TOKEN:local-dsh-service-token}
     version: ${DSH_RUNTIME_VERSION:local}

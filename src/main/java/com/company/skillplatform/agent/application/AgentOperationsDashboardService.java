@@ -15,6 +15,7 @@ import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ThreadPoolExecutor;
 
 /** Aggregates the operational view used by the admin dashboard. External failures are isolated per component. */
 @Service
@@ -25,16 +26,17 @@ public class AgentOperationsDashboardService {
     private final KnowledgeProperties knowledge;
     private final String runtimeUrl;
     private final String gatewayUrl;
+    private final ThreadPoolExecutor agentExecutor;
     private final Deque<Map<String,Object>> trend = new ArrayDeque<>();
 
     public AgentOperationsDashboardService(RestClient.Builder builder, JdbcTemplate jdbc,
-            CodeGraphWorkerProperties worker, KnowledgeProperties knowledge,
+            CodeGraphWorkerProperties worker, KnowledgeProperties knowledge, ThreadPoolExecutor agentRuntimeExecutor,
             @Value("${agent.runtime.base-url:http://127.0.0.1:3090}") String runtimeUrl,
             @Value("${skill-platform.agent-runtime.gateway-url:http://127.0.0.1:18080}") String gatewayUrl) {
         var factory = new JdkClientHttpRequestFactory(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build());
         factory.setReadTimeout(Duration.ofSeconds(3));
         this.client = builder.clone().requestFactory(factory).build(); this.jdbc = jdbc; this.worker = worker;
-        this.knowledge = knowledge; this.runtimeUrl = trim(runtimeUrl); this.gatewayUrl = trim(gatewayUrl);
+        this.knowledge = knowledge; this.runtimeUrl = trim(runtimeUrl); this.gatewayUrl = trim(gatewayUrl); this.agentExecutor=agentRuntimeExecutor;
     }
 
     public Dashboard snapshot(Duration window) {
@@ -47,6 +49,14 @@ public class AgentOperationsDashboardService {
         components.add(embeddingStatus(window));
         components.add(component("backend", "Skill Platform Backend", "healthy", 0, null));
         long running = count("select count(*) from agent_run where status in ('PENDING','RUNNING')");
+        long pending = count("select count(*) from agent_run where status='PENDING'");
+        long runningNow = count("select count(*) from agent_run where status='RUNNING'");
+        int executorActive=agentExecutor.getActiveCount();
+        int executorQueued=agentExecutor.getQueue().size();
+        int executorQueueCapacity=executorQueued+agentExecutor.getQueue().remainingCapacity();
+        long dshActive=runtimeMetric(components,"activeRuns");
+        long dshMax=runtimeMetric(components,"maxConcurrentRuns");
+        long dshBusyRejections=runtimeMetric(components,"busyRejections");
         long failed = count("select count(*) from agent_run where status='FAILED' and time_created >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)");
         long total = count("select count(*) from agent_run where time_created >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)");
         double errorRate = total == 0 ? 0 : (failed * 100.0 / total);
@@ -60,14 +70,22 @@ public class AgentOperationsDashboardService {
         var alerts = new ArrayList<Map<String,Object>>();
         if (errorRate >= 15) alerts.add(alert("agent-error-rate", "critical", "Agent 最近 15 分钟失败率 %.1f%%".formatted(errorRate)));
         else if (errorRate >= 5) alerts.add(alert("agent-error-rate", "warning", "Agent 最近 15 分钟失败率 %.1f%%".formatted(errorRate)));
+        if(executorQueueCapacity>0&&executorQueued*4>=executorQueueCapacity*3)alerts.add(alert("agent-queue", "warning", "Agent 排队任务接近上限（%d/%d）".formatted(executorQueued,executorQueueCapacity)));
+        if(dshMax>0&&dshActive>=dshMax)alerts.add(alert("dsh-capacity", "warning", "DSH 活跃 Run 已达并发上限（%d/%d）".formatted(dshActive,dshMax)));
         addSignalAlerts(alerts);
         components.stream().filter(c -> "critical".equals(c.get("status"))).forEach(c -> alerts.add(alert(String.valueOf(c.get("key")), "critical", c.get("name") + " 不可用")));
         String overall = components.stream().anyMatch(c -> "critical".equals(c.get("status"))) ? "critical" : alerts.stream().anyMatch(a -> "warning".equals(a.get("level"))) ? "warning" : "healthy";
         var point = Map.<String,Object>of("at", now, "p95Ms", latencies.get("p95Ms"), "p99Ms", latencies.get("p99Ms"), "errorRatePercent", round(errorRate));
         synchronized (trend) { trend.addLast(point); while (trend.size() > 180) trend.removeFirst(); }
-        return new Dashboard(now, overall, components, Map.of("running", running, "recentTotal", total, "recentFailed", failed, "errorRatePercent", round(errorRate), "buildRunning", runningBuilds, "buildQueued", queuedBuilds, "queryRunning", runningQueries, "semanticIndexing", binding.getOrDefault("INDEXING", 0L)),
+        var workload=new LinkedHashMap<String,Object>();
+        workload.put("running",running);workload.put("pending",pending);workload.put("runningNow",runningNow);
+        workload.put("agentExecutorActive",executorActive);workload.put("agentExecutorQueued",executorQueued);workload.put("agentExecutorQueueCapacity",executorQueueCapacity);
+        workload.put("dshActiveRuns",dshActive);workload.put("dshMaxConcurrentRuns",dshMax);workload.put("dshBusyRejections",dshBusyRejections);
+        workload.put("recentTotal",total);workload.put("recentFailed",failed);workload.put("errorRatePercent",round(errorRate));
+        workload.put("buildRunning",runningBuilds);workload.put("buildQueued",queuedBuilds);workload.put("queryRunning",runningQueries);workload.put("semanticIndexing",binding.getOrDefault("INDEXING", 0L));
+        return new Dashboard(now, overall, components, workload,
                 resources, latencies, binding, qdrant, new ArrayList<>(trend), alerts,
-                Map.of("workerMaxConcurrentBuilds", worker.maxConcurrentBuilds(), "workerMaxConcurrentQueries", worker.workers(), "workerBaseUrl", worker.baseUrl()));
+                Map.of("workerMaxConcurrentBuilds", worker.maxConcurrentBuilds(), "workerMaxConcurrentQueries", worker.workers(), "workerBaseUrl", worker.baseUrl(),"agentMaxConcurrentRuns",agentExecutor.getMaximumPoolSize(),"agentQueueCapacity",executorQueueCapacity));
     }
 
     private Map<String,Object> probe(String key, String name, String url) {
@@ -88,6 +106,7 @@ public class AgentOperationsDashboardService {
             Object details = c.get("details"); if (!(details instanceof Map<?,?> d)) return 0L; Object g = d.get(group); if (!(g instanceof Map<?,?> m)) return 0L; Object v = m.get(key); return v instanceof Number n ? n.longValue() : 0L;
         }).orElse(0L);
     }
+    private long runtimeMetric(List<Map<String,Object>> components,String key){return components.stream().filter(c->"agentRuntime".equals(c.get("key"))).findFirst().map(c->{Object details=c.get("details");if(!(details instanceof Map<?,?> map))return 0L;Object value=map.get(key);return value instanceof Number number?number.longValue():0L;}).orElse(0L);}
     private Map<String,Long> grouped(String sql) { try { return jdbc.query(sql, rs -> { var result = new LinkedHashMap<String,Long>(); while (rs.next()) result.put(rs.getString("k"), rs.getLong("v")); return result; }); } catch (Exception ignored) { return new LinkedHashMap<>(); } }
     private Map<String,Object> qdrantState(List<Map<String,Object>> components) { var result = new LinkedHashMap<String,Object>(); result.put("collection", knowledge.getQdrant().getCollection()); result.put("reachable", components.stream().anyMatch(c -> "qdrant".equals(c.get("key")) && "healthy".equals(c.get("status")))); return result; }
     private Map<String,Object> resources() { var memory = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage(); double cpu = -1; try { cpu = ((com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean()).getCpuLoad() * 100; } catch (Exception ignored) {} long diskUsed = 0, diskTotal = 0; try { FileStore fs = Files.getFileStore(Path.of(".")); diskTotal = fs.getTotalSpace(); diskUsed = diskTotal - fs.getUsableSpace(); } catch (Exception ignored) {} return Map.of("cpuPercent", round(cpu), "memoryUsedBytes", memory.getUsed(), "memoryMaxBytes", memory.getMax(), "diskUsedBytes", diskUsed, "diskTotalBytes", diskTotal); }

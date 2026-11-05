@@ -6,7 +6,7 @@ import com.company.skillplatform.common.application.BusinessException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -15,10 +15,12 @@ import org.springframework.transaction.support.*;
 
 @Service
 public class AgentConversationService {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(AgentConversationService.class);
     private final AgentSessionRepository sessions;private final AgentRunRepository runs;private final AgentMessageRepository messages;
     private final AgentRecommendationRepository recommendations;private final AgentRunService tokens;private final AgentRuntimeClient runtime;
     private final AgentEventHub events;private final AgentMcpAuditService mcpAudits;private final ExecutorService executor;private final ObjectMapper json;private final String runtimeVersion;private final String modelKey;
     private final AgentTargetContextResolver targetContextResolver; private final AgentFastPathService fastPath; private final IntentPlanService intentPlans;
+    private final ConcurrentMap<String,FutureTask<Void>> queuedTasks=new ConcurrentHashMap<>();
     @org.springframework.beans.factory.annotation.Autowired
     public AgentConversationService(AgentSessionRepository sessions,AgentRunRepository runs,AgentMessageRepository messages,
             AgentRecommendationRepository recommendations,AgentRunService tokens,AgentRuntimeClient runtime,AgentEventHub events,AgentMcpAuditService mcpAudits,
@@ -55,7 +57,7 @@ public class AgentConversationService {
             if(resolved.platformSpecified()||resolved.osTypeSpecified()){session.updateContext(nextPlatform,nextOsType);sessions.save(session);}}
         int runNo=(int)runs.countBySession(session)+1;AgentRunEntity run=runs.save(new AgentRunEntity(session,runNo,runtimeVersion,modelKey));
         long sequence=messages.countBySession(session)+1;messages.save(new AgentMessageEntity(session,run,sequence,"USER",content.trim(),"COMPLETE"));session.touch(content.trim());sessions.save(session);
-        Runnable launch=()->executor.submit(()->dispatch(run.getRunKey(),owner));
+        Runnable launch=()->{String runKey=run.getRunKey();FutureTask<Void> task=new FutureTask<>(()->{try{dispatch(runKey,owner);}catch(Exception e){log.error("event=agent.run.dispatch_unhandled runKey={} causeType={}",runKey,e.getClass().getSimpleName());failRun(runKey,"AGENT_DISPATCH_FAILED","Agent 运行启动失败，请稍后重试");}finally{queuedTasks.remove(runKey);}},null);queuedTasks.put(runKey,task);try{executor.execute(task);}catch(RejectedExecutionException e){queuedTasks.remove(runKey,task);log.warn("event=agent.run.queue_full runKey={}",runKey);failRun(runKey,"AGENT_QUEUE_FULL","Agent 运行队列已满，请稍后重试");}};
         if(TransactionSynchronizationManager.isSynchronizationActive())TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization(){@Override public void afterCommit(){launch.run();}});else launch.run();
         return new AcceptedRun(run.getRunKey(),run.getStatus(),session.getPlatform(),session.getOsType());
     }
@@ -71,12 +73,14 @@ public class AgentConversationService {
     }
     public org.springframework.web.servlet.mvc.method.annotation.SseEmitter subscribe(String runKey,Long owner,long after){AgentRunEntity run=requireRun(runKey,owner);restoreTerminalEvent(run);return events.subscribe(runKey,after);}
     @Transactional(readOnly=true) public RunView run(String key,Long owner){AgentRunEntity run=requireRun(key,owner);return runView(run,recommendation(run));}
-    @Transactional public void cancel(String key,Long owner){AgentRunEntity run=requireRun(key,owner);if(!List.of("PENDING","RUNNING").contains(run.getStatus()))return;run.cancelled();runs.save(run);runtime.cancel(run.getRuntimeRunId()==null?run.getRunKey():run.getRuntimeRunId());events.publish(key,"run.cancelled",Map.of("runKey",key));}
+    @Transactional public void cancel(String key,Long owner){requireRun(key,owner);if(runs.cancelActiveRun(key,java.time.Instant.now())==0)return;FutureTask<Void> task=queuedTasks.remove(key);if(task!=null){task.cancel(false);if(executor instanceof ThreadPoolExecutor pool)pool.remove(task);}runtime.cancel(key);events.publish(key,"run.cancelled",Map.of("runKey",key));}
 
     private void dispatch(String runKey,Long owner){
+        if(runs.claimPendingRun(runKey,java.time.Instant.now())==0)return;
         AgentRunEntity run=requireRun(runKey,owner);AgentSessionEntity session=run.getSession();
-        run.running(runKey);runs.save(run);events.publish(runKey,"run.started",Map.of("runKey",runKey));
+        events.publish(runKey,"run.started",Map.of("runKey",runKey));
         List<AgentRuntimeClient.Message> history=messages.findBySessionOrderBySequenceNoAsc(session).stream().map(m->new AgentRuntimeClient.Message(m.getRole(),m.getContent())).toList();
+        String phase="intent";
         try{
             events.publish(runKey,"run.phase",Map.of("runKey",runKey,"phase","RECOGNIZING_INTENT","message","正在理解本轮需求"));
             String current=history.get(history.size()-1).content();
@@ -84,10 +88,22 @@ public class AgentConversationService {
             Map<String,Object> plan=intentPlans.classify(runKey,current,recent);
             if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
             if("CONFLICT".equals(plan.get("status"))){completeRun(runKey,"你同时要求推荐和排除 Skill，请明确本轮是否需要 Skill 推荐。");return;}
-            if(Boolean.TRUE.equals(plan.get("recommendSkills"))&&Set.of("SKILL_RECOMMEND").equals(plan.get("intents"))&&fastPath!=null){var preset=fastPath.resolve(current,session.getPlatform(),session.getOsType());if(preset.isPresent()){completePreset(run,session,preset.get());return;}}
+            if(Boolean.TRUE.equals(plan.get("recommendSkills"))&&Set.of("SKILL_RECOMMEND").equals(plan.get("intents"))&&fastPath!=null){phase="fast_path";var preset=fastPath.resolve(current,session.getPlatform(),session.getOsType());if(preset.isPresent()){completePreset(run,session,preset.get());return;}}
+            phase="issue_token";
             var issued=tokens.issueForRun(runKey,owner,session.getProfileKey(),session.getPlatform(),session.getOsType(),session.getKnowledgeScope());
+            phase="runtime";
             runtime.run(new AgentRuntimeClient.RunRequest(runKey,session.getSessionKey(),history,issued.token(),session.getPlatform(),session.getOsType(),run.getRunNo()==1,plan),event->handleRuntime(runKey,event));}
-        catch(Exception e){AgentRunEntity failed=runs.findByRunKey(runKey).orElseThrow();if(List.of("PENDING","RUNNING").contains(failed.getStatus())){failed.failed("AGENT_RUNTIME_UNAVAILABLE","Agent runtime is temporarily unavailable");runs.save(failed);events.publish(runKey,"run.failed",Map.of("runKey",runKey,"code","AGENT_RUNTIME_UNAVAILABLE","message","Agent 服务暂时不可用，请稍后重试"));}}
+        catch(Exception e){
+            Throwable cause=e;while(cause.getCause()!=null&&cause.getCause()!=cause)cause=cause.getCause();
+            String code=switch(phase){
+                case "runtime"->"AGENT_RUNTIME_UNAVAILABLE";
+                case "fast_path"->"AGENT_FAST_PATH_FAILED";
+                case "issue_token"->"AGENT_RUN_TOKEN_FAILED";
+                default->e.getMessage()!=null&&e.getMessage().startsWith("INTENT_MODEL_INVALID_RESPONSE")?"INTENT_MODEL_INVALID_RESPONSE":e.getMessage()!=null&&e.getMessage().startsWith("INTENT_PLAN_PERSIST_FAILED")?"INTENT_PLAN_PERSIST_FAILED":e.getMessage()!=null&&e.getMessage().contains("not configured")?"INTENT_MODEL_CONFIG_MISSING":"INTENT_MODEL_UNAVAILABLE";
+            };
+            String upstream=cause.getMessage()!=null&&cause.getMessage().matches("Decision Model HTTP [0-9]{3}")?cause.getMessage():"";
+            log.error("event=agent.run.dispatch_failed runKey={} phase={} code={} causeType={} upstream={}",runKey,phase,code,cause.getClass().getSimpleName(),upstream);
+            AgentRunEntity failed=runs.findByRunKey(runKey).orElseThrow();if(List.of("PENDING","RUNNING").contains(failed.getStatus())){failed.failed(code,"intent".equals(phase)?"意图识别服务暂时不可用":"Agent runtime is temporarily unavailable");runs.save(failed);events.publish(runKey,"run.failed",Map.of("runKey",runKey,"code",code,"message","intent".equals(phase)?"意图识别服务暂时不可用，请稍后重试":"Agent 服务暂时不可用，请稍后重试"));}}
     }
     private void handleRuntime(String runKey,AgentRuntimeClient.RuntimeEvent event){
         Map<String,Object> data=new LinkedHashMap<>(event.data());data.put("runKey",runKey);
