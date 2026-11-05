@@ -35,13 +35,7 @@ public class ProjectGitRepositoryService {
         if(run!=null){
             Long snapshot=snapshotOne(run,repository,actor);
             watches.attachSnapshotToActiveStages(run,snapshot);
-            // M7: if the workflow is RUNNING with an ACTIVE binding, kick off a REPO_APPEND
-            // generation in the same transaction so freeze + queue are atomic with the
-            // repository snapshot. PREPARING workflows are excluded — they will pick the
-            // repository up during their own initial build.
-            if(isRunningWithActiveBinding(run)){
-                appendService.onRepositoriesAppended(run,actor,List.of(snapshot));
-            }
+
         }
         return listProject(project);
     }

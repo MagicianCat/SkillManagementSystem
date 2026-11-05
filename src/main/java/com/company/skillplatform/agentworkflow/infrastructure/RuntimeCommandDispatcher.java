@@ -201,11 +201,6 @@ public class RuntimeCommandDispatcher {
         manifest.put("stageRunId", stageRunId);
         List<?> inputArtifacts = readList(String.valueOf(context.get("input_snapshot_json")));
         manifest.put("inputArtifacts", inputArtifacts);
-        manifest.put("codeGraph", codeGraphContext.preload(agentRunId, number(context, "started_by"),
-                String.valueOf(context.getOrDefault("initial_request", "")),
-                String.valueOf(context.getOrDefault("stage_key", "")),
-                String.valueOf(context.getOrDefault("workflow_role", context.getOrDefault("node_key", ""))),
-                inputArtifacts));
         Map<?, ?> run = client.post().uri("/internal/v1/conversations/{id}/runs", conversationId)
                 .header("X-SMS-Service-Token", token).contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("requestId", commandId + ":run", "agentRunId", agentRunId,
@@ -247,7 +242,7 @@ public class RuntimeCommandDispatcher {
         agent.put("name", context.get("node_key"));
         agent.put("systemPrompt", context.get("system_prompt"));
         agent.put("platformBaseInstructions", "Respect SMS project authorization and MCP boundaries. Never access context, tools, tokens, or secrets outside the current workflow run. When human input is required, call workflow_request_human_input with exactly one question, then stop the current turn and wait for the answer; never simulate waiting with plain text. " + HUMAN_RESUME_PROTOCOL
-                + graphPolicyInstruction(agentRunId,number(context,"started_by")));
+);
         agent.put("model", context.get("model_code"));
         agent.put("temperature", context.get("temperature"));
         agent.put("maxIterationPerRun", context.get("max_iteration_per_run"));
@@ -263,7 +258,7 @@ public class RuntimeCommandDispatcher {
             List<Long> revisions=jdbc.query("select b.project_document_revision_id from workflow_artifact_binding b where b.agent_run_id=? and b.relation_type='REVIEW_TARGET' order by b.id desc limit 1",(rs,n)->rs.getLong(1),context.get("agent_run_id"));
             agent.put("expectedRevisionIds",revisions);
         }
-        agent.put("tools", tools);
+        agent.put("tools", tools.stream().filter(tool -> !String.valueOf(tool.get("toolCode")).startsWith("code_graph")).toList());
         agent.put("skills", resolvedSkills);
         agent.put("mcp",Map.of("url",mcpUrl,"smsToken",mcpToken));
         Map<?, ?> created = client.post().uri("/internal/v1/runtimes/{id}/conversations", workspace.get("runtime_id"))

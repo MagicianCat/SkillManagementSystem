@@ -1,5 +1,6 @@
 package com.company.skillplatform.codegraph.interfaces;
 
+import com.company.skillplatform.agentworkflow.application.AgentWorkflowService;
 import com.company.skillplatform.codegraph.application.CodeGraphStatusService;
 import com.company.skillplatform.codegraph.application.CodeGraphQueryService;
 import com.company.skillplatform.codegraph.application.WorkflowCodeGraphAppendService;
@@ -17,24 +18,24 @@ import org.springframework.web.bind.annotation.RequestParam;
 
 import java.util.Map;
 
-@RestController
-@RequestMapping("/api/v1")
+// Code graph HTTP endpoints are disabled while project workflows run without a graph.
 public class CodeGraphController {
+    private final AgentWorkflowService agentWorkflows;
     private final CodeGraphStatusService status;
     private final WorkflowCodeGraphService workflow;
     private final CodeGraphQueryService queries;
     private final WorkflowCodeGraphAppendService updates;
     private final CodeGraphPolicyObservabilityService policyObservability;
-    public CodeGraphController(CodeGraphStatusService status, WorkflowCodeGraphService workflow, CodeGraphQueryService queries,
+    public CodeGraphController(AgentWorkflowService agentWorkflows, CodeGraphStatusService status, WorkflowCodeGraphService workflow, CodeGraphQueryService queries,
                                WorkflowCodeGraphAppendService updates,CodeGraphPolicyObservabilityService policyObservability) {
-        this.status = status; this.workflow = workflow; this.queries = queries; this.updates = updates;this.policyObservability=policyObservability;
+        this.agentWorkflows = agentWorkflows; this.status = status; this.workflow = workflow; this.queries = queries; this.updates = updates;this.policyObservability=policyObservability;
     }
 
     @PostMapping("/projects/{projectKey}/workflow-runs:prepare")
-    public WorkflowCodeGraphService.PrepareResult prepare(@PathVariable String projectKey,
+    public AgentWorkflowService.RunView prepare(@PathVariable String projectKey,
                                                           @RequestBody PrepareRequest request,
                                                           Authentication authentication) {
-        return workflow.prepare(projectKey, actor(authentication), request.initialRequest(),
+        return agentWorkflows.startConfigured(projectKey, actor(authentication), request.initialRequest(),
                 request.contextSnapshotJson() == null ? null : request.contextSnapshotJson().toString());
     }
 

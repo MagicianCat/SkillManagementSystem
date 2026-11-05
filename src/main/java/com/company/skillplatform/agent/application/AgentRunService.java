@@ -108,9 +108,7 @@ public class AgentRunService {
                 .claim("projectKey", projectKey).claim("workflowRunId", workflowRunId)
                 .claim("stageRunId", stageRunId).claim("agentRunId", agentRunId)
                 .claim("capabilities", java.util.List.of("project.context.read", "project.artifact.list",
-                        "project.artifact.read", "project.artifact.write", "project.artifact.validate",
-                        "code_graph.overview", "code_graph.query", "code_graph.context",
-                        "code_graph.impact", "code_graph.trace", "code_graph.route_map"))
+                        "project.artifact.read", "project.artifact.write", "project.artifact.validate"))
                 .issuedAt(Date.from(clock.instant())).expiration(Date.from(expires)).signWith(key).compact();
         return new IssuedRun(run, token);
     }
@@ -168,9 +166,7 @@ public class AgentRunService {
         if (run.sessionKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read").contains(capability)) return;
         if (run.projectKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate").contains(capability)) return;
         if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of(
-                "wiki.search", "wiki.read", "feishu.read", "workflow.human_input.request",
-                "code_graph.overview", "code_graph.query", "code_graph.context",
-                "code_graph.impact", "code_graph.trace", "code_graph.route_map").contains(capability)) return;
+                "wiki.search", "wiki.read", "feishu.read", "workflow.human_input.request").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
                 "knowledge.search", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
