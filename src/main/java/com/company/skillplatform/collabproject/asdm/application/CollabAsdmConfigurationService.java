@@ -225,6 +225,8 @@ public class CollabAsdmConfigurationService {
 
     private void requireGroupView(Map<String, Object> group, long actorId) {
         if (Objects.equals(number(group.get("owner_user_id")), actorId)) return;
+        Integer admin = jdbc.queryForObject("select count(*) from iam_user_role ur join iam_role r on r.id=ur.role_id where ur.user_id=? and r.role_key='ADMIN' and r.status='ACTIVE'", Integer.class, actorId);
+        if (admin != null && admin > 0) return;
         Integer count = jdbc.queryForObject("select count(*) from collab_group_member m join iam_user u on u.id=m.user_id where m.group_id=? and m.user_id=? and m.status='ACTIVE' and u.status='ACTIVE' and ?='PUBLISHED'", Integer.class, number(group.get("id")), actorId, group.get("status"));
         if (count == null || count == 0) throw error("COLLAB_GROUP_NOT_FOUND", "Project group not found", HttpStatus.NOT_FOUND);
     }

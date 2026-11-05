@@ -26,7 +26,9 @@ public final class CollabFeishuCardLayout {
         for (Map<String, Object> person : people) {
             Object role = person.get("role_name");
             String name = role == null || role.toString().isBlank() ? fallbackRole : role.toString();
-            Object id = person.get("feishu_open_id");
+            String id = CollabFeishuMemberIdentity.openId((String)person.get("identity_provider"),
+                    (String)person.get("feishu_open_id"),(String)person.get("external_user_id"),
+                    (String)person.get("username"));
             String mention = id == null || id.toString().isBlank()
                     ? escape(String.valueOf(person.get("display_name"))) : "<at id=" + id + "></at>";
             roles.computeIfAbsent(name, ignored -> new LinkedHashSet<>()).add(mention);
@@ -38,7 +40,7 @@ public final class CollabFeishuCardLayout {
 
     public static String owners(JdbcTemplate jdbc, long stageId, boolean requirement) {
         List<Map<String, Object>> people = requirement
-                ? jdbc.queryForList("SELECT DISTINCT rr.role_name_snapshot role_name,u.display_name,u.feishu_open_id "
+                ? jdbc.queryForList("SELECT DISTINCT rr.role_name_snapshot role_name,u.display_name,u.feishu_open_id,u.identity_provider,u.external_user_id,u.username "
                     + "FROM collab_requirement_stage_actor a JOIN collab_stage s ON s.id=a.stage_id "
                     + "JOIN collab_project p ON p.id=s.project_id "
                     + "JOIN collab_group_member gm ON gm.group_id=p.group_id AND gm.user_id=a.user_id AND gm.status='ACTIVE' "
@@ -47,7 +49,7 @@ public final class CollabFeishuCardLayout {
                     + "LEFT JOIN collab_requirement_role rr ON rr.id=sr.requirement_role_id "
                     + "WHERE a.stage_id=? AND a.duty='OWNER' AND a.frozen_at IS NOT NULL "
                     + "ORDER BY rr.role_name_snapshot,u.display_name", stageId)
-                : jdbc.queryForList("SELECT u.display_name,u.feishu_open_id FROM collab_stage s "
+                : jdbc.queryForList("SELECT u.display_name,u.feishu_open_id,u.identity_provider,u.external_user_id,u.username FROM collab_stage s "
                     + "JOIN iam_user u ON u.id=s.owner_user_id WHERE s.id=?", stageId);
         return roster(people, "阶段负责人");
     }

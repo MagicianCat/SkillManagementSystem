@@ -44,6 +44,27 @@ class CollabFeishuWorkerCardTest {
                 .doesNotContain("审批人", "project-context-fetch", "project-artifact-submit", "单独发送", "{local file}");
     }
 
+    @Test void newlyInvitedActiveOwnerGetsStageReminderReplay() {
+        when(jdbc.queryForList(startsWith("SELECT s.id,s.status,s.attempt_no"),eq(1L),eq(44L),eq(1L)))
+                .thenReturn(List.of(Map.of("id",2L,"status","IN_PROGRESS","attempt_no",1)));
+
+        ReflectionTestUtils.invokeMethod(worker,"replayActiveStageReminder",1L,44L);
+
+        verify(jdbc).update(startsWith("INSERT IGNORE INTO collab_outbox"),eq(1L),eq("STAGE_HANDOFF"),eq(2L),
+                eq("stage-reminder:member:2:1:44:STAGE_HANDOFF"),eq(2L));
+    }
+
+    @Test void stageCardMentionsDirectoryMemberUsingExternalOpenIdFallback() {
+        Map<String,Object> member=new HashMap<>(Map.of("role_name","开发经理","display_name","外勤同事",
+                "identity_provider","FEISHU","external_user_id","ou_15b71ad42fa50a843e6eff9ddd6e461e"));
+        member.put("feishu_open_id",null);
+        when(jdbc.queryForList(contains("a.duty='OWNER'"),eq(2L))).thenReturn(List.of(member));
+
+        ReflectionTestUtils.invokeMethod(worker,"stageHandoff",1L,2L,3L);
+
+        assertThat(sentCard()).contains("开发经理：<at id=ou_15b71ad42fa50a843e6eff9ddd6e461e>");
+    }
+
     @Test void nonAsdmHandoffKeepsBothPromptsWithoutMentioningReviewers() {
         ReflectionTestUtils.invokeMethod(worker, "stageHandoff", 1L, 2L, 3L);
         assertThat(sentCard()).contains("project-context-fetch", "project-artifact-submit", "单独发送")

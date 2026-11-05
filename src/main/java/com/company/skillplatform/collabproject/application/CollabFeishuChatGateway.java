@@ -37,8 +37,18 @@ public class CollabFeishuChatGateway {
     }
 
     public void addMember(String chatId, String openId) {
-        request("POST", "/im/v1/chats/" + segment(chatId) + "/members?member_id_type=open_id",
+        JsonNode result=request("POST", "/im/v1/chats/" + segment(chatId) + "/members?member_id_type=open_id",
                 Map.of("id_list", List.of(openId)));
+        JsonNode data=result.path("data");
+        if(contains(data.path("invalid_id_list"),openId)||contains(data.path("not_existed_id_list"),openId)
+                ||contains(data.path("pending_approval_id_list"),openId))
+            throw new IllegalStateException("Feishu member invitation not completed");
+    }
+
+    private boolean contains(JsonNode values,String id) {
+        if(!values.isArray())return false;
+        for(JsonNode value:values)if(id.equals(value.asText()))return true;
+        return false;
     }
 
     public void removeMember(String chatId, String openId) {

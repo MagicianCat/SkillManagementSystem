@@ -55,9 +55,25 @@ public class CollabFeishuWorker {
         recoverExpiredClaims();
         reconcileMissingPublications();
         reconcileMissingReworkReminders();
+        reconcileMissingFallbackMembers();
         List<Long> ids = jdbc.query("SELECT id FROM collab_outbox WHERE status='PENDING' AND next_attempt_at<=NOW(3) ORDER BY id LIMIT 10",
                 (rs, row) -> rs.getLong(1));
         for (Long id : ids) process(id);
+    }
+
+    /** Queue members omitted by older chat creation because directory sync had no open_id column value. */
+    private void reconcileMissingFallbackMembers() {
+        jdbc.update("INSERT IGNORE INTO collab_outbox(project_id,event_type,aggregate_type,aggregate_id,unique_dedupe_key,payload_json,status,attempts,next_attempt_at,time_created,time_updated) "
+                +"SELECT p.id,'ADD_MEMBER','MEMBER',m.user_id,CONCAT('initial-member:',p.id,':',m.user_id),"
+                +"JSON_OBJECT('userId',m.user_id),'PENDING',0,NOW(3),NOW(3),NOW(3) "
+                +"FROM collab_project p JOIN collab_feishu_binding b ON b.project_id=p.id AND b.chat_id IS NOT NULL "
+                +"JOIN collab_project_member m ON m.project_id=p.id AND m.status='ACTIVE' "
+                +"JOIN iam_user u ON u.id=m.user_id AND u.status='ACTIVE' "
+                +"WHERE p.status='ACTIVE' AND u.identity_provider='FEISHU' AND (u.feishu_open_id IS NULL OR u.feishu_open_id='') "
+                +"AND (u.external_user_id REGEXP '^ou_[A-Za-z0-9_-]{8,128}$' "
+                +"OR u.username REGEXP '^feishu_ou_[A-Za-z0-9_-]{8,128}$') "
+                +"AND NOT EXISTS(SELECT 1 FROM collab_outbox o WHERE o.unique_dedupe_key=CONCAT('initial-member:',p.id,':',m.user_id)) "
+                +"ORDER BY p.id,m.user_id LIMIT 50");
     }
 
     /** Ensures a rejected in-flight stage gets its rework card even if it predates this handler. */
@@ -144,7 +160,7 @@ public class CollabFeishuWorker {
         try {
             switch (type) {
                 case "CREATE_CHAT" -> createChat(projectId);
-                case "ADD_MEMBER" -> syncMember(projectId, aggregateId, true);
+                case "ADD_MEMBER" -> { syncMember(projectId, aggregateId, true); replayActiveStageReminder(projectId,aggregateId); }
                 case "REMOVE_MEMBER" -> syncMember(projectId, aggregateId, false);
                 case "APPROVAL_REMINDER" -> approvalReminder(projectId, aggregateId, "APPROVAL".equals(row.get("aggregate_type")));
                 case "STAGE_HANDOFF" -> stageHandoff(projectId, aggregateId, id);
@@ -229,12 +245,18 @@ public class CollabFeishuWorker {
         String chatId = chats.createChat(chatName);
         jdbc.update("UPDATE collab_feishu_binding SET chat_id=?,status='ACTIVE',last_error=NULL,last_verified_at=NOW(3),time_updated=NOW(3) WHERE project_id=?",
                 chatId, projectId);
-        List<String> openIds = jdbc.query("SELECT DISTINCT u.feishu_open_id FROM collab_project_member m JOIN iam_user u ON u.id=m.user_id "
-                + "WHERE m.project_id=? AND m.status='ACTIVE' AND u.feishu_open_id IS NOT NULL AND u.feishu_open_id<>''",
-                (rs, n) -> rs.getString(1), projectId);
-        for (String openId : openIds) {
-            try { chats.addMember(chatId, openId); }
-            catch (Exception ignored) {
+        List<Long> memberIds = jdbc.query("SELECT DISTINCT m.user_id FROM collab_project_member m JOIN iam_user u ON u.id=m.user_id "
+                + "WHERE m.project_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'",(rs,n)->rs.getLong(1),projectId);
+        for (Long memberId : memberIds) {
+            try {
+                chats.addMember(chatId,memberOpenId(memberId));
+                jdbc.update("INSERT IGNORE INTO collab_outbox(project_id,event_type,aggregate_type,aggregate_id,unique_dedupe_key,payload_json,status,attempts,next_attempt_at,time_created,time_updated) "
+                        +"VALUES(?,'ADD_MEMBER','MEMBER',?,? ,JSON_OBJECT('userId',?),'DONE',1,NOW(3),NOW(3),NOW(3))",
+                        projectId,memberId,"initial-member:"+projectId+":"+memberId,memberId);
+            } catch (Exception ignored) {
+                jdbc.update("INSERT IGNORE INTO collab_outbox(project_id,event_type,aggregate_type,aggregate_id,unique_dedupe_key,payload_json,status,attempts,next_attempt_at,time_created,time_updated) "
+                        +"VALUES(?,'ADD_MEMBER','MEMBER',?,? ,JSON_OBJECT('userId',?),'PENDING',0,NOW(3),NOW(3),NOW(3))",
+                        projectId,memberId,"initial-member:"+projectId+":"+memberId,memberId);
                 jdbc.update("UPDATE collab_feishu_binding SET status='PARTIAL',last_error='Member synchronization pending',time_updated=NOW(3) WHERE project_id=?", projectId);
             }
         }
@@ -242,9 +264,36 @@ public class CollabFeishuWorker {
 
     private void syncMember(long projectId, long userId, boolean add) {
         String chatId = chatId(projectId);
-        String openId = jdbc.queryForObject("SELECT feishu_open_id FROM iam_user WHERE id=?", String.class, userId);
-        if (openId == null || openId.isBlank()) throw new IllegalStateException("Member has no Feishu open ID");
+        String openId = memberOpenId(userId);
         if (add) chats.addMember(chatId, openId); else chats.removeMember(chatId, openId);
+    }
+
+    private String memberOpenId(long userId) {
+        String id=jdbc.query("SELECT identity_provider,feishu_open_id,external_user_id,username FROM iam_user WHERE id=?",
+                rs->rs.next()?CollabFeishuMemberIdentity.openId(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)):null,userId);
+        if(id==null)throw new IllegalStateException("Member has no usable Feishu open ID");
+        return id;
+    }
+
+    /** A stage card sent before its owner joined the chat is sent again once membership succeeds. */
+    private void replayActiveStageReminder(long projectId,long memberId) {
+        List<Map<String,Object>> stages=jdbc.queryForList("SELECT s.id,s.status,s.attempt_no,"
+                +"(SELECT MAX(sub.id) FROM collab_submission sub WHERE sub.stage_id=s.id AND sub.status='REJECTED') rejected_submission_id "
+                +"FROM collab_stage s WHERE s.project_id=? AND s.status IN ('IN_PROGRESS','REWORK') "
+                +"AND EXISTS(SELECT 1 FROM collab_requirement_stage_actor a WHERE a.stage_id=s.id AND a.duty='OWNER' "
+                +"AND a.user_id=? AND a.frozen_at IS NOT NULL) "
+                +"AND EXISTS(SELECT 1 FROM collab_outbox o WHERE o.project_id=? AND o.aggregate_id=s.id "
+                +"AND o.event_type IN ('STAGE_HANDOFF','STAGE_REWORK') AND o.status='DONE')",projectId,memberId,projectId);
+        for(var stage:stages) {
+            long stageId=((Number)stage.get("id")).longValue();
+            String status=String.valueOf(stage.get("status"));
+            String event="REWORK".equals(status)?"STAGE_REWORK":"STAGE_HANDOFF";
+            if("STAGE_REWORK".equals(event)&&stage.get("rejected_submission_id")==null)continue;
+            String key="stage-reminder:member:"+stageId+":"+stage.get("attempt_no")+":"+memberId+":"+event;
+            jdbc.update("INSERT IGNORE INTO collab_outbox(project_id,event_type,aggregate_type,aggregate_id,unique_dedupe_key,payload_json,status,attempts,next_attempt_at,time_created,time_updated) "
+                    +"VALUES(?,?, 'STAGE',?,?,JSON_OBJECT('stageId',?),'PENDING',0,NOW(3),NOW(3),NOW(3))",
+                    projectId,event,stageId,key,stageId);
+        }
     }
 
     private void projectCompleted(long projectId, long outboxId) {
@@ -323,14 +372,14 @@ public class CollabFeishuWorker {
     }
 
     private String approvalRosterMarkdown(long submissionId) {
-        List<Map<String, Object>> roles = jdbc.queryForList("SELECT r.requirement_role_id,r.role_name_snapshot role_name,u.display_name,u.feishu_open_id "
+        List<Map<String, Object>> roles = jdbc.queryForList("SELECT r.requirement_role_id,r.role_name_snapshot role_name,u.display_name,u.feishu_open_id,u.identity_provider,u.external_user_id,u.username "
                 + "FROM collab_submission_reviewer_role r JOIN collab_submission_reviewer_assignment a "
                 + "ON a.submission_id=r.submission_id AND a.requirement_role_id=r.requirement_role_id "
                 + "JOIN collab_approval ap ON ap.id=a.approval_id AND ap.state='PENDING' "
                 + "JOIN iam_user u ON u.id=a.reviewer_user_id WHERE r.submission_id=? "
                 + "ORDER BY r.role_name_snapshot,u.display_name", submissionId);
         if (!roles.isEmpty()) return CollabFeishuCardLayout.roster(roles, "指定审批人");
-        List<Map<String, Object>> reviewers = jdbc.queryForList("SELECT DISTINCT u.display_name,u.feishu_open_id FROM collab_approval a "
+        List<Map<String, Object>> reviewers = jdbc.queryForList("SELECT DISTINCT u.display_name,u.feishu_open_id,u.identity_provider,u.external_user_id,u.username FROM collab_approval a "
                 + "JOIN iam_user u ON u.id=a.reviewer_user_id WHERE a.submission_id=? AND a.state='PENDING' ORDER BY u.display_name", submissionId);
         return CollabFeishuCardLayout.roster(reviewers, "指定审批人");
     }

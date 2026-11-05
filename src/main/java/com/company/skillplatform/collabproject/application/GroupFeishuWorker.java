@@ -137,8 +137,9 @@ public class GroupFeishuWorker {
         Integer active = jdbc.queryForObject("SELECT COUNT(*) FROM collab_group_member m JOIN iam_user u ON u.id=m.user_id "
                 + "WHERE m.group_id=? AND m.user_id=? AND m.status='ACTIVE' AND u.status='ACTIVE'", Integer.class, groupId, userId);
         if (add != (active != null && active > 0)) return; // A newer membership change superseded this event.
-        String openId = jdbc.queryForObject("SELECT feishu_open_id FROM iam_user WHERE id=?", String.class, userId);
-        if (openId == null || openId.isBlank()) throw new IllegalStateException("Group member has no Feishu open ID");
+        String openId = jdbc.query("SELECT identity_provider,feishu_open_id,external_user_id,username FROM iam_user WHERE id=?",
+                rs->rs.next()?CollabFeishuMemberIdentity.openId(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)):null,userId);
+        if (openId == null) throw new IllegalStateException("Group member has no usable Feishu open ID");
         if (add) chats.addMember(chatId, openId); else chats.removeMember(chatId, openId);
     }
 
