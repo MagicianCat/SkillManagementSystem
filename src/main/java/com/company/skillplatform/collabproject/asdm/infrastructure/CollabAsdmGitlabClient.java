@@ -1,6 +1,7 @@
 package com.company.skillplatform.collabproject.asdm.infrastructure;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.company.skillplatform.ops.OpsEventService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,15 +20,18 @@ import org.springframework.stereotype.Component;
 /** Read-only GitLab API access constrained to the environment's exact host allowlist. */
 @Component
 public class CollabAsdmGitlabClient {
-    private final CollabAsdmProperties properties;
+    private final OpsEventService ops;private final CollabAsdmProperties properties;
     private final ObjectMapper mapper;
     private final HttpClient http;
 
-    public CollabAsdmGitlabClient(CollabAsdmProperties properties, ObjectMapper mapper) {
-        this.properties = properties;
+    @org.springframework.beans.factory.annotation.Autowired
+    public CollabAsdmGitlabClient(CollabAsdmProperties properties, ObjectMapper mapper,OpsEventService ops) {
+        this.properties = properties;this.ops=ops;
         this.mapper = mapper;
         this.http = HttpClient.newBuilder().connectTimeout(properties.connectTimeout()).followRedirects(HttpClient.Redirect.NEVER).build();
     }
+
+    public CollabAsdmGitlabClient(CollabAsdmProperties properties,ObjectMapper mapper){this(properties,mapper,null);}
 
     public String normalizeRepositoryUrl(String raw) {
         if (raw == null || raw.isBlank()) return null;
@@ -158,12 +162,12 @@ public class CollabAsdmGitlabClient {
                 return new FileContent(canonicalPath, commitSha, blobSha, content, declaredSize < 0 ? content.length : declaredSize);
             }
         } catch (CollabAsdmGitlabException ex) {
-            throw ex;
+            recordGitlab(repositoryBase,"FAILED",ex.errorCode());throw ex;
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-            throw new CollabAsdmGitlabException("GITLAB_REQUEST_INTERRUPTED", 503);
+            recordGitlab(repositoryBase,"FAILED","GITLAB_REQUEST_INTERRUPTED");throw new CollabAsdmGitlabException("GITLAB_REQUEST_INTERRUPTED", 503,ex);
         } catch (IOException ex) {
-            throw new CollabAsdmGitlabException("GITLAB_TEMPORARY_ERROR", 503);
+            recordGitlab(repositoryBase,"FAILED","GITLAB_TEMPORARY_ERROR");throw new CollabAsdmGitlabException("GITLAB_TEMPORARY_ERROR", 503,ex);
         }
     }
 
@@ -184,17 +188,19 @@ public class CollabAsdmGitlabClient {
             }
             try (InputStream body = response.body()) {
                 byte[] bytes = readLimited(body, maxResponseBytes);
-                return mapper.readTree(bytes);
+                JsonNode parsed=mapper.readTree(bytes);recordGitlab(uri,"SUCCESS",null);return parsed;
             }
         } catch (CollabAsdmGitlabException ex) {
-            throw ex;
+            recordGitlab(uri,"FAILED",ex.errorCode());throw ex;
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-            throw new CollabAsdmGitlabException("GITLAB_REQUEST_INTERRUPTED", 503);
+            recordGitlab(uri,"FAILED","GITLAB_REQUEST_INTERRUPTED");throw new CollabAsdmGitlabException("GITLAB_REQUEST_INTERRUPTED", 503,ex);
         } catch (IOException | IllegalArgumentException ex) {
-            throw new CollabAsdmGitlabException("GITLAB_TEMPORARY_ERROR", 503);
+            recordGitlab(uri,"FAILED","GITLAB_TEMPORARY_ERROR");throw new CollabAsdmGitlabException("GITLAB_TEMPORARY_ERROR", 503,ex);
         }
     }
+
+    private void recordGitlab(URI uri,String outcome,String code){if(ops==null)return;String host=uri.getHost()==null?"UNKNOWN":uri.getHost();ops.recordFailure(new OpsEventService.Event(null,"asdm.gitlab.request","ASDM_GITLAB","GET",outcome,host,code,null,null,null,null,null,null));if(code!=null&&(code.equals("GITLAB_INVALID_TOKEN")||code.equals("GITLAB_PERMISSION_DENIED")))ops.recordFailure(new OpsEventService.Event(null,"asdm.gitlab.auth","ASDM_GITLAB","GET",outcome,host,code,null,null,null,null,null,null));}
 
     private CollabAsdmGitlabException statusError(int status) {
         if (status >= 300 && status < 400) return new CollabAsdmGitlabException("GITLAB_REDIRECT_REJECTED", status);

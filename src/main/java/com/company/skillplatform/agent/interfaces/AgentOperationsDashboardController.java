@@ -13,12 +13,12 @@ public class AgentOperationsDashboardController {
 
     @GetMapping("/dashboard")
     @PreAuthorize("hasAuthority('admin:audit')")
-    public AgentOperationsDashboardService.Dashboard dashboard(@RequestParam(defaultValue = "15m") String window) {
+    public AgentOperationsDashboardService.Dashboard dashboard(@RequestParam(defaultValue = "PT15M") String window) {
         return service.snapshot(parseWindow(window));
     }
 
     private Duration parseWindow(String value) {
         if (value == null) return Duration.ofMinutes(15);
-        try { return Duration.parse(value); } catch (Exception ignored) { return Duration.ofMinutes(15); }
+        try { Duration parsed=Duration.parse(value);if(parsed.isNegative()||parsed.isZero()||parsed.compareTo(Duration.ofDays(1))>0)throw new IllegalArgumentException("window out of range");return parsed; } catch (Exception ex) { throw new com.company.skillplatform.common.application.BusinessException("INVALID_MONITORING_WINDOW","Window must be ISO-8601 and between 1 minute and 1 day",org.springframework.http.HttpStatus.BAD_REQUEST,ex); }
     }
 }

@@ -19,9 +19,11 @@ public class AgentMcpAuditController {
                                                 @RequestParam(required = false) String sessionKey,
                                                 @RequestParam(required = false) String toolName,
                                                 @RequestParam(required = false) String status,
+                                                @RequestParam(required = false) String traceId,
+                                                @RequestParam(required = false) String errorCode,
                                                 @RequestParam(required = false) String sourceChannel,
                                                 @RequestParam(required = false) Instant from,
                                                 @RequestParam(required = false) Instant to) {
-        return PageResponse.from(service.list(page, size, runKey, sessionKey, toolName, status, sourceChannel, from, to), value -> value);
+        return PageResponse.from(service.list(page, size, runKey, sessionKey, toolName, status, sourceChannel,traceId,errorCode, from, to), value -> value);
     }
 }

@@ -14,13 +14,14 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/v1/collab-groups")
 public class CollabGroupController {
+    private final com.company.skillplatform.ops.OpsEventService ops;
     private final CollabGroupService service;
-    public CollabGroupController(CollabGroupService service){this.service=service;}
+    public CollabGroupController(CollabGroupService service,com.company.skillplatform.ops.OpsEventService ops){this.service=service;this.ops=ops;}
 
     @GetMapping("/creation-options")
     public List<CollabGroupService.TeamOption> creationOptions(Authentication auth){return service.creationOptions(actor(auth));}
     @PostMapping @ResponseStatus(HttpStatus.CREATED)
-    public CollabGroupService.GroupView create(@Valid @RequestBody CreateRequest request,Authentication auth){return service.create(new CollabGroupService.CreateGroup(request.homeTeamId(),request.name(),request.description(),request.gitlabRootUrl(),request.asdmRepositoryUrl()),actor(auth));}
+    public CollabGroupService.GroupView create(@Valid @RequestBody CreateRequest request,Authentication auth){var created=service.create(new CollabGroupService.CreateGroup(request.homeTeamId(),request.name(),request.description(),request.gitlabRootUrl(),request.asdmRepositoryUrl()),actor(auth));ops.record(new com.company.skillplatform.ops.OpsEventService.Event("collab-group:"+created.groupKey()+":created","collab.group.create","COLLAB_GROUP","create","SUCCESS","GLOBAL",null,null,null,null,null,null,null));return created;}
     @GetMapping public List<CollabGroupService.GroupView> list(Authentication auth){return service.list(actor(auth));}
     @GetMapping("/resolve-requirement")
     public Map<String,String> resolveRequirement(@RequestParam String groupName,
@@ -66,7 +67,7 @@ public class CollabGroupController {
 
     @GetMapping("/{groupKey}/requirements") public List<CollabGroupService.RequirementView> requirements(@PathVariable String groupKey,Authentication auth){return service.requirements(groupKey,actor(auth));}
     @PostMapping("/{groupKey}/requirements") @ResponseStatus(HttpStatus.CREATED)
-    public CollabGroupService.RequirementView createRequirement(@PathVariable String groupKey,@Valid @RequestBody RequirementRequest request,Authentication auth){return service.createRequirement(groupKey,actor(auth),new CollabGroupService.CreateRequirement(request.name(),request.description(),request.approvalLevel(),request.includedStageKeys(),request.stagesWithoutApproval(),request.expectedTemplateVersion(),request.asdmBranch()));}
+    public CollabGroupService.RequirementView createRequirement(@PathVariable String groupKey,@Valid @RequestBody RequirementRequest request,Authentication auth){var created=service.createRequirement(groupKey,actor(auth),new CollabGroupService.CreateRequirement(request.name(),request.description(),request.approvalLevel(),request.includedStageKeys(),request.stagesWithoutApproval(),request.expectedTemplateVersion(),request.asdmBranch()));ops.record(new com.company.skillplatform.ops.OpsEventService.Event("collab-requirement:"+created.requirementKey()+":created","collab.requirement.create","COLLAB_REQUIREMENT","create","SUCCESS",groupKey,null,null,groupKey,created.requirementKey(),null,null,null));return created;}
 
     private long actor(Authentication auth){return ((Number)auth.getPrincipal()).longValue();}
     public record CreateRequest(@NotNull Long homeTeamId,@NotBlank @Size(max=255) String name,@Size(max=2000) String description,@Size(max=2048) String gitlabRootUrl,@Size(max=2048) String asdmRepositoryUrl){}

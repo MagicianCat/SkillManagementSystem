@@ -18,13 +18,17 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+    @org.springframework.beans.factory.annotation.Autowired(required=false) private com.company.skillplatform.ops.OpsEventService ops;
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
     @ExceptionHandler(BusinessException.class)
     ResponseEntity<ApiErrorResponse> handleBusiness(BusinessException ex, HttpServletRequest request) {
-        log.warn("event=request.business.failed requestId={} actorId={} method={} path={} errorCode={} status={}",
-                LogContext.requestId(), LogContext.actorId(), request.getMethod(), request.getRequestURI(),
-                ex.getCode(), ex.getStatus().value());
+        if(ex.getCause()==null)log.warn("[Yanshu][HTTP] event=request.business.failed requestId={} actorId={} method={} path={} errorCode={} status={}",
+                LogContext.requestId(),LogContext.actorId(),request.getMethod(),request.getRequestURI(),ex.getCode(),ex.getStatus().value());
+        else log.error("[Yanshu][HTTP] event=request.business.failed requestId={} actorId={} method={} path={} errorCode={} status={} rootCauseType={}",
+                LogContext.requestId(),LogContext.actorId(),request.getMethod(),request.getRequestURI(),ex.getCode(),ex.getStatus().value(),
+                com.company.skillplatform.common.application.ErrorClassifier.classify(ex,ex.getCode()).rootCauseType(),ex.getCause());
+        if(ex.getStatus().is5xxServerError())recordCreateFailure(request,ex.getCode(),ex);
         return ResponseEntity.status(ex.getStatus()).body(body(ex.getCode(), ex.getMessage(), request, Map.of()));
     }
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -59,9 +63,18 @@ public class ApiExceptionHandler {
     ResponseEntity<ApiErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
         log.error("event=request.unhandled.exception requestId={} actorId={} method={} path={} errorCode={}",
                 LogContext.requestId(), LogContext.actorId(), request.getMethod(), request.getRequestURI(), "INTERNAL_ERROR", ex);
+        recordCreateFailure(request,"INTERNAL_ERROR",ex);
         return ResponseEntity.internalServerError().body(body("INTERNAL_ERROR", "Internal server error", request, Map.of()));
     }
+    private void recordCreateFailure(HttpServletRequest request,String code,Throwable cause){
+        if(ops==null||!"POST".equals(request.getMethod()))return;
+        String path=request.getRequestURI(),type,module,scope;
+        if(path.matches("/api/v1/collab-groups/?")){type="collab.group.create";module="COLLAB_GROUP";scope="GLOBAL";}
+        else if(path.matches("/api/v1/collab-groups/[^/]+/requirements/?")){type="collab.requirement.create";module="COLLAB_REQUIREMENT";scope=path.split("/")[4];}
+        else return;
+        ops.recordFailure(new com.company.skillplatform.ops.OpsEventService.Event(null,type,module,"create","FAILED",scope,code,null,null,null,null,null,null,"create",com.company.skillplatform.common.application.ErrorClassifier.classify(cause,code).rootCauseType()));
+    }
     private ApiErrorResponse body(String code, String message, HttpServletRequest request, Map<String, Object> details) {
-        return ApiErrorResponse.of(code, message, request.getRequestId(), details);
+        return ApiErrorResponse.of(code, message, LogContext.requestId(), details);
     }
 }

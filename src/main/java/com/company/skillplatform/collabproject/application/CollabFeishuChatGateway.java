@@ -76,6 +76,16 @@ public class CollabFeishuChatGateway {
         }
     }
 
+    public void sendInteractiveToUser(String openId, Object card, String dedupeKey) {
+        try {
+            request("POST", "/im/v1/messages?receive_id_type=open_id",
+                    Map.of("receive_id", openId, "msg_type", "interactive",
+                            "content", json.writeValueAsString(card), "uuid", dedupeKey));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid alert card", e);
+        }
+    }
+
     private JsonNode request(String method, String path, Object body) {
         String token = tokens.getToken();
         JsonNode result = send(method, path, body, token);

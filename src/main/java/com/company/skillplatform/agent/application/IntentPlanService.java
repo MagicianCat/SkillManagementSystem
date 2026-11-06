@@ -1,6 +1,7 @@
 package com.company.skillplatform.agent.application;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.company.skillplatform.ops.OpsEventService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.*;
@@ -13,15 +14,16 @@ import org.springframework.stereotype.Service;
 @Service
 public class IntentPlanService {
     private static final Set<String> POLICIES = Set.of("SKILL", "WIKI", "KNOWLEDGE", "CHAT");
-    private final JdbcTemplate jdbc;
+    private final JdbcTemplate jdbc;private final OpsEventService ops;
     private final ObjectMapper json;
     private final HttpClient http;
     private final String endpoint, apiKey, model;
-    public IntentPlanService(JdbcTemplate jdbc, ObjectMapper json,
+    @org.springframework.beans.factory.annotation.Autowired
+    public IntentPlanService(JdbcTemplate jdbc, ObjectMapper json,OpsEventService ops,
             @Value("${agent.intent.endpoint}") String endpoint,
             @Value("${agent.intent.api-key:${DECISION_MODEL_API_KEY:}}") String apiKey,
             @Value("${agent.intent.model}") String model) {
-        this.jdbc=jdbc; this.json=json; this.endpoint=endpoint.replaceAll("/$", ""); this.apiKey=apiKey; this.model=model;
+        this.jdbc=jdbc;this.ops=ops; this.json=json; this.endpoint=endpoint.replaceAll("/$", ""); this.apiKey=apiKey; this.model=model;
         this.http=HttpClient.newBuilder().connectTimeout(Duration.ofMillis(500)).build();
     }
     public Map<String,Object> classify(String runKey, String current, List<String> history) {
@@ -39,7 +41,7 @@ public class IntentPlanService {
         boolean needsReference=current.matches("(?s).*(?:这个|那个|刚才|上一个|前面|之前|继续|再把|它).*");
         String state="任务：判断本轮用户的实际请求。当前消息优先，历史仅用于解析指代。\n"+(needsReference?"最近对话："+String.join(" | ",history)+"\n":"")+"当前用户消息："+current;
         if(state.length()>3000) state=state.substring(state.length()-3000);
-        JsonNode response=requestModel(state,questions);
+        JsonNode response=requestModel(runKey,state,questions);
         Set<String> selected=new LinkedHashSet<>(), constraints=new LinkedHashSet<>(), policies=new LinkedHashSet<>(), artifacts=new LinkedHashSet<>(), capabilities=new LinkedHashSet<>();
         Map<String,Double> probabilities=new LinkedHashMap<>();
         for(var d:definitions) {
@@ -53,14 +55,14 @@ public class IntentPlanService {
         Map<String,String> choices=new LinkedHashMap<>();
         for(var d:definitions) if(d.type().equals("INTENT")) choices.put(d.code(),d.yes());
         if(choices.size()<2) throw new IllegalStateException("At least two enabled intents are required");
-        JsonNode primary=requestModel(state,Map.of("primary_intent",Map.of("type","choice","instructions","选择本轮用户最需要的任务或产物。岗位或角色的上下文、背景资料属于角色上下文，不等于 Skill 推荐。只有明确索要 Skill 时才选择 Skill 推荐。历史仅用于指代，当前消息优先。","criteria",choices)));
+        JsonNode primary=requestModel(runKey,state,Map.of("primary_intent",Map.of("type","choice","instructions","选择本轮用户最需要的任务或产物。岗位或角色的上下文、背景资料属于角色上下文，不等于 Skill 推荐。只有明确索要 Skill 时才选择 Skill 推荐。历史仅用于指代，当前消息优先。","criteria",choices)));
         JsonNode primaryAnswer=primary.path("answers").path("primary_intent");
         String primaryChoice=primaryAnswer.path("choice").asText();
         double primaryProbability=primaryAnswer.path("probabilities").path(primaryChoice).asDouble(0);
         Definition primaryDefinition=definitions.stream().filter(d->d.type().equals("INTENT")&&d.code().equals(primaryChoice)).findFirst().orElseThrow(()->new IllegalStateException("INTENT_MODEL_INVALID_RESPONSE"));
         if(primaryProbability>=0.75 && (selected.isEmpty()||selected.size()==1)) {selected.clear();policies.clear();selected.add(primaryChoice);policies.add(primaryDefinition.policy());}
         if(selected.contains("SKILL_RECOMMEND") && !"SKILL_RECOMMEND".equals(primaryChoice)) {
-            JsonNode check=requestModel("只判断当前用户消息："+current,Map.of("skill_requested",Map.of("type","choice","instructions","用户是否明确要求最终输出 Skill 推荐或 Skill 清单？询问岗位上下文、背景资料或 Wiki 不等于要求 Skill。","criteria",Map.of("YES","明确要求推荐、列出或挑选 Skill","NO","没有明确要求 Skill 推荐"))));
+            JsonNode check=requestModel(runKey,"只判断当前用户消息："+current,Map.of("skill_requested",Map.of("type","choice","instructions","用户是否明确要求最终输出 Skill 推荐或 Skill 清单？询问岗位上下文、背景资料或 Wiki 不等于要求 Skill。","criteria",Map.of("YES","明确要求推荐、列出或挑选 Skill","NO","没有明确要求 Skill 推荐"))));
             if(check.path("answers").path("skill_requested").path("probabilities").path("YES").asDouble(0)<0.75) {selected.remove("SKILL_RECOMMEND");policies.remove("SKILL");}
         }
         if(selected.size()>1 && selected.remove("GENERAL_CHAT")) policies.remove("CHAT");
@@ -98,7 +100,8 @@ public class IntentPlanService {
         return rows.isEmpty()?null:rows.get(0);
     }
     public boolean allows(String runKey,String capability){Map<String,Object> plan=load(runKey);return plan!=null&&((Collection<?>)plan.get("allowedCapabilities")).contains(capability);}
-    private JsonNode requestModel(String state,Map<String,Object> questions) {
+    private JsonNode requestModel(String runKey,String state,Map<String,Object> questions) {
+        long started=System.nanoTime();
         try {
             String body=json.writeValueAsString(Map.of("model",model,"state",state,"questions",questions));
             HttpRequest request=HttpRequest.newBuilder(URI.create(endpoint+"/v1/systemone"))
@@ -106,8 +109,12 @@ public class IntentPlanService {
                     .header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build();
             HttpResponse<String> result=http.send(request,HttpResponse.BodyHandlers.ofString());
             if(result.statusCode()!=200) throw new IllegalStateException("Decision Model HTTP "+result.statusCode());
-            return json.readTree(result.body());
-        } catch(Exception e) { throw new IllegalStateException("INTENT_MODEL_UNAVAILABLE",e); }
+            JsonNode parsed=json.readTree(result.body());
+            ops.record(new OpsEventService.Event(null,"agent.intent.request","AGENT_INTENT","classify","SUCCESS",model,null,runKey,null,null,null,(System.nanoTime()-started)/1_000_000,null));
+            return parsed;
+        } catch(Exception e) {
+            ops.recordFailure(new OpsEventService.Event(null,"agent.intent.request","AGENT_INTENT","classify","FAILED",model,"INTENT_MODEL_UNAVAILABLE",runKey,null,null,null,(System.nanoTime()-started)/1_000_000,null));
+            throw new IllegalStateException("INTENT_MODEL_UNAVAILABLE",e); }
     }
     private record Definition(String code,String type,String instructions,String yes,String no,String policy,double threshold,int version) {}
 }

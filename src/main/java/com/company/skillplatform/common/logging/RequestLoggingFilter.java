@@ -26,6 +26,9 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String requestId = LogContext.resolveRequestId(request);
+        java.util.Map<String,String> previous=MDC.getCopyOfContextMap();
+        MDC.put("module","HTTP");
+        MDC.put(LogContext.MDC_TRACE_ID,requestId);
         MDC.put(LogContext.MDC_REQUEST_ID, requestId);
         response.setHeader(LogContext.HEADER_REQUEST_ID, requestId);
         long startNanos = System.nanoTime();
@@ -42,7 +45,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                 log.info(message, requestId, LogContext.actorId(), request.getMethod(),
                         request.getRequestURI(), status, durationMs, LogContext.clientIp(request));
             }
-            MDC.remove(LogContext.MDC_REQUEST_ID);
+            if(previous==null)MDC.clear();else MDC.setContextMap(previous);
         }
     }
 }

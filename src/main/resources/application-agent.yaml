@@ -24,4 +24,4 @@ agent:
     service-token: ${DSH_SERVICE_TOKEN:local-dsh-service-token}
     version: ${DSH_RUNTIME_VERSION:local}
     model-key: deepseek-v4-pro
-    timeout: PT250S
+    timeout: ${AGENT_RUNTIME_TIMEOUT:PT270S}

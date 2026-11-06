@@ -21,6 +21,7 @@ public class AgentMcpAuditEntity extends BaseJpaEntity {
     @Column(name = "duration_ms") private Long durationMs;
     @Column(name = "error_code", length = 128) private String errorCode;
     @Column(name = "arguments_summary", length = 2000) private String argumentsSummary;
+    @Column(name = "trace_id", length = 120) private String traceId;
 
     protected AgentMcpAuditEntity() {}
 
@@ -33,6 +34,8 @@ public class AgentMcpAuditEntity extends BaseJpaEntity {
         this.startedAt = startedAt; this.status = "STARTED";
     }
 
+    public void traceId(String value){traceId=limit(value,120);}
+    public String getTraceId(){return traceId;}
     public void succeeded(Instant finishedAt) { finish("SUCCEEDED", finishedAt, null); }
     public void failed(Instant finishedAt, String errorCode) { this.errorCode = limit(errorCode, 128); finish("FAILED", finishedAt, this.errorCode); }
     private void finish(String status, Instant finishedAt, String ignored) {

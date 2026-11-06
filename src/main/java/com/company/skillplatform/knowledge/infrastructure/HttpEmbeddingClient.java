@@ -1,6 +1,7 @@
 package com.company.skillplatform.knowledge.infrastructure;
 
 import com.company.skillplatform.knowledge.domain.EmbeddingPort;
+import com.company.skillplatform.ops.OpsEventService;
 import com.company.skillplatform.knowledge.domain.EmbeddingProviderException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,16 +19,18 @@ import io.micrometer.core.instrument.MeterRegistry;
 
 @Component
 public class HttpEmbeddingClient implements EmbeddingPort {
-    private final RestClient client; private final ObjectMapper mapper; private final KnowledgeProperties properties; private final MeterRegistry metrics;
-    public HttpEmbeddingClient(RestClient.Builder builder, ObjectMapper mapper, KnowledgeProperties properties,MeterRegistry metrics) { var config=properties.getEmbedding();var factory=new JdkClientHttpRequestFactory(HttpClient.newBuilder().connectTimeout(config.getTimeout()).build());factory.setReadTimeout(config.getTimeout());this.client=builder.clone().requestFactory(factory).build(); this.mapper=mapper;this.properties=properties;this.metrics=metrics; }
+    private final OpsEventService ops;private final RestClient client; private final ObjectMapper mapper; private final KnowledgeProperties properties; private final MeterRegistry metrics;
+    @org.springframework.beans.factory.annotation.Autowired
+    public HttpEmbeddingClient(RestClient.Builder builder, ObjectMapper mapper, KnowledgeProperties properties,MeterRegistry metrics,OpsEventService ops) { var config=properties.getEmbedding();var factory=new JdkClientHttpRequestFactory(HttpClient.newBuilder().connectTimeout(config.getTimeout()).build());factory.setReadTimeout(config.getTimeout());this.client=builder.clone().requestFactory(factory).build(); this.mapper=mapper;this.properties=properties;this.metrics=metrics;this.ops=ops; }
+    public HttpEmbeddingClient(RestClient.Builder builder,ObjectMapper mapper,KnowledgeProperties properties,MeterRegistry metrics){this(builder,mapper,properties,metrics,null);}
     @Override public List<float[]> embedDocuments(List<String> texts) {
         if (texts.isEmpty()) return List.of();
         List<float[]> result=new ArrayList<>(); int batch=Math.max(1,properties.getEmbedding().getBatchSize());
-        for(int from=0;from<texts.size();from+=batch) result.addAll(request(texts.subList(from,Math.min(texts.size(),from+batch))));
+        for(int from=0;from<texts.size();from+=batch) result.addAll(request(texts.subList(from,Math.min(texts.size(),from+batch)),"INDEX"));
         return result;
     }
-    @Override public float[] embedQuery(String query) { return request(List.of(query)).get(0); }
-    private List<float[]> request(List<String> input) {long started=System.nanoTime();try{
+    @Override public float[] embedQuery(String query) { return request(List.of(query),"QUERY").get(0); }
+    private List<float[]> request(List<String> input,String scope) {long started=System.nanoTime();try{
         var config=properties.getEmbedding();
         JsonNode response;
         try {
@@ -40,7 +43,8 @@ public class HttpEmbeddingClient implements EmbeddingPort {
         List<JsonNode> rows=new ArrayList<>();response.path("data").forEach(rows::add);rows.sort(Comparator.comparingInt(n->n.path("index").asInt()));
         List<float[]> vectors=new ArrayList<>();
         for(JsonNode row:rows){JsonNode values=row.path("embedding");if(!values.isArray()||values.size()!=config.getDimensions())throw new IllegalStateException("Embedding dimension mismatch");float[] vector=new float[values.size()];for(int i=0;i<values.size();i++)vector[i]=(float)values.get(i).asDouble();vectors.add(vector);}
-        return vectors;}finally{metrics.timer("knowledge.embedding.duration").record(java.time.Duration.ofNanos(System.nanoTime()-started));}
+        if(ops!=null){ops.record(new OpsEventService.Event(null,"knowledge.embedding.request","EMBEDDING",scope,"SUCCESS",scope+":"+config.getModel(),null,null,null,null,null,(System.nanoTime()-started)/1_000_000,null));if("INDEX".equals(scope))ops.record(new OpsEventService.Event(null,"knowledge.embedding.quota","EMBEDDING",scope,"SUCCESS",scope+":"+config.getModel(),null,null,null,null,null,null,null));}
+        return vectors;}catch(RuntimeException failure){if(ops!=null)ops.recordFailure(new OpsEventService.Event(null,"knowledge.embedding.request","EMBEDDING",scope,"FAILED",scope+":"+properties.getEmbedding().getModel(),failure instanceof EmbeddingProviderException e?e.providerCode():"EMBEDDING_FAILED",null,null,null,null,(System.nanoTime()-started)/1_000_000,null));if(ops!=null&&"INDEX".equals(scope)&&failure instanceof EmbeddingProviderException quota&&quota.isQuotaExhausted())ops.recordFailure(new OpsEventService.Event(null,"knowledge.embedding.quota","EMBEDDING",scope,"FAILED",scope+":"+properties.getEmbedding().getModel(),"EMBEDDING_QUOTA_EXHAUSTED",null,null,null,null,null,null));throw failure;}finally{metrics.timer("knowledge.embedding.duration").record(java.time.Duration.ofNanos(System.nanoTime()-started));}
     }
 
     private String providerCode(RestClientResponseException failure) {

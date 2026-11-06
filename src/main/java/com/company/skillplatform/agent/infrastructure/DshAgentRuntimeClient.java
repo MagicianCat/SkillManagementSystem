@@ -2,6 +2,7 @@ package com.company.skillplatform.agent.infrastructure;
 
 import com.company.skillplatform.agent.application.AgentRuntimeClient;
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.ops.OpsAlertService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
@@ -18,13 +19,15 @@ import org.springframework.stereotype.Component;
 public class DshAgentRuntimeClient implements AgentRuntimeClient {
     private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(DshAgentRuntimeClient.class);
     private final HttpClient http=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
-    private final ObjectMapper json; private final String baseUrl; private final String token; private final Duration timeout;
-    public DshAgentRuntimeClient(ObjectMapper json,@Value("${agent.runtime.base-url:http://127.0.0.1:3090}")String baseUrl,
+    private final OpsAlertService ops; private final ObjectMapper json; private final String baseUrl; private final String token; private final Duration timeout;
+    @org.springframework.beans.factory.annotation.Autowired
+    public DshAgentRuntimeClient(ObjectMapper json,OpsAlertService ops,@Value("${agent.runtime.base-url:http://127.0.0.1:3090}")String baseUrl,
             @Value("${agent.runtime.service-token:${DSH_SERVICE_TOKEN:local-dsh-service-token}}")String token,
-            @Value("${agent.runtime.timeout:PT130S}")Duration timeout){this.json=json;this.baseUrl=baseUrl;this.token=token;this.timeout=timeout;}
+            @Value("${agent.runtime.timeout:PT130S}")Duration timeout){this.json=json;this.ops=ops;this.baseUrl=baseUrl;this.token=token;this.timeout=timeout;}
+    public DshAgentRuntimeClient(ObjectMapper json,String baseUrl,String token,Duration timeout){this(json,null,baseUrl,token,timeout);}
     @Override public void run(RunRequest request,Consumer<RuntimeEvent>listener){
         String phase="create_request";
-        boolean runCreated=false, terminal=false;
+        boolean runCreated=false, terminal=false, runtimeFailed=false;
         try{
             HttpRequest create=HttpRequest.newBuilder(URI.create(baseUrl+"/internal/v1/runs")).timeout(Duration.ofSeconds(15))
                     .header("Authorization","Bearer "+token).header("Content-Type","application/json")
@@ -33,7 +36,7 @@ public class DshAgentRuntimeClient implements AgentRuntimeClient {
             HttpResponse<String> created=http.send(create,HttpResponse.BodyHandlers.ofString());
             phase="create_validate";
             if(created.statusCode()!=202){log.warn("event=agent.dsh.create_rejected runKey={} httpStatus={} response={}",request.runId(),created.statusCode(),safeResponse(created.body()));throw new IOException("DSH create returned HTTP "+created.statusCode());}
-            runCreated=true;
+            runCreated=true;recordOps(request.runId(),"create_validate",null);
             phase="events_send";
             HttpRequest events=HttpRequest.newBuilder(URI.create(baseUrl+"/internal/v1/runs/"+request.runId()+"/events")).timeout(timeout)
                     .header("Authorization","Bearer "+token).header("Accept","text/event-stream").GET().build();
@@ -44,20 +47,22 @@ public class DshAgentRuntimeClient implements AgentRuntimeClient {
             try(BufferedReader reader=new BufferedReader(new InputStreamReader(stream.body()))){
                 String eventType=null;StringBuilder data=new StringBuilder();String line;
                 while((line=reader.readLine())!=null){
-                    if(line.isEmpty()){if(eventType!=null&&data.length()>0){if(Set.of("runtime.completed","runtime.failed","runtime.cancelled").contains(eventType))terminal=true;listener.accept(new RuntimeEvent(eventType,json.readValue(data.toString(),new TypeReference<>(){})));}eventType=null;data.setLength(0);}
+                    if(line.isEmpty()){if(eventType!=null&&data.length()>0){if(Set.of("runtime.completed","runtime.failed","runtime.cancelled").contains(eventType))terminal=true;if("runtime.failed".equals(eventType))runtimeFailed=true;listener.accept(new RuntimeEvent(eventType,json.readValue(data.toString(),new TypeReference<>(){})));}eventType=null;data.setLength(0);}
                     else if(line.startsWith("event:"))eventType=line.substring(6).trim();
                     else if(line.startsWith("data:"))data.append(line.substring(5).trim());
                 }
             }
             if(!terminal)throw new IOException("DSH event stream ended before a terminal event");
-        }catch(InterruptedException e){Thread.interrupted();if(runCreated&&!terminal)cancelAbandoned(request.runId());Thread.currentThread().interrupt();log.warn("event=agent.dsh.transport_failed runKey={} phase={} target={} causeType=InterruptedException",request.runId(),phase,safeTarget());throw unavailable("DSH request interrupted",e);}
-        catch(Exception e){if(runCreated&&!terminal)cancelAbandoned(request.runId());Throwable root=e;while(root.getCause()!=null&&root.getCause()!=root)root=root.getCause();log.warn("event=agent.dsh.transport_failed runKey={} phase={} target={} causeType={} rootCauseType={}",request.runId(),phase,safeTarget(),e.getClass().getSimpleName(),root.getClass().getSimpleName());throw unavailable("DSH runtime unavailable",e);}
+            recordOps(request.runId(),phase,runtimeFailed?new IOException("DSH runtime failed"):null);
+        }catch(InterruptedException e){Thread.interrupted();if(runCreated&&!terminal)cancelAbandoned(request.runId());Thread.currentThread().interrupt();log.warn("event=agent.dsh.transport_failed runKey={} phase={} target={} causeType=InterruptedException",request.runId(),phase,safeTarget(),e);recordOps(request.runId(),phase,e);throw unavailable("DSH request interrupted",e);}
+        catch(Exception e){if(runCreated&&!terminal)cancelAbandoned(request.runId());Throwable root=e;while(root.getCause()!=null&&root.getCause()!=root)root=root.getCause();log.warn("event=agent.dsh.transport_failed runKey={} phase={} target={} causeType={} rootCauseType={}",request.runId(),phase,safeTarget(),e.getClass().getSimpleName(),root.getClass().getSimpleName(),e);recordOps(request.runId(),phase,e);throw unavailable("DSH runtime unavailable",e);}
     }
+    private void recordOps(String runKey,String phase,Throwable error){if(ops!=null)ops.dshEvent(runKey,phase,error);}
     @Override public void cancel(String runtimeRunId){
         try{HttpRequest req=HttpRequest.newBuilder(URI.create(baseUrl+"/internal/v1/runs/"+runtimeRunId+"/cancel")).timeout(Duration.ofSeconds(10)).header("Authorization","Bearer "+token).POST(HttpRequest.BodyPublishers.noBody()).build();http.send(req,HttpResponse.BodyHandlers.discarding());}
         catch(InterruptedException e){Thread.currentThread().interrupt();}catch(Exception ignored){}
     }
-    private BusinessException unavailable(String message,Exception cause){return new BusinessException("AGENT_RUNTIME_UNAVAILABLE",message,HttpStatus.SERVICE_UNAVAILABLE);}
+    private BusinessException unavailable(String message,Exception cause){return new BusinessException("AGENT_RUNTIME_UNAVAILABLE",message,HttpStatus.SERVICE_UNAVAILABLE,cause);}
     private String safeResponse(String body){
         try{var node=json.readTree(body);String value=node.path("message").asText(node.path("code").asText("unknown"));return value.matches("[A-Za-z0-9_. -]{1,160}")?value:"redacted";}
         catch(Exception ignored){return "unparseable";}

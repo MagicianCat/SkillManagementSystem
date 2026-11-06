@@ -2,12 +2,16 @@ package com.company.skillplatform.common.logging;
 
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.MDC;
+import java.util.Map;
+import java.util.UUID;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
 /** 日志上下文：统一封装 requestId、actorId、clientIp 的获取与 MDC 读写。 */
 public final class LogContext {
 
+    public static final String MDC_TRACE_ID="traceId";
+    public static final String MDC_RUN_KEY="runKey";
     public static final String MDC_REQUEST_ID = "requestId";
     public static final String MDC_TASK_ID = "taskId";
     public static final String MDC_ATTEMPT = "attempt";
@@ -23,11 +27,11 @@ public final class LogContext {
 
     /** 从请求头或 MDC 解析请求 ID，用于过滤器内初始化 MDC。 */
     public static String resolveRequestId(HttpServletRequest request) {
-        String header = request.getHeader(HEADER_REQUEST_ID);
-        if (header != null && !header.isBlank()) return header.trim();
-        String containerId = request.getRequestId();
-        return containerId == null || containerId.isBlank() ? "-" : containerId;
+        String header=request.getHeader(HEADER_REQUEST_ID);
+        return header!=null&&header.matches("[A-Za-z0-9._-]{1,120}")?header:UUID.randomUUID().toString();
     }
+    public static Scope withSnapshot(Map<String,String> snapshot){Map<String,String> previous=MDC.getCopyOfContextMap();if(snapshot==null)MDC.clear();else MDC.setContextMap(snapshot);return new Scope(previous);}
+    public static final class Scope implements AutoCloseable {private final Map<String,String> previous;private Scope(Map<String,String> previous){this.previous=previous;}@Override public void close(){if(previous==null)MDC.clear();else MDC.setContextMap(previous);}}
 
     /** 当前登录用户 ID，未认证返回 "-"；不抛异常，保证日志语句永不影响业务。 */
     public static String actorId() {
