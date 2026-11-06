@@ -98,8 +98,10 @@ public class AgentOperationsDashboardService {
     private Map<String,Object> probe(String key,String name,String ignoredUrl){
         try{var rows=jdbc.queryForList("select status,latency_ms,error_code,checked_at from ops_probe_snapshot where component_key=? order by checked_at desc limit 1",key);
             if(rows.isEmpty())return component(key,name,"unknown",0,"暂无探针采样");
-            var row=rows.get(0);java.sql.Timestamp checked=(java.sql.Timestamp)row.get("checked_at");
-            if(checked.toInstant().isBefore(Instant.now().minusSeconds(90)))return component(key,name,"unknown",0,"探针数据已过期");
+            var row=rows.get(0);Object rawChecked=row.get("checked_at");
+            java.time.LocalDateTime checked=rawChecked instanceof java.sql.Timestamp timestamp?timestamp.toLocalDateTime():rawChecked instanceof java.time.LocalDateTime local?local:null;
+            if(checked==null)throw new IllegalStateException("Unsupported probe time type: "+(rawChecked==null?"null":rawChecked.getClass().getName()));
+            if(checked.toInstant(java.time.ZoneOffset.UTC).isBefore(Instant.now().minusSeconds(90)))return component(key,name,"unknown",0,"探针数据已过期");
             return component(key,name,"HEALTHY".equals(row.get("status"))?"healthy":"critical",((Number)row.get("latency_ms")).longValue(),(String)row.get("error_code"));
         }catch(Exception ex){return component(key,name,"unknown",0,"探针数据不可用");}
     }
