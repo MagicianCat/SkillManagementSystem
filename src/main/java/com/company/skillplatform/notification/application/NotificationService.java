@@ -32,6 +32,7 @@ public class NotificationService {
     private final Clock clock;
     private com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository scopedRoles;
     private SkillOwnerRepository owners;
+    private com.company.skillplatform.user.infrastructure.repository.OrgTeamMemberRepository teamMembers;
 
     @org.springframework.beans.factory.annotation.Autowired
     public NotificationService(UserNotificationRepository notifications, IamUserRoleRepository userRoles,
@@ -45,6 +46,7 @@ public class NotificationService {
     }
     @org.springframework.beans.factory.annotation.Autowired public void setOwners(SkillOwnerRepository owners) { this.owners = owners; }
     @org.springframework.beans.factory.annotation.Autowired public void setScopedRoles(com.company.skillplatform.user.infrastructure.repository.ScopedRoleAssignmentRepository value) { this.scopedRoles = value; }
+    @org.springframework.beans.factory.annotation.Autowired public void setTeamMembers(com.company.skillplatform.user.infrastructure.repository.OrgTeamMemberRepository value) { this.teamMembers = value; }
 
     @Transactional
     public void reviewSubmitted(SkillVersionEntity version, Long reviewId) {
@@ -90,7 +92,14 @@ public class NotificationService {
 
     @Transactional
     public void wikiReviewSubmitted(WikiDocumentEntity document, Long reviewId) {
-        save(userRoles.findActiveUsersByPermission("wiki:review"), NotificationType.REVIEW_SUBMITTED,
+        if (document.getTeamId() == null || scopedRoles == null || teamMembers == null) return;
+        var recipients = scopedRoles.findByTeamId(document.getTeamId()).stream()
+                .filter(role -> "TEAM_ADMIN".equals(role.getRoleKey()) && "TEAM".equals(role.getScopeType()))
+                .map(role -> role.getUser())
+                .filter(user -> user.getStatus() == com.company.skillplatform.user.domain.UserStatus.ACTIVE)
+                .filter(user -> teamMembers.findByUserId(user.getId()).stream().anyMatch(member -> "ACTIVE".equals(member.getStatus()) && "ACTIVE".equals(member.getTeam().getStatus()) && document.getTeamId().equals(member.getTeam().getId())))
+                .distinct().toList();
+        save(recipients, NotificationType.REVIEW_SUBMITTED,
                 "新的 Wiki 平台推广审核", document.getTitle() + " 已提交全平台审核",
                 "WIKI_REVIEW", reviewId, null);
     }
@@ -101,6 +110,14 @@ public class NotificationService {
                 approved ? NotificationType.REVIEW_APPROVED : NotificationType.REVIEW_REJECTED,
                 approved ? "Wiki 平台推广审核通过" : "Wiki 平台推广审核拒绝",
                 document.getTitle() + (approved ? " 已对全平台开放" : " 的平台推广申请已拒绝") + "：" + comment,
+                "WIKI_DOCUMENT", document.getId(), null));
+    }
+
+    @Transactional
+    public void wikiReviewStale(WikiDocumentEntity document, Long submitterId) {
+        users.findById(submitterId).ifPresent(submitter -> save(java.util.List.of(submitter),
+                NotificationType.REVIEW_REJECTED, "Wiki 平台推广申请已失效",
+                document.getTitle() + " 的内容或目录已变化，请重新提交审核",
                 "WIKI_DOCUMENT", document.getId(), null));
     }
 

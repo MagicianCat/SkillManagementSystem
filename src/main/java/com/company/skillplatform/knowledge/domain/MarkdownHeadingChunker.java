@@ -25,7 +25,7 @@ public class MarkdownHeadingChunker {
                 String path = String.join(" > ", section.path());
                 String embedding = document.title() + (path.isBlank() ? "" : "\n" + path) + "\n\n" + content;
                 result.add(new KnowledgeChunk(document.documentId(), document.revisionNo(), document.contentSha256(),
-                        document.title(), document.documentType(), document.teamId(), document.platformVisible(),
+                        document.title(), document.teamId(), document.platformVisible(),
                         document.status(), List.copyOf(document.skillKeys()), List.copyOf(document.developmentStages()),
                         index++, section.heading(), List.copyOf(section.path()), content, embedding));
             }

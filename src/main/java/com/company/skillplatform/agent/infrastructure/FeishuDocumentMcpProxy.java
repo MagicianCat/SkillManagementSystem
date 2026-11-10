@@ -395,7 +395,7 @@ public class FeishuDocumentMcpProxy {
         if (!files.isArray()) {
             // Feishu has returned both `items` and `docs` for otherwise equivalent
             // search responses. Keep one stable contract for the frontend/MCP.
-            for (String alternate : List.of("items", "docs", "documents")) {
+            for (String alternate : List.of("items", "docs", "documents", "docs_entities")) {
                 if (normalized.path(alternate).isArray()) {
                     files = normalized.path(alternate);
                     normalized.set("files", files);

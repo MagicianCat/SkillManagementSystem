@@ -11,7 +11,7 @@ class MarkdownHeadingChunkerTest {
         var chunker = new MarkdownHeadingChunker(80, 10);
 
         var chunks = chunker.chunk(new KnowledgeDocument(12L, 3, "hash", "研发全流程最佳实践",
-                "SKILL_GUIDE", 7L, false, "ACTIVE", List.of("java-backend"),
+                7L, false, "ACTIVE", List.of("java-backend"),
                 List.of("BACKEND_CODING"), "# 后端开发\n## 单元测试\n应先补齐单元测试。"));
 
         assertThat(chunks).hasSize(1);
@@ -26,7 +26,7 @@ class MarkdownHeadingChunkerTest {
         var chunker = new MarkdownHeadingChunker(30, 6);
         String content = "# 标题\n" + "甲".repeat(22) + "乙".repeat(22);
 
-        var chunks = chunker.chunk(new KnowledgeDocument(1L, 1, "hash", "文档", "SKILL_GUIDE",
+        var chunks = chunker.chunk(new KnowledgeDocument(1L, 1, "hash", "文档",
                 null, true, "ACTIVE", List.of(), List.of(), content));
 
         assertThat(chunks).hasSizeGreaterThan(1);

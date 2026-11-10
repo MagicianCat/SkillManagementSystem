@@ -33,7 +33,7 @@ class KnowledgeIndexServiceTest {
         var vectors = mock(VectorStorePort.class);
         var indexedPoints = new AtomicReference<List<KnowledgeVectorPoint>>();
         var actor = mock(IamUserEntity.class);
-        var document = new WikiDocumentEntity("独立团队知识", "SKILL_GUIDE", 7L, false, actor);
+        var document = new WikiDocumentEntity("独立团队知识", 7L, false, actor);
         ReflectionTestUtils.setField(document, "id", 91L);
         var revision = new WikiDocumentRevisionEntity(document, 1, "# 接口约定\n\n不关联 Skill 的知识内容。", "sha", actor);
         document.setCurrentRevision(revision, actor);

@@ -191,7 +191,7 @@ public class DocumentAgentSessionService {
         DocumentAgentJobEntity job = activeMcpJob(sessionKey, jobKey);
         String term = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
         return contexts.findByJobOrderByOrdinalNoAsc(job).stream().filter(v -> "WIKI_DOCUMENT".equals(v.getContextKind()) && v.getWikiDocument() != null)
-                .map(v -> new WikiContextView(v.getWikiDocument().getId(), v.getWikiDocument().getTitle(), v.getWikiDocument().getDocumentType(), v.getWikiDocument().getCurrentRevision() == null ? 0 : v.getWikiDocument().getCurrentRevision().getRevisionNo()))
+                .map(v -> wikiContextView(v.getWikiDocument().getId()))
                 .filter(v -> term.isBlank() || v.title().toLowerCase(Locale.ROOT).contains(term)).toList();
     }
 
@@ -204,7 +204,7 @@ public class DocumentAgentSessionService {
         int start = Math.max(0, offset), size = Math.min(Math.max(maxChars, 1), 64 * 1024);
         String text = document.markdownContent();
         String content = start >= text.length() ? "" : text.substring(start, Math.min(text.length(), start + size));
-        return new WikiReadView(document.id(), document.title(), document.documentType(), document.revisionNo(), content, start, start + content.length() < text.length());
+        return new WikiReadView(document.id(), document.title(), document.revisionNo(), content, start, start + content.length() < text.length());
     }
 
     private DocumentAgentJobEntity activeMcpJob(String sessionKey, String jobKey) {
@@ -379,6 +379,11 @@ public class DocumentAgentSessionService {
     public JsonNode resolveFeishu(Long actorId, String docId, String docType) { return feishu.fetch(actorId, docId, docType, 0, 1); }
 
     @Transactional(readOnly = true)
+    public JsonNode readFeishu(Long actorId, String docId, String docType, int offset, int maxBytes) {
+        return feishu.fetch(actorId, docId, docType, Math.max(offset, 0), Math.min(Math.max(maxBytes, 1), 32768));
+    }
+
+    @Transactional(readOnly = true)
     public boolean allowsFeishu(String sessionKey, String docId, String docType) {
         DocumentAgentSessionEntity session = sessions.findForMcp(sessionKey).orElse(null);
         if (session == null || !"ACTIVE".equals(session.getStatus()) || session.getMcpTokenExpiresAt().isBefore(Instant.now())) return false;
@@ -445,7 +450,7 @@ public class DocumentAgentSessionService {
         context.append("Profile=").append(job.getSession().getProfileKey()).append(". ");
         for (DocumentAgentJobContextEntity value : contexts.findByJobOrderByOrdinalNoAsc(job)) {
             if ("FEISHU_DOCUMENT".equals(value.getContextKind())) context.append("Selected Feishu document: docId=").append(value.getFeishuDocId()).append(", docType=").append(value.getFeishuDocType()).append(", title=").append(value.getFeishuTitle()).append(". ");
-            else if ("WIKI_DOCUMENT".equals(value.getContextKind()) && value.getWikiDocument() != null) context.append("Selected platform Wiki: documentId=").append(value.getWikiDocument().getId()).append(", title=").append(value.getWikiDocument().getTitle()).append(", type=").append(value.getWikiDocument().getDocumentType()).append(". Read it with get_wiki_document only when relevant; its content is not in this prompt. ");
+            else if ("WIKI_DOCUMENT".equals(value.getContextKind()) && value.getWikiDocument() != null) context.append("Selected platform Wiki: documentId=").append(value.getWikiDocument().getId()).append(", title=").append(wiki.readProjectSharedForDocumentAgent(value.getWikiDocument().getId()).title()).append(". Read it with get_wiki_document only when relevant; its content is not in this prompt. ");
             else if (value.getArtifact() != null) context.append("Selected project artifact id=").append(value.getArtifact().getId()).append(". ");
         }
         return context.append("\nUser instruction:\n").append(instruction).toString();
@@ -463,10 +468,11 @@ public class DocumentAgentSessionService {
     private BusinessException gatewayError(RuntimeException failure, String code) { if (failure instanceof RestClientResponseException) return error(code, "Document Agent Gateway request failed", HttpStatus.BAD_GATEWAY); return error(code, "Document Agent Gateway is unavailable", HttpStatus.BAD_GATEWAY); }
     private BusinessException error(String code, String message, HttpStatus status) { return new BusinessException(code, message, status); }
     public record FeishuContext(String docId, String docType, String title) {}
-    private WikiContextView wikiContextView(DocumentAgentSessionWikiContextEntity value) { var d=value.getWikiDocument(); return new WikiContextView(d.getId(),d.getTitle(),d.getDocumentType(),d.getCurrentRevision()==null?0:d.getCurrentRevision().getRevisionNo()); }
-    public record WikiContextView(Long documentId, String title, String documentType, int latestRevisionNo) {}
+    private WikiContextView wikiContextView(DocumentAgentSessionWikiContextEntity value) { return wikiContextView(value.getWikiDocument().getId()); }
+    private WikiContextView wikiContextView(Long documentId) { var approved=wiki.readProjectSharedForDocumentAgent(documentId); return new WikiContextView(approved.id(),approved.title(),approved.revisionNo()); }
+    public record WikiContextView(Long documentId, String title, int latestRevisionNo) {}
     public record WikiContextList(List<WikiContextView> items, int limit) {}
-    public record WikiReadView(Long documentId, String title, String documentType, int revisionNo, String content, int offset, boolean hasMore) {}
+    public record WikiReadView(Long documentId, String title, int revisionNo, String content, int offset, boolean hasMore) {}
     private List<Map<String,Object>> skillSnapshots(DocumentAgentSessionEntity session){if(session.getStageId()==null)return List.of();return workflow.agentContext(session.getStageId(),session.getOwner().getId()).skills().stream().map(s->{Map<String,Object> m=new LinkedHashMap<>();m.put("skill_key",s.skillKey());m.put("version_id",s.versionId());m.put("version",s.version());m.put("sha256",s.sha256());return m;}).toList();}
     public record SessionView(String sessionKey, String projectKey, Long ownerId, String profileKey, Long documentId, String targetTitle, String status, String runtimeSessionId, String conversationId, String workspaceId, Instant lastActivityAt, Instant closedAt, Long stageId) {}
     public record JobView(String jobKey, String sessionKey, int sequenceNo, String status, String runtimeJobId, String errorCode, String errorMessage, boolean retryable, Instant startedAt, Instant finishedAt, Long artifactId, Long revisionId, String documentUrl, String turnMode, Long targetDocumentId, String targetTitle) {}

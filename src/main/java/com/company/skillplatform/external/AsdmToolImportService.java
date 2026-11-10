@@ -102,7 +102,7 @@ public class AsdmToolImportService {
                 List<Long> existing=db.query("SELECT id FROM wiki_document WHERE source_system=? AND source_resource_id=? AND source_entry_path=? AND team_id IS NULL AND status='ACTIVE' FOR UPDATE",(rs,n)->rs.getLong(1),source.get("source_system"),source.get("external_resource_id"),SOURCE_PATH);
                 WikiDocumentService.DocumentView document;
                 if (existing.isEmpty()) {
-                    document=wiki.create(new WikiDocumentService.CreateCommand((String)source.get("name"),"SKILL_GUIDE",null,List.of(),content,null),actor,requestId);
+                    document=wiki.create(new WikiDocumentService.CreateCommand((String)source.get("name"),null,List.of(),content,null),actor,requestId);
                     wiki.markExternalSource(document.id(),(String)source.get("source_system"),(String)source.get("external_resource_id"),SOURCE_PATH);
                 } else {
                     if (command==null || !command.confirmUpdate()) throw error("ASDM_WIKI_UPDATE_CONFIRM_REQUIRED","更新平台 Wiki 前需确认覆盖",HttpStatus.CONFLICT);

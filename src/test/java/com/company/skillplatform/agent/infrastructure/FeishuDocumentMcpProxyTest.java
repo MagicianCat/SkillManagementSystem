@@ -58,6 +58,26 @@ class FeishuDocumentMcpProxyTest {
     }
 
     @Test
+    void normalizesDocsEntitiesReturnedByFeishuSearch() {
+        server.createContext("/open-apis/suite/docs-api/search/object", exchange -> {
+            byte[] response = "{\"code\":0,\"data\":{\"docs_entities\":[{\"title\":\"需求分析\",\"docs_token\":\"doc-token\",\"docs_type\":\"docx\"}]}}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        when(tokens.accessTokenFor(7L)).thenReturn("user-token");
+        String base = "http://127.0.0.1:" + server.getAddress().getPort() + "/open-apis";
+        FeishuDocumentMcpProxy proxy = new FeishuDocumentMcpProxy(tokens, new ObjectMapper(), "http://127.0.0.1:1/mcp", base);
+
+        JsonNode document = proxy.search(7L, "需求分析", 5).path("files").get(0);
+        assertThat(document.path("docId").asText()).isEqualTo("doc-token");
+        assertThat(document.path("docType").asText()).isEqualTo("DOCX");
+        assertThat(document.path("readable").asBoolean()).isTrue();
+        assertThat(document.path("open_url").asText()).isEqualTo("https://www.feishu.cn/docx/doc-token");
+    }
+
+    @Test
     void readsLegacyDocsThroughLegacyApiWithPagination() {
         server.createContext("/open-apis/doc/v2/legacy-token/raw_content", exchange -> {
             assertThat(exchange.getRequestMethod()).isEqualTo("GET");

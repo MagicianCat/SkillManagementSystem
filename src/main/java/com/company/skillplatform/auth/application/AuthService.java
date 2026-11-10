@@ -95,8 +95,7 @@ public class AuthService {
             users.save(user);
         }
         // Directory sync can create a Feishu user before their first login.
-        if (rolePermissions.findPermissionKeysByUserId(user.getId()).isEmpty()
-                && !userRoles.findRoleKeysByUserId(user.getId()).contains("CONSUMER")) {
+        if (!userRoles.findRoleKeysByUserId(user.getId()).contains("CONSUMER")) {
             IamRoleEntity consumer = roles.findByRoleKey("CONSUMER").orElse(null);
             if (consumer != null) userRoles.save(new IamUserRoleEntity(user, consumer, user));
         }

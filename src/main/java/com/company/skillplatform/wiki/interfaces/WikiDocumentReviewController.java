@@ -24,6 +24,8 @@ public class WikiDocumentReviewController {
     @PostMapping("/wiki/documents/{id}:submit-platform-review")
     @ResponseStatus(HttpStatus.CREATED)
     public WikiDocumentReviewService.ReviewView submit(@PathVariable Long id, @Valid @RequestBody SubmitRequest request, Authentication authentication, HttpServletRequest servletRequest) { return service.submit(id, request.versionNo, request.comment, (Long) authentication.getPrincipal(), servletRequest.getRequestId()); }
+    @GetMapping("/wiki/documents/{id}/platform-promotion-preview")
+    public WikiDocumentReviewService.PromotionPreview preview(@PathVariable Long id, Authentication authentication) { return service.preview(id, (Long) authentication.getPrincipal()); }
     @GetMapping("/wiki-reviews")
     public PageResponse<WikiDocumentReviewService.ReviewSummary> list(@RequestParam(required = false) WikiReviewStatus status, @RequestParam(required = false) String keyword, @RequestParam(required = false) Long teamId, Pageable pageable) { return PageResponse.from(service.list(status, keyword, teamId, pageable), value -> value); }
     @GetMapping("/wiki-reviews/{id}")

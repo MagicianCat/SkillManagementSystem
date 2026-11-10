@@ -142,7 +142,6 @@ public class AgentMcpConfiguration {
         props.put("keyword", Map.of("type", "string", "maxLength", 200)); props.put("query", Map.of("type", "string", "minLength", 1, "maxLength", 200)); props.put("docId", Map.of("type", "string", "minLength", 1, "maxLength", 512));
         props.put("docType", Map.of("type", "string", "enum", List.of("DOCX", "DOC", "SHEET", "BITABLE", "SLIDES", "MINDNOTE", "WIKI", "UNKNOWN")));
         props.put("limit", Map.of("type", "integer", "minimum", 1, "maximum", 10));
-        props.put("documentType", Map.of("type", "string", "enum", List.of("SKILL_README", "SKILL_GUIDE")));
         props.put("artifactId", Map.of("type", "integer", "minimum", 1));
         props.put("revisionId", Map.of("type", "integer", "minimum", 1));
         props.put("artifactType", Map.of("type", "string", "enum", List.of("REQUIREMENT", "PRD", "ARCHITECTURE", "UI_DESIGN")));
@@ -234,7 +233,7 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult detail(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "skill.detail"); String key = required(args,"skillKey"); var view = skills.get(key); String content = readText(key, "skill.md", integer(args,"offset",0), bounded(args));
-        var docs = "PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ? List.of() : wiki.search(agent.userId(), null, key, null, null, PageRequest.of(0, 20)).items().stream().map(this::linkedWiki).toList();
+        var docs = "PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ? List.of() : wiki.search(agent.userId(), null, key, null, PageRequest.of(0, 20)).items().stream().map(this::linkedWiki).toList();
         String platform = normalizePlatform(str(args,"platform")), osType = normalizeOs(str(args,"osType"));
         return ok(Map.of("skill", view, "target", target(platform, osType), "detailPath", detailPath(key, platform, osType), "file", "skill.md", "content", content, "offset", integer(args,"offset",0), "hasMore", content.length() >= bounded(args), "wikiDocuments", docs));
     }
@@ -243,7 +242,7 @@ public class AgentMcpConfiguration {
         Long workflowId = workflowRunId(agent);
         if (workflowId != null) return workflowWikiSearch(workflowId, str(args, "keyword"));
         if (agent.sessionKey() != null) return ok(Map.of("items", documentAgents.searchSelectedWiki(agent.sessionKey(), agent.runRef(), str(args,"keyword")), "page", 0, "size", 10));
-        requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"documentType"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
+        requireUserKnowledge(agent); var result = wiki.search(agent.userId(), optionalLong(args,"teamId"), str(args,"skillKey"), str(args,"keyword"), PageRequest.of(integer(args,"page",0), Math.min(integer(args,"pageSize",20),20)));
         return ok(Map.of("items", result.items().stream().map(document -> {
             Map<String,Object> item=linkedWiki(document);addWikiDirectory(item,document.id(),agent.userId(),false,1,5);return item;
         }).toList(), "page", result.page(), "size", result.size(), "totalElements", result.totalElements(), "totalPages", result.totalPages()));
@@ -254,7 +253,7 @@ public class AgentMcpConfiguration {
         if (workflowId != null) return workflowWikiRead(workflowId, id, offset, max);
         if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
         requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
-        Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "documentType", document.documentType(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
+        Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
         response.put("parentId", document.parentId());
         String asdmLink = asdmDownloadLink(text);
         if (asdmLink != null) response.put("asdmToolDownloadUrl", asdmLink);
@@ -267,7 +266,7 @@ public class AgentMcpConfiguration {
         return ok(Map.of("parentId", id, "items", wiki.children(id, agent.userId()).stream().map(document -> {
             Map<String,Object> item=new LinkedHashMap<>();
             item.put("documentId", document.id()); item.put("title", document.title());
-            item.put("documentType", document.documentType()); item.put("parentId", document.parentId());
+            item.put("parentId", document.parentId());
             item.put("revisionNo", document.revisionNo()); item.putAll(wikiLinks(document.id()));
             return item;
         }).toList()));
@@ -306,8 +305,8 @@ public class AgentMcpConfiguration {
     }
     private Long workflowRunId(AgentRun agent) { if (agent.runRef()==null || !agent.runRef().startsWith("workflow-")) return null; try { return Long.valueOf(agent.runRef().substring("workflow-".length(), agent.runRef().indexOf("-agent-"))); } catch (Exception ignored) { return null; } }
     private boolean workflowContextAllows(long runId,String kind,Long wikiId,String docId,String docType) { Integer n=jdbc.queryForObject("select count(*) from workflow_run_context_snapshot where workflow_run_id=? and context_kind=? and ((? is not null and wiki_document_id=?) or (? is not null and feishu_doc_id=? and feishu_doc_type=?))",Integer.class,runId,kind,wikiId,wikiId,docId,docId,docType); return n!=null&&n>0; }
-    private McpSchema.CallToolResult workflowWikiSearch(long runId,String keyword) { String q=keyword==null?"":keyword; List<Map<String,Object>> items=jdbc.query("select s.wiki_document_id,d.title,d.document_type,s.wiki_revision_no from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and (?='' or d.title like concat('%',?,'%')) order by d.title",(r,n)->Map.of("documentId",r.getLong(1),"title",r.getString(2),"documentType",r.getString(3),"revisionNo",r.getObject(4)),runId,q,q); return ok(Map.of("items",items,"page",0,"size",items.size(),"totalElements",items.size())); }
-    private McpSchema.CallToolResult workflowWikiRead(long runId,long documentId,int offset,int max) { Map<String,Object> row=jdbc.queryForMap("select s.wiki_revision_no,d.title,d.document_type,r.markdown_content from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id join wiki_document_revision r on r.document_id=d.id and r.revision_no=s.wiki_revision_no where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and s.wiki_document_id=?",runId,documentId); String text=String.valueOf(row.get("markdown_content"));String content=offset>=text.length()?"":text.substring(offset,Math.min(text.length(),offset+max));return ok(Map.of("documentId",documentId,"title",row.get("title"),"documentType",row.get("document_type"),"revisionNo",row.get("wiki_revision_no"),"content",content,"offset",offset,"hasMore",offset+content.length()<text.length())); }
+    private McpSchema.CallToolResult workflowWikiSearch(long runId,String keyword) { String q=keyword==null?"":keyword; List<Map<String,Object>> items=jdbc.query("select s.wiki_document_id,p.approved_title,r.revision_no from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id join wiki_platform_snapshot p on p.document_id=d.id join wiki_document_revision r on r.id=p.approved_revision_id where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and d.status='ACTIVE' and d.platform_visible=1 and (?='' or p.approved_title like concat('%',?,'%')) order by p.approved_title",(r,n)->Map.of("documentId",r.getLong(1),"title",r.getString(2),"revisionNo",r.getObject(3)),runId,q,q); return ok(Map.of("items",items,"page",0,"size",items.size(),"totalElements",items.size())); }
+    private McpSchema.CallToolResult workflowWikiRead(long runId,long documentId,int offset,int max) { Map<String,Object> row=jdbc.queryForMap("select r.revision_no,p.approved_title,r.markdown_content from workflow_run_context_snapshot s join wiki_document d on d.id=s.wiki_document_id join wiki_platform_snapshot p on p.document_id=d.id join wiki_document_revision r on r.id=p.approved_revision_id where s.workflow_run_id=? and s.context_kind='PLATFORM_WIKI' and s.wiki_document_id=? and d.status='ACTIVE' and d.platform_visible=1",runId,documentId); String text=String.valueOf(row.get("markdown_content"));String content=offset>=text.length()?"":text.substring(offset,Math.min(text.length(),offset+max));return ok(Map.of("documentId",documentId,"title",row.get("approved_title"),"revisionNo",row.get("revision_no"),"content",content,"offset",offset,"hasMore",offset+content.length()<text.length())); }
     private McpSchema.CallToolResult workflowFeishuSearch(long runId,String query) { List<Map<String,Object>> items=jdbc.query("select feishu_doc_id,feishu_doc_type,title from workflow_run_context_snapshot where workflow_run_id=? and context_kind='FEISHU' and (?='' or title like concat('%',?,'%')) order by title",(r,n)->Map.of("docId",r.getString(1),"docType",r.getString(2),"title",r.getString(3),"readable",true),runId,query==null?"":query,query==null?"":query);return ok(Map.of("query",query,"result",Map.of("items",items))); }
     private McpSchema.CallToolResult requestHumanInput(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent=run(ex,"workflow.human_input.request"); Long workflowId=workflowRunId(agent); Long agentRunId=workflowAgentRunId(agent);

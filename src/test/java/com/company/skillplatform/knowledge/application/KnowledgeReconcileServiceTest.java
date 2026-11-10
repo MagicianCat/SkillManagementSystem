@@ -15,6 +15,20 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class KnowledgeReconcileServiceTest {
+    @Test void oldVectorsWithoutAudienceAreRebuilt() {
+        var documents=mock(WikiDocumentRepository.class);var links=mock(WikiDocumentSkillRepository.class);
+        var vectors=mock(VectorStorePort.class);var index=mock(KnowledgeIndexService.class);
+        var document=document(10L);when(document.getTeamId()).thenReturn(7L);
+        when(documents.findByStatusOrderByIdAsc("ACTIVE")).thenReturn(List.of(document));
+        when(vectors.documentState(10L)).thenReturn(new VectorStorePort.IndexedDocumentState(2,"new-sha",7L,false,List.of(),List.of()));
+        when(vectors.indexedDocumentIds()).thenReturn(Set.of(10L));
+        var reconcile=new KnowledgeReconcileService(documents,links,vectors,index,mock(KnowledgeIndexEventListener.class),new KnowledgeProperties());
+
+        var result=reconcile.reconcile();
+
+        assertThat(result.rebuilt()).isEqualTo(1);
+        verify(vectors).documentState(10L,"TEAM");verify(index).reindex(10L);
+    }
     @Test void oneFailedDocumentDoesNotPreventOtherWikiUpdates() {
         var documents=mock(WikiDocumentRepository.class);var links=mock(WikiDocumentSkillRepository.class);
         var vectors=mock(VectorStorePort.class);var index=mock(KnowledgeIndexService.class);
@@ -55,7 +69,7 @@ class KnowledgeReconcileServiceTest {
 
     private static WikiDocumentEntity document(Long id) {
         var document=mock(WikiDocumentEntity.class);var revision=mock(WikiDocumentRevisionEntity.class);
-        when(document.getId()).thenReturn(id);when(document.getCurrentRevision()).thenReturn(revision);
+        when(document.getId()).thenReturn(id);when(document.getTeamId()).thenReturn(7L);when(document.getCurrentRevision()).thenReturn(revision);
         when(revision.getRevisionNo()).thenReturn(2);when(revision.getContentSha256()).thenReturn("new-sha");
         return document;
     }

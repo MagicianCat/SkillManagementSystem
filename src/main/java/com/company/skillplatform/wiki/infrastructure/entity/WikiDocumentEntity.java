@@ -9,7 +9,6 @@ import java.time.Instant;
 @Table(name = "wiki_document")
 public class WikiDocumentEntity extends BaseJpaEntity {
     @Column(nullable = false, length = 255) private String title;
-    @Column(name = "document_type", nullable = false, length = 32) private String documentType;
     @Column(name = "team_id") private Long teamId;
     @Column(name = "platform_visible", nullable = false) private boolean platformVisible;
     @Column(nullable = false, length = 32) private String status = "ACTIVE";
@@ -24,8 +23,8 @@ public class WikiDocumentEntity extends BaseJpaEntity {
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "updated_by") private IamUserEntity updatedBy;
 
     protected WikiDocumentEntity() {}
-    public WikiDocumentEntity(String title, String type, Long teamId, boolean platformVisible, IamUserEntity actor) {
-        this.title = title; this.documentType = type; this.teamId = teamId; this.platformVisible = platformVisible;
+    public WikiDocumentEntity(String title, Long teamId, boolean platformVisible, IamUserEntity actor) {
+        this.title = title; this.teamId = teamId; this.platformVisible = platformVisible;
         this.createdBy = actor; this.updatedBy = actor;
     }
     public void update(String title, IamUserEntity actor) { this.title = title; this.updatedBy = actor; }
@@ -34,7 +33,7 @@ public class WikiDocumentEntity extends BaseJpaEntity {
     public void archive(IamUserEntity actor) { this.status = "ARCHIVED"; this.deletedAt = Instant.now(); this.updatedBy = actor; }
     public void setParent(WikiDocumentEntity parent, IamUserEntity actor) { this.parent = parent; this.updatedBy = actor; }
     public void setExternalSource(String sourceSystem, String resourceId, String entryPath) { this.sourceSystem = sourceSystem; this.sourceResourceId = resourceId; this.sourceEntryPath = entryPath; }
-    public String getTitle() { return title; } public String getDocumentType() { return documentType; }
+    public String getTitle() { return title; }
     public Long getTeamId() { return teamId; } public boolean isPlatformVisible() { return platformVisible; }
     public String getStatus() { return status; } public WikiDocumentRevisionEntity getCurrentRevision() { return currentRevision; }
     public WikiDocumentEntity getParent() { return parent; } public String getSourceSystem() { return sourceSystem; }

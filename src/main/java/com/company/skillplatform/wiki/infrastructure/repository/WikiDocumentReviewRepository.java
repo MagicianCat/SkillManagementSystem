@@ -5,9 +5,13 @@ import com.company.skillplatform.wiki.infrastructure.entity.WikiDocumentReviewEn
 import java.util.*;
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.repository.*;
+import jakarta.persistence.LockModeType;
 
 public interface WikiDocumentReviewRepository extends JpaRepository<WikiDocumentReviewEntity, Long>, JpaSpecificationExecutor<WikiDocumentReviewEntity> {
     long countByDocumentId(Long documentId);
     Optional<WikiDocumentReviewEntity> findByDocumentIdAndStatus(Long documentId, WikiReviewStatus status);
     boolean existsByDocumentIdAndStatus(Long documentId, WikiReviewStatus status);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from WikiDocumentReviewEntity r where r.id = :id")
+    Optional<WikiDocumentReviewEntity> findByIdForUpdate(Long id);
 }

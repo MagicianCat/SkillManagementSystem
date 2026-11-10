@@ -10,9 +10,12 @@ import java.util.UUID;
 
 public record KnowledgeVectorPoint(String id, float[] vector, Map<String, Object> payload) {
     public static String stableId(long documentId, int revisionNo, int chunkIndex) {
+        return stableId(documentId, revisionNo, chunkIndex, "TEAM");
+    }
+    public static String stableId(long documentId, int revisionNo, int chunkIndex, String audience) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest((documentId + ":" + revisionNo + ":" + chunkIndex).getBytes(StandardCharsets.UTF_8));
+                    .digest((documentId + ":" + revisionNo + ":" + chunkIndex + ":" + audience).getBytes(StandardCharsets.UTF_8));
             ByteBuffer bytes = ByteBuffer.wrap(digest);
             long most = bytes.getLong();
             long least = bytes.getLong();
@@ -32,14 +35,14 @@ public record KnowledgeVectorPoint(String id, float[] vector, Map<String, Object
         payload.put("title", chunk.title());
         payload.put("heading", chunk.heading());
         payload.put("headingPath", chunk.headingPath());
-        payload.put("documentType", chunk.documentType());
         payload.put("teamId", chunk.teamId());
         payload.put("platformVisible", chunk.platformVisible());
+        payload.put("audience", chunk.platformVisible() ? "PLATFORM" : "TEAM");
         payload.put("status", chunk.status());
         payload.put("skillKeys", chunk.skillKeys());
         payload.put("developmentStages", chunk.developmentStages());
         payload.put("chunkIndex", chunk.chunkIndex());
         payload.put("content", chunk.content());
-        return new KnowledgeVectorPoint(stableId(chunk.documentId(), chunk.revisionNo(), chunk.chunkIndex()), vector, payload);
+        return new KnowledgeVectorPoint(stableId(chunk.documentId(), chunk.revisionNo(), chunk.chunkIndex(), chunk.platformVisible() ? "PLATFORM" : "TEAM"), vector, payload);
     }
 }

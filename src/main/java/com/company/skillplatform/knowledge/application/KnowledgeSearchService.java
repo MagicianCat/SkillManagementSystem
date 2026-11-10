@@ -7,6 +7,7 @@ import com.company.skillplatform.knowledge.infrastructure.KnowledgeProperties;
 import com.company.skillplatform.skill.domain.SkillStatus;
 import com.company.skillplatform.version.domain.LifecycleStatus;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
+import com.company.skillplatform.wiki.application.WikiPromotionStore;
 import com.company.skillplatform.wiki.infrastructure.entity.WikiDocumentEntity;
 import com.company.skillplatform.wiki.infrastructure.repository.WikiDocumentRepository;
 import com.company.skillplatform.wiki.infrastructure.repository.WikiDocumentSkillRepository;
@@ -22,6 +23,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class KnowledgeSearchService {
     private static final Logger log=LoggerFactory.getLogger(KnowledgeSearchService.class);
     private final OpsEventService ops;private final EmbeddingPort embedding;private final RerankPort rerank;private final VectorStorePort vectors;private final WikiDocumentService wiki;private final WikiDocumentRepository documents;private final WikiDocumentSkillRepository links;private final KnowledgeProperties properties;private final MeterRegistry metrics;
+    private WikiPromotionStore promotionStore;
+    @org.springframework.beans.factory.annotation.Autowired public void setPromotionStore(WikiPromotionStore value){promotionStore=value;}
     @org.springframework.beans.factory.annotation.Autowired
     public KnowledgeSearchService(EmbeddingPort embedding,RerankPort rerank,VectorStorePort vectors,WikiDocumentService wiki,WikiDocumentRepository documents,WikiDocumentSkillRepository links,KnowledgeProperties properties,MeterRegistry metrics,OpsEventService ops){this.embedding=embedding;this.rerank=rerank;this.vectors=vectors;this.wiki=wiki;this.documents=documents;this.links=links;this.properties=properties;this.metrics=metrics;this.ops=ops;}
     public KnowledgeSearchService(EmbeddingPort embedding,RerankPort rerank,VectorStorePort vectors,WikiDocumentService wiki,WikiDocumentRepository documents,WikiDocumentSkillRepository links,KnowledgeProperties properties,MeterRegistry metrics){this(embedding,rerank,vectors,wiki,documents,links,properties,metrics,null);}
@@ -32,7 +35,7 @@ public class KnowledgeSearchService {
             boolean rerankApplied=false;Map<Integer,Double> rerankScores=new HashMap<>();if(properties.getRerank().isEnabled()&&!hits.isEmpty()){try{List<String> candidates=hits.stream().map(this::rerankText).toList();for(var score:rerank.rerank(normalized,candidates,candidates.size()))rerankScores.put(score.index(),score.score());rerankApplied=!rerankScores.isEmpty();}catch(RuntimeException failure){metrics.counter("knowledge.rerank.fallback").increment();log.warn("[Yanshu][RERANK] event=knowledge.rerank.fallback queryHash={} errorType={}",hash(normalized),failure.getClass().getSimpleName(),failure);}}
             List<ScoredHit> scored=new ArrayList<>();for(int i=0;i<hits.size();i++){VectorSearchHit hit=hits.get(i);Double rr=rerankScores.get(i);double stageBoost=developmentStage!=null&&strings(hit.payload().get("developmentStages")).contains(developmentStage)?0.02:0;double rank=(rr==null?hit.vectorScore():rr)+stageBoost;scored.add(new ScoredHit(hit,rr,rank));}
             scored.sort(Comparator.comparingDouble(ScoredHit::rank).reversed().thenComparing(s->number(s.hit().payload().get("documentId")).longValue()));LinkedHashMap<Long,List<ScoredHit>> grouped=new LinkedHashMap<>();for(ScoredHit hit:scored){long documentId=number(hit.hit().payload().get("documentId")).longValue();grouped.computeIfAbsent(documentId,ignored->new ArrayList<>()).add(hit);}
-            List<KnowledgeSearchResult.DocumentResult> results=new ArrayList<>();for(var entry:grouped.entrySet()){if(results.size()>=Math.min(limit,properties.getSearch().getDocumentTopK()))break;List<ScoredHit> documentHits=entry.getValue();ScoredHit best=documentHits.get(0);Map<String,Object> p=best.hit().payload();List<KnowledgeSearchResult.Snippet> snippets=documentHits.stream().limit(properties.getSearch().getSnippetsPerDocument()).map(h->new KnowledgeSearchResult.Snippet(string(h.hit().payload().get("heading")),string(h.hit().payload().get("content")),h.hit().vectorScore(),h.rerankScore())).toList();results.add(new KnowledgeSearchResult.DocumentResult(entry.getKey(),string(p.get("title")),string(p.get("documentType")),p.get("teamId")==null?"PLATFORM":"TEAM",best.hit().vectorScore(),best.rerankScore(),snippets,linkedSkills(entry.getKey(),teamIds,platformOnly)));}
+            List<KnowledgeSearchResult.DocumentResult> results=new ArrayList<>();for(var entry:grouped.entrySet()){if(results.size()>=Math.min(limit,properties.getSearch().getDocumentTopK()))break;List<ScoredHit> documentHits=entry.getValue();ScoredHit best=documentHits.get(0);Map<String,Object> p=best.hit().payload();List<KnowledgeSearchResult.Snippet> snippets=documentHits.stream().limit(properties.getSearch().getSnippetsPerDocument()).map(h->new KnowledgeSearchResult.Snippet(string(h.hit().payload().get("heading")),string(h.hit().payload().get("content")),h.hit().vectorScore(),h.rerankScore())).toList();results.add(new KnowledgeSearchResult.DocumentResult(entry.getKey(),string(p.get("title")),Boolean.TRUE.equals(p.get("platformVisible"))?"PLATFORM":"TEAM",best.hit().vectorScore(),best.rerankScore(),snippets,linkedSkills(entry.getKey(),teamIds,platformOnly)));}
             metrics.counter("knowledge.search.total").increment();metrics.summary("knowledge.search.result.count").record(results.size());log.info("event=knowledge.search queryHash={} visibleTeamCount={} chunkHits={} documentHits={} linkedSkillCount={} rerankApplied={} totalMs={}",hash(normalized),teamIds.size(),hits.size(),results.size(),results.stream().mapToInt(r->r.linkedSkills().size()).sum(),rerankApplied,elapsed(started));return new KnowledgeSearchResult(normalized,false,rerankApplied,results,grouped.size()>results.size());
         }catch(RuntimeException failure){metrics.counter("knowledge.search.failure").increment();log.warn("[Yanshu][WIKI_INDEX] event=knowledge.search.unavailable queryHash={} errorType={} totalMs={}",hash(normalized),failure.getClass().getSimpleName(),elapsed(started),failure);if(ops!=null)ops.recordFailure(new OpsEventService.Event(null,"knowledge.search.request","WIKI_INDEX","search","DEGRADED",knowledgeScope,"WIKI_SEARCH_UNAVAILABLE",null,null,null,null,elapsed(started),null));return unavailable(normalized);}finally{metrics.timer("knowledge.search.duration").record(java.time.Duration.ofNanos(System.nanoTime()-started));}
     }
@@ -45,20 +48,32 @@ public class KnowledgeSearchService {
             try{
                 Map<String,Object> payload=hit.payload();WikiDocumentEntity document=current.get(number(payload.get("documentId")).longValue());
                 if(document==null||!"ACTIVE".equals(document.getStatus())||document.getCurrentRevision()==null)continue;
-                if(platformOnly&&!document.isPlatformVisible())continue;
-                if(!platformOnly&&!document.isPlatformVisible()&&(document.getTeamId()==null||!teamIds.contains(document.getTeamId())))continue;
-                if(document.getCurrentRevision().getRevisionNo()!=number(payload.get("revisionNo")).intValue())continue;
-                if(!Objects.equals(document.getCurrentRevision().getContentSha256(),payload.get("contentSha256")))continue;
+                boolean platform=Boolean.TRUE.equals(payload.get("platformVisible"));
+                if(payload.get("audience")!=null&&!Objects.equals(platform?"PLATFORM":"TEAM",payload.get("audience")))continue;
+                if(platform){
+                    if(!document.isPlatformVisible()||promotionStore==null)continue;
+                    WikiPromotionStore.PlatformSnapshot approved=promotionStore.platform(document.getId());
+                    if(approved==null||approved.revisionNo()!=number(payload.get("revisionNo")).intValue()||!Objects.equals(approved.title(),payload.get("title"))||!Objects.equals(hashContent(approved.markdownContent()),payload.get("contentSha256")))continue;
+                }else{
+                    if(platformOnly||document.getTeamId()==null||!teamIds.contains(document.getTeamId()))continue;
+                    if(document.getCurrentRevision().getRevisionNo()!=number(payload.get("revisionNo")).intValue())continue;
+                    if(!Objects.equals(document.getCurrentRevision().getContentSha256(),payload.get("contentSha256")))continue;
+                }
                 fresh.add(hit);
             }catch(RuntimeException ignored){/* malformed or stale vector payload */}
         }
         if(fresh.size()!=hits.size()){metrics.counter("knowledge.search.stale_hit").increment(hits.size()-fresh.size());log.info("event=knowledge.search.stale_hits dropped={}",hits.size()-fresh.size());}
         return fresh;
     }
-    private List<KnowledgeSearchResult.LinkedSkill> linkedSkills(long documentId,List<Long> visibleTeamIds,boolean platformOnly){return links.findByDocumentIdOrderBySortOrderAsc(documentId).stream().map(link->link.getSkill()).filter(skill->skill.getTeamId()==null||(!platformOnly&&visibleTeamIds.contains(skill.getTeamId()))).filter(skill->skill.getStatus()==SkillStatus.ACTIVE&&skill.getLatestPublishedVersion()!=null&&Set.of(LifecycleStatus.PUBLISHED,LifecycleStatus.DEPRECATED).contains(skill.getLatestPublishedVersion().getLifecycleStatus())).map(skill->new KnowledgeSearchResult.LinkedSkill(skill.getSkillKey(),skill.getDisplayName(),skill.getDescription(),skill.getDevelopmentStage()==null?null:skill.getDevelopmentStage().name(),skill.getLatestPublishedVersion().getVersion(),"/skills/"+skill.getSkillKey())).toList();}
+    private List<KnowledgeSearchResult.LinkedSkill> linkedSkills(long documentId,List<Long> visibleTeamIds,boolean platformOnly){
+        WikiDocumentEntity document=documents.findById(documentId).orElse(null);
+        boolean teamAudience=!platformOnly&&document!=null&&document.getTeamId()!=null&&visibleTeamIds.contains(document.getTeamId());
+        if(!teamAudience&&promotionStore!=null)return promotionStore.platformSkills(documentId).stream().map(link->new KnowledgeSearchResult.LinkedSkill(link.skillKey(),link.displayName(),"",null,"","/skills/"+link.skillKey())).toList();
+        return links.findByDocumentIdOrderBySortOrderAsc(documentId).stream().map(link->link.getSkill()).filter(skill->"PLATFORM".equals(skill.getScopeType())||visibleTeamIds.contains(skill.getTeamId())).filter(skill->skill.getStatus()==SkillStatus.ACTIVE&&skill.getLatestPublishedVersion()!=null&&Set.of(LifecycleStatus.PUBLISHED,LifecycleStatus.DEPRECATED).contains(skill.getLatestPublishedVersion().getLifecycleStatus())).map(skill->new KnowledgeSearchResult.LinkedSkill(skill.getSkillKey(),skill.getDisplayName(),skill.getDescription(),skill.getDevelopmentStage()==null?null:skill.getDevelopmentStage().name(),skill.getLatestPublishedVersion().getVersion(),"/skills/"+skill.getSkillKey())).toList();}
     private String rerankText(VectorSearchHit hit){Map<String,Object> p=hit.payload();return string(p.get("title"))+"\n"+String.join(" > ",strings(p.get("headingPath")))+"\n\n"+string(p.get("content"));}
     private KnowledgeSearchResult unavailable(String query){return new KnowledgeSearchResult(query,true,false,List.of(),false);}
     private String string(Object value){return value==null?"":String.valueOf(value);}private Number number(Object value){return value instanceof Number n?n:Long.parseLong(String.valueOf(value));}private List<String> strings(Object value){return value instanceof List<?> list?list.stream().map(String::valueOf).toList():List.of();}
     private String hash(String value){try{return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))).substring(0,16);}catch(Exception ignored){return "unavailable";}}
+    private String hashContent(String value){try{return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));}catch(Exception ignored){return "unavailable";}}
     private long elapsed(long started){return(System.nanoTime()-started)/1_000_000;}private record ScoredHit(VectorSearchHit hit,Double rerankScore,double rank){}
 }

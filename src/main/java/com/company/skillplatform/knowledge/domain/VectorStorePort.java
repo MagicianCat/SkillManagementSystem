@@ -9,6 +9,7 @@ public interface VectorStorePort {
     void deleteDocument(long documentId);
     List<VectorSearchHit> search(float[] queryVector, KnowledgeFilter filter, int limit);
     IndexedDocumentState documentState(long documentId);
+    default IndexedDocumentState documentState(long documentId, String audience) { return documentState(documentId); }
     Set<Long> indexedDocumentIds();
 
     record KnowledgeFilter(List<Long> visibleTeamIds, boolean platformOnly) {}

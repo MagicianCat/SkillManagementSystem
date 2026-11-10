@@ -29,6 +29,143 @@ import com.company.skillplatform.wiki.domain.WikiReviewStatus;
 class WikiDocumentServiceTest {
     @AfterEach void clearAuthentication() { SecurityContextHolder.clearContext(); }
 
+    @Test void ordinaryActiveMemberCreatesUnlinkedTeamWiki() {
+        var documents=mock(WikiDocumentRepository.class);var revisions=mock(WikiDocumentRevisionRepository.class);
+        var links=mock(WikiDocumentSkillRepository.class);var users=mock(IamUserRepository.class);
+        var members=mock(OrgTeamMemberRepository.class);var actor=mock(IamUserEntity.class);
+        var team=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity.class);
+        var membership=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamMemberEntity.class);
+        when(team.getId()).thenReturn(7L);when(team.getStatus()).thenReturn("ACTIVE");
+        when(membership.getTeam()).thenReturn(team);when(membership.getStatus()).thenReturn("ACTIVE");
+        when(members.findByUserId(9L)).thenReturn(List.of(membership));
+        when(users.findById(9L)).thenReturn(Optional.of(actor));
+        when(documents.save(any())).thenAnswer(invocation->{var document=(WikiDocumentEntity)invocation.getArgument(0);ReflectionTestUtils.setField(document,"id",91L);return document;});
+        when(revisions.save(any())).thenAnswer(invocation->invocation.getArgument(0));
+        when(links.findByDocumentIdOrderBySortOrderAsc(91L)).thenReturn(List.of());
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(
+                new SimpleGrantedAuthority("wiki:create"),new SimpleGrantedAuthority("wiki:edit"))));
+        var service=new WikiDocumentService(documents,revisions,links,mock(SkillRepository.class),mock(SkillOwnerRepository.class),
+                mock(OrgTeamRepository.class),members,mock(ScopedRoleAssignmentRepository.class),users,mock(AuditService.class),mock(ApplicationEventPublisher.class));
+
+        var result=service.create(new WikiDocumentService.CreateCommand("团队知识",7L,List.of(),"正文"),9L,"member-create");
+
+        assertThat(result.id()).isEqualTo(91L);
+        assertThat(result.canEdit()).isTrue();
+        assertThat(result.skills()).isEmpty();
+    }
+
+    @Test void memberOfTwoTeamsCannotLinkOtherTeamsPrivateSkill() {
+        var documents=mock(WikiDocumentRepository.class);var users=mock(IamUserRepository.class);
+        var members=mock(OrgTeamMemberRepository.class);var skills=mock(SkillRepository.class);
+        var actor=mock(IamUserEntity.class);when(users.findById(9L)).thenReturn(Optional.of(actor));
+        var teamA=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity.class);
+        var teamB=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity.class);
+        when(teamA.getId()).thenReturn(7L);when(teamA.getStatus()).thenReturn("ACTIVE");
+        when(teamB.getId()).thenReturn(8L);when(teamB.getStatus()).thenReturn("ACTIVE");
+        var memberA=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamMemberEntity.class);
+        var memberB=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamMemberEntity.class);
+        when(memberA.getTeam()).thenReturn(teamA);when(memberA.getStatus()).thenReturn("ACTIVE");
+        when(memberB.getTeam()).thenReturn(teamB);when(memberB.getStatus()).thenReturn("ACTIVE");
+        when(members.findByUserId(9L)).thenReturn(List.of(memberA,memberB));
+        var otherTeamSkill=mock(SkillEntity.class);
+        when(otherTeamSkill.getId()).thenReturn(4L);
+        when(otherTeamSkill.getStatus()).thenReturn(com.company.skillplatform.skill.domain.SkillStatus.ACTIVE);
+        when(otherTeamSkill.getScopeType()).thenReturn("TEAM");when(otherTeamSkill.getTeamId()).thenReturn(8L);
+        when(skills.findAllById(List.of(4L))).thenReturn(List.of(otherTeamSkill));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(
+                new SimpleGrantedAuthority("wiki:create"),new SimpleGrantedAuthority("wiki:edit"))));
+        var service=new WikiDocumentService(documents,mock(WikiDocumentRevisionRepository.class),mock(WikiDocumentSkillRepository.class),skills,
+                mock(SkillOwnerRepository.class),mock(OrgTeamRepository.class),members,mock(ScopedRoleAssignmentRepository.class),
+                users,mock(AuditService.class),mock(ApplicationEventPublisher.class));
+
+        assertThatThrownBy(()->service.create(new WikiDocumentService.CreateCommand("知识",7L,List.of(4L),"正文"),9L,"cross-team"))
+                .isInstanceOfSatisfying(BusinessException.class,error->assertThat(error.getCode()).isEqualTo("WIKI_CROSS_TEAM_SKILL"));
+        verify(documents,never()).save(any());
+    }
+
+    @Test void publishedTeamWikiCannotBeEditedBeforePlatformSnapshotExists() {
+        var documents=mock(WikiDocumentRepository.class);
+        var actor=mock(IamUserEntity.class);
+        var document=new WikiDocumentEntity("已公开",7L,true,actor);
+        ReflectionTestUtils.setField(document,"id",99L);
+        when(documents.findById(99L)).thenReturn(Optional.of(document));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(new SimpleGrantedAuthority("admin:identity"))));
+        var service=new WikiDocumentService(documents,mock(WikiDocumentRevisionRepository.class),mock(WikiDocumentSkillRepository.class),
+                mock(SkillRepository.class),mock(SkillOwnerRepository.class),mock(OrgTeamRepository.class),
+                mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),mock(IamUserRepository.class),
+                mock(AuditService.class),mock(ApplicationEventPublisher.class));
+
+        assertThatThrownBy(()->service.update(99L,new WikiDocumentService.UpdateCommand("新标题","新正文",0,List.of()),9L,"published-edit"))
+                .isInstanceOfSatisfying(BusinessException.class,error->assertThat(error.getCode()).isEqualTo("WIKI_PLATFORM_SNAPSHOT_REQUIRED"));
+    }
+
+    @Test void teamEditOfPublishedWikiDoesNotChangeOutsidersApprovedView() {
+        var documents=mock(WikiDocumentRepository.class);var revisions=mock(WikiDocumentRevisionRepository.class);
+        var links=mock(WikiDocumentSkillRepository.class);var members=mock(OrgTeamMemberRepository.class);
+        var users=mock(IamUserRepository.class);var actor=mock(IamUserEntity.class);
+        var document=new WikiDocumentEntity("批准标题",7L,true,actor);
+        ReflectionTestUtils.setField(document,"id",101L);
+        var oldRevision=new WikiDocumentRevisionEntity(document,1,"批准正文","sha-old",actor);
+        document.setCurrentRevision(oldRevision,actor);
+        when(documents.findById(101L)).thenReturn(Optional.of(document));
+        when(documents.saveAndFlush(any())).thenAnswer(invocation->invocation.getArgument(0));
+        when(revisions.save(any())).thenAnswer(invocation->invocation.getArgument(0));
+        when(links.findByDocumentIdOrderBySortOrderAsc(101L)).thenReturn(List.of());
+        when(users.findById(9L)).thenReturn(Optional.of(actor));
+        var team=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity.class);
+        var membership=mock(com.company.skillplatform.user.infrastructure.entity.OrgTeamMemberEntity.class);
+        when(team.getId()).thenReturn(7L);when(team.getStatus()).thenReturn("ACTIVE");
+        when(membership.getTeam()).thenReturn(team);when(membership.getStatus()).thenReturn("ACTIVE");
+        when(members.findByUserId(9L)).thenReturn(List.of(membership));
+        when(members.findByUserId(10L)).thenReturn(List.of());
+        var promotion=mock(WikiPromotionStore.class);
+        when(promotion.platform(101L)).thenReturn(new WikiPromotionStore.PlatformSnapshot(101L,44L,"批准标题",null,1,"批准正文"));
+        when(promotion.platformSkills(101L)).thenReturn(List.of());
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(new SimpleGrantedAuthority("wiki:edit"))));
+        var service=new WikiDocumentService(documents,revisions,links,mock(SkillRepository.class),mock(SkillOwnerRepository.class),
+                mock(OrgTeamRepository.class),members,mock(ScopedRoleAssignmentRepository.class),users,mock(AuditService.class),mock(ApplicationEventPublisher.class));
+        service.setPromotionStore(promotion);
+
+        var teamView=service.update(101L,new WikiDocumentService.UpdateCommand("团队新标题","团队新正文",0,List.of()),9L,"edit");
+        assertThat(teamView.title()).isEqualTo("团队新标题");
+        assertThat(teamView.markdownContent()).isEqualTo("团队新正文");
+
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(10L,null,List.of(new SimpleGrantedAuthority("skill:browse"))));
+        var publicView=service.get(101L,10L);
+        assertThat(publicView.title()).isEqualTo("批准标题");
+        assertThat(publicView.markdownContent()).isEqualTo("批准正文");
+        assertThat(publicView.canEdit()).isFalse();
+    }
+
+    @Test void archivingPendingWikiReleasesPromotionLocks() {
+        var documents=mock(WikiDocumentRepository.class);
+        var reviews=mock(WikiDocumentReviewRepository.class);
+        var promotion=mock(WikiPromotionStore.class);
+        var users=mock(IamUserRepository.class);
+        var actor=mock(IamUserEntity.class);
+        var document=new WikiDocumentEntity("待审知识",7L,false,actor);
+        ReflectionTestUtils.setField(document,"id",120L);
+        var revision=new WikiDocumentRevisionEntity(document,1,"正文","sha",actor);
+        document.setCurrentRevision(revision,actor);
+        var review=new WikiDocumentReviewEntity(document,revision,1,actor,"提交",java.time.Instant.EPOCH);
+        ReflectionTestUtils.setField(review,"id",30L);
+        when(documents.findById(120L)).thenReturn(Optional.of(document));
+        when(documents.findByParentIdAndStatusOrderByIdAsc(120L,"ACTIVE")).thenReturn(List.of());
+        when(reviews.findByDocumentIdAndStatus(120L,WikiReviewStatus.PENDING)).thenReturn(Optional.of(review));
+        when(users.findById(9L)).thenReturn(Optional.of(actor));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(new SimpleGrantedAuthority("admin:identity"))));
+        var service=new WikiDocumentService(documents,mock(WikiDocumentRevisionRepository.class),mock(WikiDocumentSkillRepository.class),
+                mock(SkillRepository.class),mock(SkillOwnerRepository.class),mock(OrgTeamRepository.class),
+                mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),users,
+                mock(AuditService.class),mock(ApplicationEventPublisher.class));
+        service.setReviewRepository(reviews);service.setPromotionStore(promotion);
+
+        service.archive(120L,9L,"archive-test");
+
+        assertThat(review.getStatus()).isEqualTo(WikiReviewStatus.CANCELLED);
+        verify(promotion).release(30L);
+    }
+
     @Test void visibleDescendantsFiltersPrivateBranchesAndReportsTruncation() {
         var documents=mock(WikiDocumentRepository.class);
         var root=wikiNode(10L,"目录",true, null);
@@ -78,7 +215,7 @@ class WikiDocumentServiceTest {
         var document=mock(WikiDocumentEntity.class);
         when(document.getId()).thenReturn(id);when(document.getTitle()).thenReturn(title);
         when(document.getStatus()).thenReturn("ACTIVE");when(document.isPlatformVisible()).thenReturn(publicVisible);
-        when(document.getTeamId()).thenReturn(teamId);when(document.getDocumentType()).thenReturn("SKILL_GUIDE");
+        when(document.getTeamId()).thenReturn(teamId);
         return document;
     }
 
@@ -88,7 +225,7 @@ class WikiDocumentServiceTest {
         var users=mock(IamUserRepository.class);var events=mock(ApplicationEventPublisher.class);
         var actor=mock(IamUserEntity.class);
         var oldSkill=skill(1L,"old-skill");var newSkill=skill(2L,"new-skill");
-        var document=new WikiDocumentEntity("旧标题","SKILL_GUIDE",7L,false,actor);
+        var document=new WikiDocumentEntity("旧标题",7L,false,actor);
         ReflectionTestUtils.setField(document,"id",12L);
         document.setCurrentRevision(new WikiDocumentRevisionEntity(document,1,"旧内容","old-sha",actor),actor);
         var oldLink=new WikiDocumentSkillEntity(document,oldSkill,"RELATED",0);
@@ -126,7 +263,8 @@ class WikiDocumentServiceTest {
                 mock(OrgTeamRepository.class),mock(OrgTeamMemberRepository.class),roles,users,mock(AuditService.class),events);
         service.setReviewRepository(reviewRepository);
 
-        var result=service.create(new WikiDocumentService.CreateCommand("独立知识文档","SKILL_GUIDE",7L,List.of(),"# 团队接口规范"),9L,"request-no-skill");
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(new SimpleGrantedAuthority("admin:identity"))));
+        var result=service.create(new WikiDocumentService.CreateCommand("独立知识文档",7L,List.of(),"# 团队接口规范"),9L,"request-no-skill");
 
         assertThat(result.id()).isEqualTo(81L);
         assertThat(result.skills()).isEmpty();
@@ -136,20 +274,21 @@ class WikiDocumentServiceTest {
         verifyNoInteractions(skills);
     }
 
-    @Test void rejectsREADMEWithoutExactlyOneSkill() {
+    @Test void rejectsMemberCreatingSystemWiki() {
         var users=mock(IamUserRepository.class);var actor=mock(IamUserEntity.class);when(users.findById(9L)).thenReturn(Optional.of(actor));
         var service=new WikiDocumentService(mock(WikiDocumentRepository.class),mock(WikiDocumentRevisionRepository.class),
                 mock(WikiDocumentSkillRepository.class),mock(SkillRepository.class),mock(SkillOwnerRepository.class),
                 mock(OrgTeamRepository.class),mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),
                 users,mock(AuditService.class),mock(ApplicationEventPublisher.class));
-        assertThatThrownBy(()->service.create(new WikiDocumentService.CreateCommand("README","SKILL_README",null,List.of(),"content"),9L,"request-readme"))
-                .isInstanceOfSatisfying(BusinessException.class,error->assertThat(error.getCode()).isEqualTo("WIKI_README_SINGLE_SKILL_REQUIRED"));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(new SimpleGrantedAuthority("wiki:create"))));
+        assertThatThrownBy(()->service.create(new WikiDocumentService.CreateCommand("Wiki",null,List.of(),"content"),9L,"request-wiki"))
+                .isInstanceOfSatisfying(BusinessException.class,error->assertThat(error.getCode()).isEqualTo("WIKI_TEAM_MEMBER_REQUIRED"));
     }
 
     @Test void clearingTeamGuideSkillsRemovesLinksAndReindexes() {
         var documents=mock(WikiDocumentRepository.class);var revisions=mock(WikiDocumentRevisionRepository.class);
         var links=mock(WikiDocumentSkillRepository.class);var events=mock(ApplicationEventPublisher.class);
-        var actor=mock(IamUserEntity.class);var document=new WikiDocumentEntity("知识文档","SKILL_GUIDE",7L,false,actor);
+        var actor=mock(IamUserEntity.class);var document=new WikiDocumentEntity("知识文档",7L,false,actor);
         ReflectionTestUtils.setField(document,"id",82L);document.setCurrentRevision(new WikiDocumentRevisionEntity(document,1,"旧内容","sha",actor),actor);
         var link=new WikiDocumentSkillEntity(document,skill(1L,"linked-skill"),"RELATED",0);
         when(documents.findById(82L)).thenReturn(Optional.of(document));when(links.findByDocumentIdOrderBySortOrderAsc(82L)).thenReturn(List.of(link),List.of());
@@ -171,6 +310,7 @@ class WikiDocumentServiceTest {
         var skill=mock(SkillEntity.class);
         when(skill.getId()).thenReturn(id);when(skill.getSkillKey()).thenReturn(key);when(skill.getDisplayName()).thenReturn(key);
         when(skill.getScopeType()).thenReturn("TEAM");when(skill.getTeamId()).thenReturn(7L);
+        when(skill.getStatus()).thenReturn(com.company.skillplatform.skill.domain.SkillStatus.ACTIVE);
         return skill;
     }
 }

@@ -46,6 +46,6 @@ class WikiDocumentControllerDownloadTest {
     }
 
     private static WikiDocumentService.DocumentView document(long id, String title, String content) {
-        return new WikiDocumentService.DocumentView(id, title, "SKILL_GUIDE", 1L, false, content, 1, 1, List.of(), false, true, null, null, null, null, false);
+        return new WikiDocumentService.DocumentView(id, title, 1L, false, content, 1, 1, List.of(), false, true, null, null, null, null, false);
     }
 }

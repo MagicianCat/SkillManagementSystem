@@ -14,8 +14,6 @@ public interface IamUserRoleRepository extends JpaRepository<IamUserRoleEntity, 
             "SELECT u.id, r.id, u.id, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6) " +
             "FROM iam_user u JOIN iam_role r ON r.role_key = 'CONSUMER' AND r.status = 'ACTIVE' " +
             "WHERE u.identity_provider = 'FEISHU' AND u.status = 'ACTIVE' " +
-            "AND NOT EXISTS (SELECT 1 FROM iam_user_role existing JOIN iam_role er ON er.id = existing.role_id " +
-            "JOIN iam_role_permission rp ON rp.role_id = er.id WHERE existing.user_id = u.id AND er.status = 'ACTIVE') " +
             "AND NOT EXISTS (SELECT 1 FROM iam_user_role consumer WHERE consumer.user_id = u.id AND consumer.role_id = r.id)", nativeQuery = true)
     int grantConsumerToUnassignedFeishuUsers();
     @Modifying

@@ -44,7 +44,6 @@ public class AgentOperationsDashboardService {
         var components = new ArrayList<Map<String,Object>>();
         components.add(probe("agentRuntime", "Agent Runtime", runtimeUrl + "/healthz"));
         components.add(probe("gateway", "Runtime Gateway", gatewayUrl + "/alive"));
-        components.add(probe("codeGraphWorker", "Code Graph Worker", trim(worker.baseUrl()) + "/internal/code-graph/health"));
         components.add(probe("qdrant", "Qdrant", trim(knowledge.getQdrant().getBaseUrl()) + "/collections"));
         components.add(embeddingStatus(window));
         components.add(component("backend", "Skill Platform Backend", "healthy", 0, null));
@@ -65,8 +64,7 @@ public class AgentOperationsDashboardService {
         long runningBuilds = workerMetric(components, "builds", "running");
         long runningQueries = workerMetric(components, "queries", "running");
         boolean monitoringReadFailure=false;
-        Map<String,Long> binding;
-        try{binding=grouped("select semantic_index_status as k, count(*) as v from workflow_run_code_graph_binding group by semantic_index_status");}catch(Exception ex){binding=new LinkedHashMap<>();monitoringReadFailure=true;}
+        Map<String,Long> binding=Map.of();
         var qdrant = qdrantState(components);
         var resources = resources();
         Map<String,Object> latencies;
@@ -118,7 +116,6 @@ public class AgentOperationsDashboardService {
         }).orElse(0L);
     }
     private long runtimeMetric(List<Map<String,Object>> components,String key){return components.stream().filter(c->"agentRuntime".equals(c.get("key"))).findFirst().map(c->{Object details=c.get("details");if(!(details instanceof Map<?,?> map))return 0L;Object value=map.get(key);return value instanceof Number number?number.longValue():0L;}).orElse(0L);}
-    private Map<String,Long> grouped(String sql) { return jdbc.query(sql, rs -> { var result = new LinkedHashMap<String,Long>(); while (rs.next()) result.put(rs.getString("k"), rs.getLong("v")); return result; }); }
     private Map<String,Object> qdrantState(List<Map<String,Object>> components) { var result = new LinkedHashMap<String,Object>(); result.put("collection", knowledge.getQdrant().getCollection()); result.put("reachable", components.stream().anyMatch(c -> "qdrant".equals(c.get("key")) && "healthy".equals(c.get("status")))); return result; }
     private Map<String,Object> resources() { var memory = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage(); double cpu = -1; try { cpu = ((com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean()).getCpuLoad() * 100; } catch (Exception ignored) {} long diskUsed = 0, diskTotal = 0; try { FileStore fs = Files.getFileStore(Path.of(".")); diskTotal = fs.getTotalSpace(); diskUsed = diskTotal - fs.getUsableSpace(); } catch (Exception ignored) {} return Map.of("cpuPercent", round(cpu), "memoryUsedBytes", memory.getUsed(), "memoryMaxBytes", memory.getMax(), "diskUsedBytes", diskUsed, "diskTotalBytes", diskTotal); }
     private Map<String,Object> latencyMetrics() { var values = new ArrayList<Long>(jdbc.query("select duration_ms from agent_mcp_audit where duration_ms is not null and time_created >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)", (rs, n) -> rs.getLong(1))); values.sort(Long::compareTo); return Map.of("p95Ms", percentile(values, .95), "p99Ms", percentile(values, .99), "window", "15m","dataStatus",values.isEmpty()?"NO_DATA":"OK"); }

@@ -11,7 +11,7 @@ import com.company.skillplatform.common.infrastructure.entity.BaseJpaEntity;impo
  public void reject(IamUserEntity actor,String comment,Instant now){status=ReviewStatus.REJECTED;reviewer=actor;reviewComment=comment;reviewedAt=now;}
  public void cancel(IamUserEntity actor,String comment,Instant now){status=ReviewStatus.CANCELLED;reviewer=actor;reviewComment=comment;reviewedAt=now;}
  public void assignScope(String scope,SkillReviewEntity parent){reviewScope=scope;parentReview=parent;}
- @PrePersist void initializeScope(){if("PLATFORM".equals(reviewScope)&&version!=null&&"TEAM".equals(version.getSkill().getScopeType()))reviewScope="TEAM";}
+ @PrePersist void initializeScope(){if(reviewScope==null||reviewScope.isBlank())throw new IllegalStateException("Review scope is required");}
  public SkillVersionEntity getVersion(){return version;}public int getReviewNo(){return reviewNo;}public ReviewStatus getStatus(){return status;}public String getSubmitComment(){return submitComment;}public String getReviewComment(){return reviewComment;}
  public IamUserEntity getSubmitter(){return submitter;}public IamUserEntity getReviewer(){return reviewer;}public Instant getSubmittedAt(){return submittedAt;}public Instant getReviewedAt(){return reviewedAt;}
  public String getReviewScope(){return reviewScope;}public SkillReviewEntity getParentReview(){return parentReview;}

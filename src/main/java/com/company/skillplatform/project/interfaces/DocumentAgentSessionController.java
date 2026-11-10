@@ -88,6 +88,13 @@ public class DocumentAgentSessionController {
         return service.resolveFeishu(actor(auth), request.docId(), request.docType());
     }
 
+    @GetMapping("/feishu-documents/{docId}/content")
+    public Object readFeishu(@PathVariable String docId, @RequestParam String docType,
+                             @RequestParam(defaultValue = "0") int offset,
+                             @RequestParam(defaultValue = "32768") int maxBytes, Authentication auth) {
+        return service.readFeishu(actor(auth), docId, docType, offset, maxBytes);
+    }
+
     private Long actor(Authentication auth) { return (Long) auth.getPrincipal(); }
     private String key(String supplied, HttpServletRequest http) { return supplied == null || supplied.isBlank() ? http.getRequestId() : supplied; }
     public record CreateSession(@NotBlank String projectKey, String profileKey, String stageKey, String mode, Long documentId, @Size(max = 255) String title) {}

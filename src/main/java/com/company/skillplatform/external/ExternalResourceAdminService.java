@@ -185,7 +185,7 @@ public class ExternalResourceAdminService {
                 Long createdId=transactions.execute(status -> {
                     Readiness latest=readiness(request.externalRoleId());
                     if (!latest.ready()) throw bad("ROLE_SKILLS_NOT_READY","Skill 导入状态已变化，请刷新");
-                    var created=wiki.create(new WikiDocumentService.CreateCommand(path.substring(path.lastIndexOf('/')+1).replaceFirst("(?i)\\.md$",""),request.documentType()==null?"SKILL_GUIDE":request.documentType(),request.teamId(),latest.skillIds(),new String(data,StandardCharsets.UTF_8)),actorId,requestId);
+                    var created=wiki.create(new WikiDocumentService.CreateCommand(path.substring(path.lastIndexOf('/')+1).replaceFirst("(?i)\\.md$",""),request.teamId(),latest.skillIds(),new String(data,StandardCharsets.UTF_8)),actorId,requestId);
                     db.update("INSERT INTO external_import_record(resource_version_id,external_role_id,entry_path,target_type,target_id,action,result,operator_id) VALUES(?,?,?,'WIKI',?,'IMPORT','SUCCESS',?)",versionId,request.externalRoleId(),path,created.id(),actorId);
                     return created.id();
                 });
@@ -251,7 +251,7 @@ public class ExternalResourceAdminService {
     public record SkillImportResult(String skillKey,Long skillId,Long draftVersionId) {}
     public record DocumentEntry(String path,long sizeBytes) {}
     public record Readiness(boolean ready,List<Map<String,Object>> pendingSkills,List<Long> skillIds) {}
-    public record DocumentImportRequest(Long externalRoleId,List<String> paths,Long teamId,String documentType,List<Long> skillIds) {}
+    public record DocumentImportRequest(Long externalRoleId,List<String> paths,Long teamId,List<Long> skillIds) {}
     public record DocumentImportResult(String path,String status,Long wikiDocumentId,String errorCode,List<Long> linkedSkillIds) {}
     private record ByteMultipart(String filename,byte[] bytes) implements MultipartFile {
         public String getName(){return "file";} public String getOriginalFilename(){return filename;}

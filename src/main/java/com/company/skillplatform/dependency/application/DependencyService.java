@@ -32,7 +32,7 @@ public class DependencyService {
         this.dependencies = dependencies; this.versions = versions; this.skills = skills; this.skillService = skillService; this.semver = semver;
     }
     @PreAuthorize("hasAuthority('skill:browse')") @Transactional(readOnly = true)
-    public List<DependencyView> list(Long versionId) { skillService.version(versionId); return dependencies.findByVersionIdOrderBySortOrder(versionId).stream().map(this::view).toList(); }
+    public List<DependencyView> list(Long versionId) { skillService.assertCurrentUserCanReadVersion(skillService.version(versionId)); return dependencies.findByVersionIdOrderBySortOrder(versionId).stream().map(this::view).toList(); }
     @PreAuthorize("hasAuthority('skill:edit')") @Transactional
     public List<DependencyView> replace(Long versionId, int versionNo, List<DependencyCommand> commands, Long actorId) {
         SkillVersionEntity version = skillService.version(versionId); skillService.assertOwner(version, actorId);
@@ -57,7 +57,7 @@ public class DependencyService {
     }
     @PreAuthorize("hasAnyAuthority('skill:browse', 'skill:download', 'skill:edit')") @Transactional(readOnly = true)
     public ResolveView resolve(Long versionId) {
-        SkillVersionEntity root = skillService.version(versionId); LinkedHashMap<String, ResolvedItem> resolved = new LinkedHashMap<>();
+        SkillVersionEntity root = skillService.version(versionId); skillService.assertCurrentUserCanReadVersion(root); LinkedHashMap<String, ResolvedItem> resolved = new LinkedHashMap<>();
         LinkedHashMap<String, List<String>> constraints = new LinkedHashMap<>(); LinkedHashSet<String> conflicts = new LinkedHashSet<>();
         try { resolve(root, 0, root.getSkill().getSkillKey(), resolved, constraints, conflicts, new LinkedHashSet<>()); }
         catch (DependencyCycleException cycle) {
@@ -79,14 +79,21 @@ public class DependencyService {
         for (SkillVersionDependencyEntity dependency : dependencies.findByVersionIdOrderBySortOrder(version.getId())) {
             String key = dependency.getDependencySkill().getSkillKey(); List<String> all = constraints.computeIfAbsent(key, ignored -> new ArrayList<>()); all.add(dependency.getVersionConstraint());
             Optional<SkillVersionEntity> selected = versions.findFirstBySkillIdAndLifecycleStatusInOrderByPublishedAtDesc(dependency.getDependencySkill().getId(), RESOLVABLE).filter(candidate -> all.stream().allMatch(c -> matches(candidate.getVersion(), c)));
+            if (selected.isPresent()) try { skillService.assertCurrentUserCanReadVersion(selected.get()); }
+            catch (BusinessException denied) {
+                SkillVersionEntity approved = dependency.getDependencySkill().getLatestPlatformApprovedVersion();
+                selected = approved != null && RESOLVABLE.contains(approved.getLifecycleStatus()) && all.stream().allMatch(c -> matches(approved.getVersion(), c))
+                        ? Optional.of(approved) : Optional.empty();
+            }
             if (selected.isEmpty()) { conflicts.add("VERSION_CONFLICT: " + key + " constraints=" + all); continue; }
+            skillService.assertCurrentUserCanReadVersion(selected.get());
             resolved.putIfAbsent(key, new ResolvedItem(key, selected.get().getVersion(), depth + 1, path + " -> " + key));
             resolve(selected.get(), depth + 1, path + " -> " + key, resolved, constraints, conflicts, visiting);
         }
         visiting.remove(version.getSkill().getId());
     }
     @PreAuthorize("hasAuthority('skill:browse')") @Transactional(readOnly = true)
-    public List<DependentView> dependents(Long versionId) { SkillVersionEntity version = skillService.version(versionId); return dependencies.findByDependencySkillId(version.getSkill().getId()).stream().map(d -> new DependentView(d.getVersion().getSkill().getSkillKey(), d.getVersion().getId(), d.getVersionConstraint())).toList(); }
+    public List<DependentView> dependents(Long versionId) { SkillVersionEntity version = skillService.version(versionId); skillService.assertCurrentUserCanReadVersion(version); return dependencies.findByDependencySkillId(version.getSkill().getId()).stream().filter(d -> { try { skillService.assertCurrentUserCanReadVersion(d.getVersion()); return true; } catch (BusinessException denied) { return false; } }).map(d -> new DependentView(d.getVersion().getSkill().getSkillKey(), d.getVersion().getId(), d.getVersionConstraint())).toList(); }
     private boolean reaches(Long fromSkill, Long target, Set<Long> seen) { if (fromSkill.equals(target)) return true; if (!seen.add(fromSkill)) return false; Optional<SkillVersionEntity> published = versions.findFirstBySkillIdAndLifecycleStatusInOrderByPublishedAtDesc(fromSkill, RESOLVABLE); return published.isPresent() && dependencies.findByVersionIdOrderBySortOrder(published.get().getId()).stream().anyMatch(d -> reaches(d.getDependencySkill().getId(), target, seen)); }
     private boolean matches(String version, String constraint) {
         if (constraint == null || constraint.isBlank() || constraint.equals("*")) return true;

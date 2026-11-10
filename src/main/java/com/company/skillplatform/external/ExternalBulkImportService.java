@@ -65,8 +65,8 @@ public class ExternalBulkImportService {
         if (selectedIds.size()!=selections.size()) throw bad("EXTERNAL_WIKI_SELECTION_INVALID", "ZIP 选择包含重复资源");
         if (parentWikiId != null) {
             var parent = wiki.get(parentWikiId, actorId);
-            boolean scopeMatches=teamId==null?parent.platformVisible():java.util.Objects.equals(teamId,parent.teamId());
-            if (!scopeMatches || !"SKILL_GUIDE".equals(parent.documentType()))
+            boolean scopeMatches=java.util.Objects.equals(teamId,parent.teamId());
+            if (!scopeMatches)
                 throw bad("WIKI_PARENT_SCOPE_INVALID", "父 Wiki 必须在目标范围内可见");
         }
         return enqueue("DOCUMENT", roleId, teamId, parentWikiId, linkRoleSkills, null, selections, actorId);
@@ -214,7 +214,7 @@ public class ExternalBulkImportService {
                     String title=path.substring(path.lastIndexOf('/')+1).replaceFirst("(?i)\\.md$","");
                     WikiDocumentService.DocumentView document;
                     if (existing.isEmpty()) {
-                        document=wiki.create(new WikiDocumentService.CreateCommand(title,"SKILL_GUIDE",teamId,skillIds,content,parentId),actor,"external-bulk-"+jobId);
+                        document=wiki.create(new WikiDocumentService.CreateCommand(title,teamId,skillIds,content,parentId),actor,"external-bulk-"+jobId);
                         wiki.markExternalSource(document.id(),source,externalId,path);
                     } else {
                         var current=wiki.get(existing.get(0),actor);

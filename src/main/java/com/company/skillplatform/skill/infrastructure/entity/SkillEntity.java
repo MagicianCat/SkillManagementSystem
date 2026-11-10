@@ -18,9 +18,11 @@ public class SkillEntity extends BaseJpaEntity {
     @Enumerated(EnumType.STRING) @Column(nullable=false,length=32) private SkillStatus status;
     @Column(name="scope_type",nullable=false,length=32) private String scopeType="PLATFORM";
     @Column(name="team_id") private Long teamId;
+    @Column(name="origin_team_id") private Long originTeamId;
     @Formula("(select case coalesce(parent.category_key, leaf.category_key) when 'requirement' then 'REQUIREMENT' when 'product' then 'PRODUCT' when 'architecture' then 'ARCHITECTURE_DESIGN' when 'ui' then 'UI_DESIGN' when 'backend' then 'BACKEND_CODING' when 'frontend' then 'FRONTEND_CODING' when 'security' then 'SECURITY_REVIEW' when 'testing' then 'TESTING' when 'deployment' then 'DEPLOYMENT' end from skill_category leaf left join skill_category parent on parent.id=leaf.parent_id where leaf.id=category_id)")
     @Enumerated(EnumType.STRING) private DevelopmentStage developmentStage;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="latest_published_version_id") private SkillVersionEntity latestPublishedVersion;
+    @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="latest_platform_approved_version_id") private SkillVersionEntity latestPlatformApprovedVersion;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="active_draft_version_id") private SkillVersionEntity activeDraftVersion;
     @Version @Column(name="version_no",nullable=false) private int versionNo;
     @ManyToOne(fetch=FetchType.LAZY,optional=false) @JoinColumn(name="created_by",nullable=false) private IamUserEntity createdBy;
@@ -45,7 +47,7 @@ public class SkillEntity extends BaseJpaEntity {
     public void unarchive(IamUserEntity actor){this.status=SkillStatus.ACTIVE;this.updatedBy=actor;}
     public String getSkillKey(){return skillKey;} public String getDisplayName(){return displayName;} public String getDescription(){return description;}
     public SkillStatus getStatus(){return status;} public String getSourceUrl(){return sourceUrl;} public DevelopmentStage getDevelopmentStage(){if(developmentStage!=null)return developmentStage;SkillCategoryEntity root=category;while(root.getParent()!=null)root=root.getParent();return DevelopmentStage.fromRootCategoryKey(root.getCategoryKey());} public SkillVersionEntity getLatestPublishedVersion(){return latestPublishedVersion;}
-    public SkillVersionEntity getActiveDraftVersion(){return activeDraftVersion;} public int getVersionNo(){return versionNo;} public SkillCategoryEntity getCategory(){return category;} public String getScopeType(){return scopeType;} public Long getTeamId(){return teamId;} public void assignTeam(Long id){teamId=id;scopeType=id==null?"PLATFORM":"TEAM";}
-    public void promoteToPlatform(){scopeType="PLATFORM";}
-    public void promoteToPlatform(IamUserEntity actor){scopeType="PLATFORM";teamId=null;updatedBy=actor;}
+    public SkillVersionEntity getActiveDraftVersion(){return activeDraftVersion;} public int getVersionNo(){return versionNo;} public SkillCategoryEntity getCategory(){return category;} public String getScopeType(){return scopeType;} public Long getTeamId(){return teamId;} public Long getOriginTeamId(){return originTeamId;} public SkillVersionEntity getLatestPlatformApprovedVersion(){return latestPlatformApprovedVersion;} public void assignTeam(Long id){teamId=id;originTeamId=id;scopeType=id==null?"PLATFORM":"TEAM";}
+    public void promoteToPlatform(){if(originTeamId==null)originTeamId=teamId;latestPlatformApprovedVersion=latestPublishedVersion;scopeType="PLATFORM";teamId=null;}
+    public void promoteToPlatform(IamUserEntity actor){scopeType="PLATFORM";originTeamId=teamId;latestPlatformApprovedVersion=latestPublishedVersion;teamId=null;updatedBy=actor;}
 }
