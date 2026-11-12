@@ -27,7 +27,7 @@ public class AsdmToolAssetController {
     @GetMapping("/{id}")
     public Map<String,Object> info(@PathVariable long id) {
         var asset=service.asset(id);
-        return Map.of("id",id,"filename",asset.get("filename"),"sizeBytes",asset.get("sizeBytes"));
+        return Map.of("id",id,"filename",asset.get("filename"),"wikiTitle",asset.get("wikiTitle"),"sizeBytes",asset.get("sizeBytes"));
     }
 
     @GetMapping("/{id}/download")

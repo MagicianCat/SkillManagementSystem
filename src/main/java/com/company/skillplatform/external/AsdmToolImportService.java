@@ -57,7 +57,7 @@ public class AsdmToolImportService {
         Map<String,Object> source=source(versionId);
         List<Map<String,Object>> rows=db.queryForList("SELECT a.id assetId,a.wiki_document_id wikiId,a.filename,a.created_at,d.status wikiStatus,d.version_no wikiVersionNo FROM external_asdm_tool_asset a LEFT JOIN wiki_document d ON d.id=a.wiki_document_id WHERE a.resource_version_id=? AND a.status='READY'", versionId);
         if (rows.isEmpty()) {
-            List<Map<String,Object>> existing=db.queryForList("SELECT id,status,version_no FROM wiki_document WHERE source_system=? AND source_resource_id=? AND source_entry_path=? AND team_id IS NULL ORDER BY id DESC LIMIT 1",source.get("source_system"),source.get("external_resource_id"),SOURCE_PATH);
+            List<Map<String,Object>> existing=db.queryForList("SELECT id,status,version_no FROM wiki_document WHERE source_system=? AND source_resource_id=? AND source_entry_path=? AND team_id IS NULL AND status='ACTIVE' ORDER BY id DESC LIMIT 1",source.get("source_system"),source.get("external_resource_id"),SOURCE_PATH);
             if (existing.isEmpty()) return new Status(false,versionId,null,null,false,null,null,null,null);
             var wiki=existing.get(0);
             return new Status(false,versionId,null,((Number)wiki.get("id")).longValue(),"ACTIVE".equals(wiki.get("status")),null,null,null,((Number)wiki.get("version_no")).intValue());
@@ -70,8 +70,6 @@ public class AsdmToolImportService {
         Map<String,Object> source=source(versionId);
         Status prior=status(versionId);
         if (prior.imported() && prior.wikiActive()) return result("UNCHANGED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
-        if (prior.imported()) throw error("ASDM_WIKI_ARCHIVED","原 Wiki 已归档，请先处理归档文档",HttpStatus.CONFLICT);
-        if (prior.wikiDocumentId()!=null && !prior.wikiActive()) throw error("ASDM_WIKI_ARCHIVED","原 Wiki 已归档，请先处理归档文档",HttpStatus.CONFLICT);
         if (!versionIdEquals(source.get("current_version_id"),versionId)) throw error("ASDM_OLD_VERSION_NOT_CURRENT","只能导入当前外部资源版本",HttpStatus.CONFLICT);
         validatedBaseUrl();
         Path outer=null, inner=null;
@@ -87,15 +85,19 @@ public class AsdmToolImportService {
             if (markdown.contains(BEGIN) || markdown.contains(END)) throw error("ASDM_MD_MARKER_CONFLICT","原始 Markdown 包含系统保留标记",HttpStatus.UNPROCESSABLE_ENTITY);
             inner=AsdmOuterArchive.extractTool(outer,entries.packagePath(),maxInnerBytes);
             String sha=sha256(inner); long size=Files.size(inner);
-            String candidateKey="external-resources/asdm-tool-assets/pending/"+java.util.UUID.randomUUID()+".zip";
-            GeneratedKeyHolder holder=new GeneratedKeyHolder();
-            db.update(connection -> {
-                var ps=connection.prepareStatement("INSERT INTO external_asdm_tool_asset(resource_id,resource_version_id,inner_entry_path,filename,object_key,sha256,size_bytes,status,created_by) VALUES(?,?,?,?,?,?,?,'STAGING',?)",Statement.RETURN_GENERATED_KEYS);
-                ps.setLong(1,((Number)source.get("resource_id")).longValue()); ps.setLong(2,versionId); ps.setString(3,entries.packagePath()); ps.setString(4,entries.packageFilename()); ps.setString(5,candidateKey); ps.setString(6,sha); ps.setLong(7,size); ps.setLong(8,actor); return ps;
-            },holder);
-            assetId=holder.getKey().longValue();
-            objectKey=candidateKey;
-            try (InputStream in=Files.newInputStream(inner)) { storage.put(objectKey,in,size,"application/zip"); }
+            if (prior.imported() && !prior.wikiActive()) {
+                assetId=prior.assetId();
+            } else {
+                String candidateKey="external-resources/asdm-tool-assets/pending/"+java.util.UUID.randomUUID()+".zip";
+                GeneratedKeyHolder holder=new GeneratedKeyHolder();
+                db.update(connection -> {
+                    var ps=connection.prepareStatement("INSERT INTO external_asdm_tool_asset(resource_id,resource_version_id,inner_entry_path,filename,object_key,sha256,size_bytes,status,created_by) VALUES(?,?,?,?,?,?,?,'STAGING',?)",Statement.RETURN_GENERATED_KEYS);
+                    ps.setLong(1,((Number)source.get("resource_id")).longValue()); ps.setLong(2,versionId); ps.setString(3,entries.packagePath()); ps.setString(4,entries.packageFilename()); ps.setString(5,candidateKey); ps.setString(6,sha); ps.setLong(7,size); ps.setLong(8,actor); return ps;
+                },holder);
+                assetId=holder.getKey().longValue();
+                objectKey=candidateKey;
+                try (InputStream in=Files.newInputStream(inner)) { storage.put(objectKey,in,size,"application/zip"); }
+            }
             long finalAssetId=assetId;
             String content=markdown.stripTrailing()+"\n\n---\n\n"+BEGIN+"\n## ASDM 工具包下载\n\n[下载 ASDM 工具包（"+escape(entries.packageFilename())+"）]("+urlFor(assetId)+")\n\n> 下载需要登录研途助手；下载文件为 ASDM 完整工具压缩包。\n"+END+"\n";
             var saved=transactions.execute(tx -> {
@@ -114,8 +116,8 @@ public class AsdmToolImportService {
                 db.update("INSERT INTO external_import_record(resource_version_id,entry_path,target_type,target_id,action,result,operator_id) VALUES(?,?,'ASDM_TOOL',?,?,'SUCCESS',?)",versionId,SOURCE_PATH,finalAssetId,existing.isEmpty()?"IMPORT":"UPDATE",actor);
                 return document;
             });
-            db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result) VALUES(NOW(3),NOW(3),?,?,?,?,?,'SUCCESS')",prior.wikiDocumentId()!=null?"EXTERNAL_ASDM_WIKI_UPDATED":"EXTERNAL_ASDM_IMPORTED",actor,"WIKI_DOCUMENT",saved.id(),requestId);
-            return result(prior.wikiDocumentId()!=null?"UPDATED":"CREATED",source,assetId,saved.id(),entries.packageFilename());
+            db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result) VALUES(NOW(3),NOW(3),?,?,?,?,?,'SUCCESS')",prior.wikiActive()?"EXTERNAL_ASDM_WIKI_UPDATED":"EXTERNAL_ASDM_IMPORTED",actor,"WIKI_DOCUMENT",saved.id(),requestId);
+            return result(prior.wikiActive()?"UPDATED":"CREATED",source,assetId,saved.id(),entries.packageFilename());
         } catch (DuplicateKeyException duplicate) {
             Status raced=status(versionId);
             if (raced.imported()) return result("UNCHANGED",source,raced.assetId(),raced.wikiDocumentId(),raced.toolFilename());
@@ -146,7 +148,7 @@ public class AsdmToolImportService {
     }
 
     public Map<String,Object> asset(long id) {
-        List<Map<String,Object>> rows=db.queryForList("SELECT a.id,a.filename,a.size_bytes sizeBytes,a.object_key objectKey,a.status,d.status wikiStatus,d.platform_visible platformVisible FROM external_asdm_tool_asset a JOIN wiki_document d ON d.id=a.wiki_document_id WHERE a.id=?",id);
+        List<Map<String,Object>> rows=db.queryForList("SELECT a.id,a.filename,a.size_bytes sizeBytes,a.object_key objectKey,a.status,d.title wikiTitle,d.status wikiStatus,d.platform_visible platformVisible FROM external_asdm_tool_asset a JOIN wiki_document d ON d.id=a.wiki_document_id WHERE a.id=?",id);
         if (rows.isEmpty() || !"READY".equals(rows.get(0).get("status")) || !"ACTIVE".equals(rows.get(0).get("wikiStatus")) || !Boolean.TRUE.equals(rows.get(0).get("platformVisible")))
             throw error("ASDM_ASSET_NOT_FOUND","ASDM 工具包不可用",HttpStatus.NOT_FOUND);
         return rows.get(0);

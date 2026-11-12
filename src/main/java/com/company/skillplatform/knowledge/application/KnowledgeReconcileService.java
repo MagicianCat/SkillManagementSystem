@@ -23,9 +23,9 @@ public class KnowledgeReconcileService {
     @org.springframework.beans.factory.annotation.Autowired public void setPromotionStore(WikiPromotionStore value){promotionStore=value;}
     public KnowledgeReconcileService(WikiDocumentRepository documents,WikiDocumentSkillRepository links,VectorStorePort vectors,KnowledgeIndexService index,KnowledgeIndexEventListener retry,KnowledgeProperties properties){this.documents=documents;this.links=links;this.vectors=vectors;this.index=index;this.retry=retry;this.properties=properties;}
     @Scheduled(initialDelayString="${knowledge.reconcile.initial-delay-ms:30000}",fixedDelayString="${knowledge.reconcile.fixed-delay-ms:600000}")
-    @Transactional(readOnly=true)
+    @Transactional
     public void scheduled(){if(!properties.isEnabled()||!properties.getReconcile().isEnabled()||!running.compareAndSet(false,true))return;try{reconcile();}catch(RuntimeException failure){log.warn("event=knowledge.reconcile.failed errorType={}",failure.getClass().getSimpleName());}finally{running.set(false);}}
-    @Transactional(readOnly=true)
+    @Transactional
     public synchronized ReconcileResult manualReconcile() {
         retry.resetForManualReconcile();
         return reconcile(true);
@@ -34,7 +34,7 @@ public class KnowledgeReconcileService {
     public boolean reserveManualReconcile() { return running.compareAndSet(false, true); }
     public void releaseManualReconcile() { running.set(false); }
 
-    @Transactional(readOnly=true)
+    @Transactional
     public synchronized ReconcileResult reconcile(){ return reconcile(false); }
 
     private ReconcileResult reconcile(boolean force){

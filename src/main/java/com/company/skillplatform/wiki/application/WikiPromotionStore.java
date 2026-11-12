@@ -123,6 +123,16 @@ public class WikiPromotionStore {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /** A Wiki created directly at platform scope has no review, but still needs a public snapshot. */
+    public void publishDirect(WikiDocumentEntity document, Long actorId) {
+        if (document.getTeamId() != null || !document.isPlatformVisible() || document.getCurrentRevision() == null) return;
+        db.update("INSERT INTO wiki_platform_snapshot(document_id,approved_revision_id,approved_title,approved_parent_id,approved_review_id,source_team_id,published_at,published_by) VALUES(?,?,?,?,NULL,NULL,NOW(6),?) ON DUPLICATE KEY UPDATE approved_revision_id=VALUES(approved_revision_id),approved_title=VALUES(approved_title),approved_parent_id=VALUES(approved_parent_id),published_at=VALUES(published_at),published_by=VALUES(published_by)",
+                document.getId(), document.getCurrentRevision().getId(), document.getTitle(),
+                document.getParent() == null ? null : document.getParent().getId(), actorId);
+        db.update("DELETE FROM wiki_platform_skill_link WHERE document_id=?", document.getId());
+        db.update("INSERT INTO wiki_platform_skill_link(document_id,skill_id,published_skill_version_id,approved_review_id,published_at,approved_display_name) SELECT l.document_id,l.skill_id,s.latest_platform_approved_version_id,NULL,NOW(6),s.display_name FROM wiki_document_skill l JOIN skill s ON s.id=l.skill_id WHERE l.document_id=? AND s.scope_type='PLATFORM' AND s.latest_platform_approved_version_id IS NOT NULL", document.getId());
+    }
+
     public List<PlatformSkillLink> platformSkills(long documentId) {
         return db.query("SELECT s.id,s.skill_key,COALESCE(l.approved_display_name,s.display_name),l.published_skill_version_id FROM wiki_platform_skill_link l JOIN skill s ON s.id=l.skill_id WHERE l.document_id=? ORDER BY s.id",
                 (rs,row) -> new PlatformSkillLink(rs.getLong(1),rs.getString(2),rs.getString(3),rs.getLong(4)), documentId);

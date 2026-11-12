@@ -229,6 +229,7 @@ public class WikiDocumentService {
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, 1, content, sha256(content), actor));
         document.setCurrentRevision(revision, actor); documents.save(document);
         saveLinks(document, selected);
+        if (platform && promotionStore != null) promotionStore.publishDirect(document, userId);
         audit.success("WIKI_DOCUMENT_CREATED", actor, "WIKI_DOCUMENT", document.getId(), requestId, null, Map.of(), Map.of());
         events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(document.getId(), com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         return view(document);
@@ -248,6 +249,7 @@ public class WikiDocumentService {
         int next = document.getCurrentRevision() == null ? 1 : document.getCurrentRevision().getRevisionNo() + 1;
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, next, value, sha256(value), actor));
         document.setCurrentRevision(revision, actor); documents.saveAndFlush(document);
+        if (document.getTeamId() == null && promotionStore != null) promotionStore.publishDirect(document, userId);
         audit.success("WIKI_DOCUMENT_UPDATED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of("revisionNo", next), Map.of());
         events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         return view(document);
@@ -262,6 +264,7 @@ public class WikiDocumentService {
         int next = document.getCurrentRevision().getRevisionNo() + 1;
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, next, source.getMarkdownContent(), sha256(source.getMarkdownContent()), actor));
         document.setCurrentRevision(revision, actor); documents.saveAndFlush(document);
+        if (document.getTeamId() == null && promotionStore != null) promotionStore.publishDirect(document, userId);
         audit.success("WIKI_DOCUMENT_RESTORED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of("sourceRevisionId", revisionId, "revisionNo", next), Map.of());
         events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         return view(document);
