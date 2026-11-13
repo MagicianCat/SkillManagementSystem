@@ -27,6 +27,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /** Explicit rule synchronization, including in-place updates of completed-stage publications. */
 @Service
@@ -45,6 +46,8 @@ public class CollabAsdmSyncService {
     private final CollabAsdmFeishuAttachmentGateway attachments;
     private final FeishuDocumentMcpProxy documents;
     private final CollabFeishuChatGateway chats;
+    @Autowired(required = false)
+    private com.company.skillplatform.collabproject.progress.application.CollabProgressEventService progressEvents;
 
     public CollabAsdmSyncService(JdbcTemplate jdbc, CollabProjectAuthorizationService authorization,
             CollabAsdmRuleService ruleService, CollabAsdmStageRules stageRules,
@@ -349,6 +352,12 @@ public class CollabAsdmSyncService {
         documents.grantChatReadAccess(actor,publication.indexToken(),"docx",str(target,"chat_id"));
         jdbc.update("update collab_asdm_sync_stage set supplemental_node_token=?,supplemental_index_token=?,supplemental_index_url=?,time_updated=now(3) where id=?",node,publication.indexToken(),publication.indexUrl(),syncStageId);
         stageStatus(syncStageId,"COMPLETED",null);
+        if (progressEvents != null) {
+            long requirementId = num(target,"requirement_id");
+            Integer attempt = jdbc.queryForObject("select attempt_no from collab_stage where id=?",Integer.class,stageId);
+            progressEvents.record(requirementId,stageId,attempt,"ARTIFACT_SUPPLEMENTED","ASDM_SYNC_STAGE",Long.toString(syncStageId),
+                    null,java.time.Instant.now(),"阶段产物补充归档",publication.indexUrl());
+        }
     }
 
     private void publishFile(long actor,String space,String parent,String chatId,long stageId,long requirementId,Map<String,Object> file) {

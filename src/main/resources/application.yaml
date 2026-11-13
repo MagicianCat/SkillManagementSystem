@@ -208,6 +208,13 @@ skill-platform:
     file-publish-workers: ${ASDM_FILE_PUBLISH_WORKERS:4}
     file-publish-retry-limit: ${ASDM_FILE_PUBLISH_RETRY_LIMIT:8}
     blob-cache-ttl: ${ASDM_BLOB_CACHE_TTL:24h}
+  collab-progress:
+    backfill-enabled: ${COLLAB_PROGRESS_BACKFILL_ENABLED:true}
+    backfill-initial-delay-ms: ${COLLAB_PROGRESS_BACKFILL_INITIAL_DELAY_MS:15000}
+    backfill-interval-ms: ${COLLAB_PROGRESS_BACKFILL_INTERVAL_MS:3600000}
+    worker-interval-ms: ${COLLAB_PROGRESS_WORKER_INTERVAL_MS:15000}
+    group-ids: ${COLLAB_PROGRESS_GROUP_IDS:}
+    requirement-ids: ${COLLAB_PROGRESS_REQUIREMENT_IDS:}
   auth:
     jwt:
       issuer: ${JWT_ISSUER:skill-management-system}

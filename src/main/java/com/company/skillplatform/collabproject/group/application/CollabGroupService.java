@@ -34,6 +34,8 @@ public class CollabGroupService {
     private final CollabAsdmGitlabClient asdmGitlab;
     @Autowired(required = false)
     private CollabAsdmRuleService asdmRules;
+    @Autowired(required = false)
+    private com.company.skillplatform.collabproject.progress.application.CollabProgressEventService progressEvents;
 
     @Autowired
     public CollabGroupService(JdbcTemplate jdbc, ObjectMapper mapper, CollabFeishuBindingService wiki, CollabFeishuOutbox projectOutbox, GroupFeishuOutbox outbox,
@@ -294,6 +296,15 @@ public class CollabGroupService {
             if(initial.contains(stage))jdbc.update("update collab_stage set actors_frozen_at=? where id=?",now,stageId);
         }
         for(String stage:initial){Long stageId=jdbc.queryForObject("select id from collab_stage where project_id=? and stage_key=?",Long.class,projectId,stage);projectOutbox.enqueueInitialStageHandoff(projectId,stageId,requirementKey);}
+        if (progressEvents != null) {
+            progressEvents.ensureDocument(projectId, true);
+            progressEvents.record(projectId, null, null, "REQUIREMENT_CREATED", "PROJECT", Long.toString(projectId), actorId, now, "需求创建", null);
+            for (String stage : initial) {
+                Long stageId = jdbc.queryForObject("select id from collab_stage where project_id=? and stage_key=?", Long.class, projectId, stage);
+                progressEvents.record(projectId, stageId, 1, "STAGE_ACTIVATED", "STAGE_TIMESTAMP", stageId + ":started",
+                        null, now, "阶段已启动：" + stage, null);
+            }
+        }
         return new RequirementView(requirementKey,groupKey,name,nullableTrim(command.description()),level,version,gitlab,asdmBranch,asdmBindingStatus,currentOrder,"ACTIVE");
     }
 

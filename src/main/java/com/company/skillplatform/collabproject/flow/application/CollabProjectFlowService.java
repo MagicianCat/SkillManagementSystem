@@ -24,6 +24,7 @@ import java.util.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Business rules for the independent manual collaboration workflow. */
@@ -42,6 +43,8 @@ public class CollabProjectFlowService {
     private final CollabFeishuOutbox feishuOutbox;
     private final CollabGitlabRootValidator gitlabRootValidator;
     private final CollabAsdmPackageRepository asdmPackages;
+    @Autowired(required = false)
+    private com.company.skillplatform.collabproject.progress.application.CollabProgressEventService progressEvents;
 
     public CollabProjectFlowService(JdbcTemplate jdbc, ObjectMapper mapper,
             CollabProjectAuthorizationService authorization, CollabFeishuOutbox feishuOutbox,
@@ -152,6 +155,7 @@ public class CollabProjectFlowService {
         Map<String,Object> policy=Map.of("approvalLevel",project.approvalLevel(),"approvalMode",manual?"MANUAL":"AUTOMATIC","reviewerUserIds",manual?reviewers:List.of(),"reviewerRoles",roleSnapshots);
         jdbc.update("insert into collab_submission(time_created,time_updated,stage_id,attempt_no,artifact_version_id,submitted_by,policy_snapshot,status,idempotency_key,request_fingerprint,submitted_at,decided_at,publication_gate_state) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",now,now,stage.id(),stage.attemptNo(),artifactVersionId,actorId,json(policy),"PUBLISHING",idempotencyKey,fingerprint,now,null,"WAITING_FEISHU");
         Long submissionId=jdbc.queryForObject("select id from collab_submission where stage_id=? and idempotency_key=?",Long.class,stage.id(),idempotencyKey);
+        if(project.groupId()!=null&&progressEvents!=null)progressEvents.record(project.projectId(),stage.id(),stage.attemptNo(),"ARTIFACT_SUBMITTED","SUBMISSION",String.valueOf(submissionId),actorId,now,"产物提交",null);
         feishuOutbox.enqueuePublish(project.projectId(),artifactVersionId);
         if(!idempotencyKey.startsWith("asdm:"))
             jdbc.update("update collab_asdm_candidate set status='CLOSED_BY_SKILL',time_updated=? where stage_id=? and attempt_no=? and status in ('DEBOUNCING','NOTIFIED','CONFIRM_REQUESTED')",now,stage.id(),stage.attemptNo());
@@ -354,6 +358,13 @@ public class CollabProjectFlowService {
             completeStage(projectId,stage,actorId,submissionId,now);
         }
         addEvent(projectId,stage,"FEISHU_PUBLISHED",actorId,"PUBLISHING",manual?"PENDING_APPROVAL":"COMPLETED",submissionId,Map.of("artifactVersionId",artifactVersionId));
+        if(progressEvents!=null&&jdbc.queryForObject("select group_id from collab_project where id=?",Long.class,projectId)!=null){
+            Map<String,Object> publication=jdbc.queryForMap("select id,published_at,url from collab_feishu_publication where artifact_version_id=?",artifactVersionId);
+            progressEvents.record(projectId,stage.id(),stage.attemptNo(),"ARTIFACT_PUBLISHED","PUBLICATION",String.valueOf(publication.get("id")),null,
+                    publication.get("published_at") instanceof java.sql.Timestamp ts?ts.toInstant():publication.get("published_at") instanceof java.time.LocalDateTime local?local.toInstant(java.time.ZoneOffset.UTC):now,"飞书产物发布成功",(String)publication.get("url"));
+            if(!manual){progressEvents.record(projectId,stage.id(),stage.attemptNo(),"STAGE_AUTO_APPROVED","SUBMISSION",submissionId+":auto",null,now,"无需人工审批，自动通过",null);
+                progressEvents.record(projectId,stage.id(),stage.attemptNo(),"STAGE_COMPLETED","STAGE_TIMESTAMP",stage.id()+":completed",null,now,"阶段已完成",null);}
+        }
     }
 
     @Transactional
@@ -395,6 +406,10 @@ public class CollabProjectFlowService {
         Instant now=Instant.now(); String approvalState="APPROVE".equals(decision)?"APPROVED":"REJECTED";
         int changed=jdbc.update("update collab_approval set state=?,decision_comment=?,decided_at=?,version_no=version_no+1,time_updated=? where id=? and state='PENDING' and version_no=?",approvalState,request.comment(),now,now,row.get("approval_id"),request.expectedVersion());
         if(changed!=1)throw error("COLLAB_SUBMISSION_ALREADY_DECIDED","Submission was decided concurrently",HttpStatus.CONFLICT);
+        if (project.groupId() != null && progressEvents != null)
+            progressEvents.record(project.projectId(), ((Number)row.get("stage_id")).longValue(), ((Number)row.get("attempt_no")).intValue(),
+                    "APPROVED".equals(approvalState)?"APPROVAL_DECISION":"APPROVAL_REJECTED", "APPROVAL", String.valueOf(row.get("approval_id")),
+                    actorId, now, ("APPROVED".equals(approvalState)?"审批通过":"审批驳回") + (request.comment()==null||request.comment().isBlank()?"":"："+request.comment()), null);
         StageRow stage=lockedStage(project.projectId(),(String)row.get("stage_key"));
         boolean rejected="REJECT".equals(decision);
         Integer roleCount=jdbc.queryForObject("select count(*) from collab_submission_reviewer_role where submission_id=?",Integer.class,submissionId);
@@ -416,6 +431,7 @@ public class CollabProjectFlowService {
             jdbc.update("update collab_submission set status='APPROVED',decided_at=?,time_updated=? where id=? and status='PENDING_APPROVAL'",now,now,submissionId);
             jdbc.update("update collab_stage set status='COMPLETED',completed_at=?,version_no=version_no+1,time_updated=? where id=? and status='PENDING_APPROVAL'",now,now,stage.id());
             completeStage(project.projectId(),stage,actorId,submissionId,now);
+            if(project.groupId()!=null&&progressEvents!=null)progressEvents.record(project.projectId(),stage.id(),stage.attemptNo(),"STAGE_COMPLETED","STAGE_TIMESTAMP",stage.id()+":completed",actorId,now,"阶段已完成",null);
         }
         addEvent(project.projectId(),stage,rejected?"REJECTED":allApproved?"APPROVED":"REVIEWER_APPROVED",actorId,"PENDING_APPROVAL",rejected?"REWORK":allApproved?"COMPLETED":"PENDING_APPROVAL",submissionId,Map.of("comment",request.comment()==null?"":request.comment()));
         return submission(projectKey,submissionId,actorId);
@@ -478,13 +494,13 @@ public class CollabProjectFlowService {
                     continue;
                 }
                 int changed=jdbc.update("update collab_stage set actors_frozen_at=coalesce(actors_frozen_at,?),status='IN_PROGRESS',started_at=coalesce(started_at,?),version_no=version_no+1,time_updated=? where id=? and status in ('WAITING','READY','NOT_STARTED','READY_BLOCKED')",now,now,now,next.id());
-                if(changed==1){freezeStageActorRows(next.id(), now);if("READY_BLOCKED".equals(next.status()))feishuOutbox.enqueueStageActivation(projectId,next.id(),jdbc.queryForObject("select version_no from collab_stage where id=?",Integer.class,next.id()));else feishuOutbox.enqueueStageHandoff(projectId,next.id(),submissionId);}
+                if(changed==1){freezeStageActorRows(next.id(), now);addEvent(projectId,readStage(projectId,next.stageKey()),"STAGE_ACTIVATED",null,next.status(),"IN_PROGRESS",submissionId,Map.of());if("READY_BLOCKED".equals(next.status()))feishuOutbox.enqueueStageActivation(projectId,next.id(),jdbc.queryForObject("select version_no from collab_stage where id=?",Integer.class,next.id()));else feishuOutbox.enqueueStageHandoff(projectId,next.id(),submissionId);}
             }
             jdbc.update("update collab_project set current_stage_order=?,version_no=version_no+1,time_updated=? where id=?",nextOrder,now,projectId);
             return;
         }
         int completed=jdbc.update("update collab_project set status='COMPLETED',version_no=version_no+1,time_updated=? where id=? and status<>'COMPLETED'",now,projectId);
-        if(completed==1)feishuOutbox.enqueueProjectCompleted(projectId);
+        if(completed==1){feishuOutbox.enqueueProjectCompleted(projectId);if(progressEvents!=null&&jdbc.queryForObject("select group_id from collab_project where id=?",Long.class,projectId)!=null)progressEvents.record(projectId,null,null,"REQUIREMENT_COMPLETED","PROJECT",projectId+":completed",null,now,"需求已完成",null);}
     }
     private int stageGroupStart(int order){return order==4?3:order==6?5:order;}
     private int stageGroupEnd(int start){return start==3||start==5?start+1:start;}
@@ -492,7 +508,7 @@ public class CollabProjectFlowService {
     private String placeholders(int count){return String.join(",",Collections.nCopies(count,"?"));}
     private Object[] concat(Object first,List<Integer> rest){Object[] args=new Object[rest.size()+1];args[0]=first;for(int i=0;i<rest.size();i++)args[i+1]=rest.get(i);return args;}
     private void lockProjectFlow(Long projectId){jdbc.queryForObject("select id from collab_project where id=? for update",Long.class,projectId);}
-    private void addEvent(Long projectId,StageRow stage,String event,Long actor,String from,String to,Long reference,Object payload){jdbc.update("insert into collab_stage_event(time_created,time_updated,project_id,stage_id,attempt_no,event_type,actor_user_id,from_status,to_status,reference_id,payload_json,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",Instant.now(),Instant.now(),projectId,stage.id(),stage.attemptNo(),event,actor,from,to,reference,json(payload),Instant.now());}
+    private void addEvent(Long projectId,StageRow stage,String event,Long actor,String from,String to,Long reference,Object payload){Instant now=Instant.now();jdbc.update("insert into collab_stage_event(time_created,time_updated,project_id,stage_id,attempt_no,event_type,actor_user_id,from_status,to_status,reference_id,payload_json,created_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",now,now,projectId,stage.id(),stage.attemptNo(),event,actor,from,to,reference,json(payload),now);if(progressEvents!=null){Long group=jdbc.queryForObject("select group_id from collab_project where id=?",Long.class,projectId);if(group!=null){progressEvents.ensureDocument(projectId,false);if(!Set.of("APPROVED","REJECTED","REVIEWER_APPROVED","SUBMITTED","FEISHU_PUBLISHED").contains(event)){Long eventId=jdbc.queryForObject("select last_insert_id()",Long.class);progressEvents.record(projectId,stage.id(),stage.attemptNo(),event,"FLOW",String.valueOf(eventId),actor,now,"流程记录："+event,null);}else progressEvents.dirty(projectId);}}}
     private List<Long> additionalReviewerIds(Long stageId){return jdbc.query("select reviewer_user_id from collab_stage_additional_reviewer where stage_id=? order by id",(rs,n)->rs.getLong(1),stageId);}
     private String stageRoleName(Long stageId,String duty){
         if("REVIEWER".equals(duty)){

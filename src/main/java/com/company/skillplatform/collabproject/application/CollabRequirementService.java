@@ -6,6 +6,7 @@ import java.util.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Requirement-scoped role snapshot and pre-start actor management APIs. */
@@ -16,6 +17,8 @@ public class CollabRequirementService {
     private final JdbcTemplate jdbc;
     private final CollabProjectAuthorizationService authorization;
     private final CollabFeishuOutbox feishuOutbox;
+    @Autowired(required = false)
+    private com.company.skillplatform.collabproject.progress.application.CollabProgressEventService progressEvents;
 
     public CollabRequirementService(JdbcTemplate jdbc, CollabProjectAuthorizationService authorization, CollabFeishuOutbox feishuOutbox) {
         this.jdbc = jdbc;
@@ -65,6 +68,7 @@ public class CollabRequirementService {
         if ("REVIEWER".equals(duty)) replaceReviewerRoleActors(((Number) stage.get("id")).longValue(), roleKey, userIds, "MANUAL", stage);
         else replaceStageDuty(((Number) stage.get("id")).longValue(), duty, userIds, "MANUAL", stage);
         maybeResumeBlockedStage(req, ((Number) stage.get("id")).longValue(), actorId);
+        if (progressEvents != null) progressEvents.dirty(req.projectId());
         return stageActors(req.projectId(), ((Number) stage.get("id")).longValue(), stageKey);
     }
 
@@ -109,6 +113,7 @@ public class CollabRequirementService {
             }
         }
         maybeResumeBlockedStage(req, ((Number) stage.get("id")).longValue(), actorId);
+        if (progressEvents != null) progressEvents.dirty(req.projectId());
         return new SyncResult(requirementKey, stageKey, stageKeyVersion(((Number) stage.get("id")).longValue()), diffs);
     }
 
