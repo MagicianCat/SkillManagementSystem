@@ -4,6 +4,7 @@ import com.company.skillplatform.telemetry.application.CommandUsageTelemetryServ
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import org.springframework.security.core.Authentication;
@@ -19,7 +20,7 @@ public class CommandUsageTelemetryController {
     CommandUsageTelemetryService.EventView create(@Valid @RequestBody CreateRequest request, Authentication authentication) {
         return service.record((Long) authentication.getPrincipal(), new CommandUsageTelemetryService.CreateCommand(
                 request.eventId, request.commandName, request.reqId, request.reqIdSource,
-                request.toolsetName, request.triggerType,
+                request.toolsetName, request.asdmAssetId, request.triggerType,
                 request.evidenceType, request.commandVersion, request.installationId, request.clientSessionId,
                 request.generationId, request.projectKey, request.client, request.clientVersion, request.invokedAt));
     }
@@ -30,6 +31,7 @@ public class CommandUsageTelemetryController {
         @Size(max = 256) public String reqId;
         @Size(max = 32) public String reqIdSource;
         @Size(max = 128) public String toolsetName;
+        @Positive public Long asdmAssetId;
         @NotBlank @Size(max = 32) public String triggerType;
         @NotBlank @Size(max = 32) public String evidenceType;
         @Size(max = 64) public String commandVersion;

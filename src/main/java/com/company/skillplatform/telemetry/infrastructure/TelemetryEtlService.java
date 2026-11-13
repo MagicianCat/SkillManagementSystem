@@ -176,7 +176,10 @@ public class TelemetryEtlService {
             INSERT INTO dwd_command_usage_detail (
               command_event_id,generation_id,user_oa,project_key,req_id,req_id_source,
               command_name,toolset_name,command_version,trigger_type,evidence_type,
-              client,client_version,invoked_at,received_at,etl_updated_at
+              client,client_version,invoked_at,received_at,
+              asdm_asset_id,asdm_mapping_id,asdm_first_category_code,asdm_development_stage,
+              asdm_match_status,asdm_resource_id,asdm_resource_version_id,asdm_source_system,
+              asdm_external_resource_id,etl_updated_at
             )
             SELECT e.event_uuid,
               CASE WHEN g.id IS NULL THEN NULL ELSE CONCAT('u',g.user_id,':',g.hook_generation_id) END,
@@ -185,11 +188,16 @@ public class TelemetryEtlService {
                    THEN SUBSTRING_INDEX(u.email,'@',1) ELSE NULL END,
               COALESCE(g.project_key,e.project_key),e.req_id,e.req_id_source,
               e.command_name,e.toolset_name,e.command_version,e.trigger_type,e.evidence_type,
-              e.client,e.client_version,e.invoked_at,e.received_at,NOW(3)
+              e.client,e.client_version,e.invoked_at,e.received_at,
+              e.asdm_asset_id,e.asdm_mapping_id,e.asdm_first_category_code,e.asdm_development_stage,
+              e.asdm_match_status,a.resource_id,a.resource_version_id,r.source_system,
+              r.external_resource_id,NOW(3)
             FROM command_usage_event e
             JOIN iam_user u ON u.id=e.user_id
             LEFT JOIN ai_generation_event g
               ON g.user_id=e.user_id AND g.hook_generation_id=e.generation_id
+            LEFT JOIN external_asdm_tool_asset a ON a.id=e.asdm_asset_id
+            LEFT JOIN external_resource r ON r.id=a.resource_id
             ON DUPLICATE KEY UPDATE
               generation_id=VALUES(generation_id),user_oa=VALUES(user_oa),
               project_key=VALUES(project_key),req_id=VALUES(req_id),req_id_source=VALUES(req_id_source),
@@ -197,7 +205,16 @@ public class TelemetryEtlService {
               command_version=VALUES(command_version),trigger_type=VALUES(trigger_type),
               evidence_type=VALUES(evidence_type),client=VALUES(client),
               client_version=VALUES(client_version),invoked_at=VALUES(invoked_at),
-              received_at=VALUES(received_at),etl_updated_at=VALUES(etl_updated_at)
+              received_at=VALUES(received_at),asdm_asset_id=VALUES(asdm_asset_id),
+              asdm_mapping_id=VALUES(asdm_mapping_id),
+              asdm_first_category_code=VALUES(asdm_first_category_code),
+              asdm_development_stage=VALUES(asdm_development_stage),
+              asdm_match_status=VALUES(asdm_match_status),
+              asdm_resource_id=VALUES(asdm_resource_id),
+              asdm_resource_version_id=VALUES(asdm_resource_version_id),
+              asdm_source_system=VALUES(asdm_source_system),
+              asdm_external_resource_id=VALUES(asdm_external_resource_id),
+              etl_updated_at=VALUES(etl_updated_at)
             """);
         jdbc.update("""
             DELETE d FROM dwd_command_usage_detail d

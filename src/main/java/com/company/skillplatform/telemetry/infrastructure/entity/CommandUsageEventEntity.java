@@ -14,6 +14,11 @@ public class CommandUsageEventEntity extends BaseJpaEntity {
     @Column(name = "req_id", length = 256) private String reqId;
     @Column(name = "req_id_source", length = 32) private String reqIdSource;
     @Column(name = "toolset_name", length = 128) private String toolsetName;
+    @Column(name = "asdm_asset_id") private Long asdmAssetId;
+    @Column(name = "asdm_mapping_id") private Long asdmMappingId;
+    @Column(name = "asdm_first_category_code", length = 64) private String asdmFirstCategoryCode;
+    @Column(name = "asdm_development_stage", length = 32) private String asdmDevelopmentStage;
+    @Column(name = "asdm_match_status", nullable = false, length = 32) private String asdmMatchStatus = "NO_ASSET";
     @Column(name = "trigger_type", nullable = false, length = 32) private String triggerType;
     @Column(name = "evidence_type", nullable = false, length = 32) private String evidenceType;
     @Column(name = "command_version", length = 64) private String commandVersion;
@@ -45,6 +50,17 @@ public class CommandUsageEventEntity extends BaseJpaEntity {
     public String getCommandName() { return commandName; }
     public String getReqId() { return reqId; }
     public String getReqIdSource() { return reqIdSource; }
+    public Long getAsdmAssetId() { return asdmAssetId; }
+    public Long getAsdmMappingId() { return asdmMappingId; }
+    public String getAsdmFirstCategoryCode() { return asdmFirstCategoryCode; }
+    public String getAsdmDevelopmentStage() { return asdmDevelopmentStage; }
+    public String getAsdmMatchStatus() { return asdmMatchStatus; }
+    public void setAsdmResolution(Long assetId, Long mappingId, String firstCategoryCode,
+                                  String developmentStage, String matchStatus) {
+        this.asdmAssetId = assetId; this.asdmMappingId = mappingId;
+        this.asdmFirstCategoryCode = firstCategoryCode; this.asdmDevelopmentStage = developmentStage;
+        this.asdmMatchStatus = matchStatus;
+    }
     public boolean enrichReqId(String nextReqId, String nextSource) {
         if (nextReqId == null || nextReqId.isBlank() || reqId != null) return false;
         reqId = nextReqId; reqIdSource = nextSource; return true;

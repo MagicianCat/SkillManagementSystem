@@ -14,19 +14,26 @@ import org.springframework.transaction.annotation.Transactional;
 public class CommandUsageTelemetryService {
     private final CommandUsageEventRepository events;
     private final IamUserRepository users;
+    private final AsdmCommandCategoryResolver asdmCategories;
 
-    public CommandUsageTelemetryService(CommandUsageEventRepository events, IamUserRepository users) {
-        this.events = events; this.users = users;
+    public CommandUsageTelemetryService(CommandUsageEventRepository events, IamUserRepository users,
+                                        AsdmCommandCategoryResolver asdmCategories) {
+        this.events = events; this.users = users; this.asdmCategories = asdmCategories;
     }
 
     @Transactional
     public EventView record(Long userId, CreateCommand command) {
         try { UUID.fromString(command.eventId()); }
         catch (Exception ex) { throw error("EVENT_ID_INVALID", HttpStatus.BAD_REQUEST); }
+        if (command.asdmAssetId() != null && command.asdmAssetId() <= 0)
+            throw error("ASDM_ASSET_ID_INVALID", HttpStatus.BAD_REQUEST);
         return events.findByEventUuid(command.eventId()).map(existing -> {
             if (!existing.sameIdentity(userId, command.commandName(), command.clientSessionId(), command.generationId()))
                 throw error("EVENT_ID_CONFLICT", HttpStatus.CONFLICT);
             validateReq(command.reqId(), command.reqIdSource());
+            if (existing.getAsdmAssetId() != null && command.asdmAssetId() != null &&
+                    !existing.getAsdmAssetId().equals(command.asdmAssetId()))
+                throw error("ASDM_ASSET_ID_CONFLICT", HttpStatus.CONFLICT);
             if (existing.getReqId() != null && command.reqId() != null && !existing.getReqId().equals(command.reqId()))
                 throw error("REQ_ID_CONFLICT", HttpStatus.CONFLICT);
             if (existing.enrichReqId(command.reqId(), command.reqIdSource())) events.saveAndFlush(existing);
@@ -44,6 +51,9 @@ public class CommandUsageTelemetryService {
                     command.commandName(), command.toolsetName(), command.triggerType(), command.evidenceType(),
                     command.commandVersion(), command.installationId(), command.clientSessionId(), command.generationId(),
                     command.projectKey(), command.client(), command.clientVersion(), command.invokedAt(), now);
+            var resolution = asdmCategories.resolve(command.asdmAssetId(), command.toolsetName());
+            event.setAsdmResolution(resolution.assetId(), resolution.mappingId(), resolution.firstCategoryCode(),
+                    resolution.developmentStage(), resolution.matchStatus());
             event.enrichReqId(command.reqId(), command.reqIdSource());
             event = events.saveAndFlush(event);
             events.linkGenerationByExternalId(userId, command.generationId());
@@ -67,7 +77,7 @@ public class CommandUsageTelemetryService {
     private BusinessException error(String code, HttpStatus status) { return new BusinessException(code, code, status); }
 
     public record CreateCommand(String eventId, String commandName, String reqId, String reqIdSource,
-            String toolsetName, String triggerType,
+            String toolsetName, Long asdmAssetId, String triggerType,
             String evidenceType, String commandVersion, String installationId, String clientSessionId,
             String generationId, String projectKey, String client, String clientVersion, Instant invokedAt) {}
     public record EventView(String eventId, String commandName, String reqId, Instant invokedAt) {}
