@@ -1,5 +1,6 @@
 package com.company.skillplatform.external;
 
+import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.storage.domain.ObjectStoragePort;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -91,8 +92,14 @@ public class ExternalResourceService {
                 ? input.asdmCommands() : null;
         if (commands != null && !"ASDM-TOOL".equals(resourceType))
             throw new ResourceFailure("INVALID_RESOURCE", "仅 ASDM-TOOL 可携带 asdmCommands");
-        if (commands != null && !commands.isArray())
-            throw new ResourceFailure("INVALID_RESOURCE", "asdmCommands 必须是 JSON 数组");
+        if (commands != null) {
+            try {
+                // 只做结构、工具集目录名格式与同数组去重；不查分类树，不展开内层 ZIP。
+                AsdmCommandSupport.validateIncomingToolsets(commands);
+            } catch (BusinessException badMetadata) {
+                throw new ResourceFailure(badMetadata.getCode(), badMetadata.getMessage());
+            }
+        }
         DevelopmentStageCatalogService.ResolvedStage stage;
         try {
             if (!"SKILL".equals(resourceType) && (input.developmentStageProvided() || input.subStageKeyProvided()))

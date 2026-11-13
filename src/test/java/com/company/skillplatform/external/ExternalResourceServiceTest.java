@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.company.skillplatform.storage.domain.ObjectStoragePort;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,5 +63,41 @@ class ExternalResourceServiceTest {
         var result = service.push(request, new LinkedMultiValueMap<>(), "req-doc-stage");
         assertEquals("INVALID_RESOURCE", result.failures().get(0).errorCode());
         verifyNoInteractions(stages, transactions, storage);
+    }
+
+    @Test void rejectsDuplicateToolsetsBeforeTouchingStorage() throws Exception {
+        var resource = asdmResource("""
+                [{"toolName":"code-dev-sc274","firstCategoryCode":"backend"},
+                 {"toolName":" Code-Dev-SC274 ","firstCategoryCode":"testing"}]
+                """);
+        var result = service.push(request(resource), new LinkedMultiValueMap<>(), "req-toolset-dup");
+        assertEquals(1, result.failed());
+        assertEquals("ASDM_TOOLSET_DUPLICATE", result.failures().get(0).errorCode());
+        verifyNoInteractions(stages, transactions, storage);
+    }
+
+    @Test void rejectsInvalidToolsetNameAndNonArrayMetadata() throws Exception {
+        var invalidName = asdmResource("[{\"toolName\":\"../evil\",\"firstCategoryCode\":\"other\"}]");
+        var nonArray = asdmResource("{\"toolName\":\"code-dev\"}");
+        var nameResult = service.push(request(invalidName), new LinkedMultiValueMap<>(), "req-toolset-name");
+        var arrayResult = service.push(request(nonArray), new LinkedMultiValueMap<>(), "req-toolset-array");
+        assertEquals("ASDM_TOOLSET_NAME_INVALID", nameResult.failures().get(0).errorCode());
+        assertEquals("ASDM_TOOLSET_METADATA_INVALID", arrayResult.failures().get(0).errorCode());
+        verifyNoInteractions(stages, transactions, storage);
+    }
+
+    private static ExternalResourceService.PushRequest request(ExternalResourceService.ResourceInput resource) {
+        return new ExternalResourceService.PushRequest("platform-a",
+                new ExternalResourceService.RoleInput("role-1", "Role One", null), List.of(resource));
+    }
+
+    private ExternalResourceService.ResourceInput asdmResource(String commandsJson) throws Exception {
+        var resource = new ExternalResourceService.ResourceInput();
+        resource.setResourceId("asdm-1");
+        resource.setResourceName("ASDM Tool");
+        resource.setResourceType("ASDM-TOOL");
+        resource.setFileKey("file1");
+        resource.setAsdmCommands(new ObjectMapper().readTree(commandsJson));
+        return resource;
     }
 }

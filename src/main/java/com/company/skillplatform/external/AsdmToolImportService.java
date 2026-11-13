@@ -78,7 +78,7 @@ public class AsdmToolImportService {
         return new Status(true,versionId,id,((Number)row.get("wikiId")).longValue(),"ACTIVE".equals(row.get("wikiStatus")),(String)row.get("filename"),urlFor(id),((java.sql.Timestamp)row.get("created_at")).toInstant(),((Number)row.get("wikiVersionNo")).intValue(),mappingStatus(rawHash,text(row.get("appliedHash")),mappingCount),mappingCount);
     }
 
-    /** 当前版本已入库的命令分类映射，可按管理端需要展示来源与状态。 */
+    /** 当前版本已入库的工具集分类映射，可按管理端需要展示来源与状态。 */
     public List<Map<String,Object>> commands(long versionId) {
         source(versionId);
         return db.queryForList("SELECT c.id,c.tool_name AS toolName,c.first_category_code AS firstCategoryCode," +
@@ -100,10 +100,11 @@ public class AsdmToolImportService {
             // 同一版本重复点击：JSON 未变化时保持原有 UNCHANGED 语义，不改 Wiki / ZIP / 分类。
             if (Objects.equals(rawHash,appliedHash)) return result("UNCHANGED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
             if (!versionIdEquals(source.get("current_version_id"),versionId)) throw error("ASDM_OLD_VERSION_NOT_CURRENT","只能导入当前外部资源版本",HttpStatus.CONFLICT);
-            List<AsdmCommandSupport.Command> commands=parseCommands(rawJson);
+            List<AsdmCommandSupport.ToolsetCategory> toolsets=parseToolsetCategories(rawJson);
+            requireToolsetsInAsset(prior.assetId(),toolsets);
             transactions.execute(tx -> {
                 db.queryForObject("SELECT id FROM external_asdm_tool_asset WHERE id=? FOR UPDATE",Long.class,prior.assetId());
-                applyMappings(prior.assetId(),((Number)source.get("resource_id")).longValue(),versionId,source,commands,rawHash,actor);
+                applyMappings(prior.assetId(),((Number)source.get("resource_id")).longValue(),versionId,source,toolsets,rawHash,actor);
                 db.update("UPDATE external_asdm_tool_asset SET command_mapping_applied_sha256=?,command_mapping_applied_at=NOW(3) WHERE id=?",rawHash,prior.assetId());
                 db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result) VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_MAPPING_SYNCED',?, 'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS')",actor,versionId,requestId(requestId));
                 return null;
@@ -112,8 +113,8 @@ public class AsdmToolImportService {
         }
         if (!versionIdEquals(source.get("current_version_id"),versionId)) throw error("ASDM_OLD_VERSION_NOT_CURRENT","只能导入当前外部资源版本",HttpStatus.CONFLICT);
         validatedBaseUrl();
-        // 先校验命令分类，任何不合法项都在创建资产 / Wiki 之前失败，不留下部分映射。
-        List<AsdmCommandSupport.Command> commands=parseCommands(rawJson);
+        // 先校验工具集分类声明；真实目录存在性在解出内层 ZIP 后、创建资产/Wiki 之前校验。
+        List<AsdmCommandSupport.ToolsetCategory> toolsets=parseToolsetCategories(rawJson);
         Path outer=null, inner=null;
         Long assetId=null; String objectKey=null;
         try {
@@ -126,6 +127,11 @@ public class AsdmToolImportService {
             String markdown=decode(AsdmOuterArchive.readMarkdown(outer,entries.markdownPath()));
             if (markdown.contains(BEGIN) || markdown.contains(END)) throw error("ASDM_MD_MARKER_CONFLICT","原始 Markdown 包含系统保留标记",HttpStatus.UNPROCESSABLE_ENTITY);
             inner=AsdmOuterArchive.extractTool(outer,entries.packagePath(),maxInnerBytes);
+            // 在创建资产、上传 MinIO、创建 Wiki 之前校验工具集目录真实性。
+            // 未声明工具集分类时不做目录扫描，保持历史工具包可直接导入的行为。
+            if (!toolsets.isEmpty())
+                AsdmToolsetArchiveInspector.requireToolsetsPresent(
+                        AsdmToolsetArchiveInspector.inspectToolsets(inner),toolsets);
             String sha=sha256(inner); long size=Files.size(inner);
             if (prior.imported() && !prior.wikiActive()) {
                 assetId=prior.assetId();
@@ -155,9 +161,9 @@ public class AsdmToolImportService {
                     document=wiki.update(current.id(),new WikiDocumentService.UpdateCommand((String)source.get("name"),content,current.versionNo(),List.of(),null,false),actor,requestId);
                 }
                 db.update("UPDATE external_asdm_tool_asset SET wiki_document_id=?,status='READY' WHERE id=?",document.id(),finalAssetId);
-                applyMappings(finalAssetId,((Number)source.get("resource_id")).longValue(),versionId,source,commands,rawHash,actor);
+                applyMappings(finalAssetId,((Number)source.get("resource_id")).longValue(),versionId,source,toolsets,rawHash,actor);
                 db.update("UPDATE external_asdm_tool_asset SET command_mapping_applied_sha256=?,command_mapping_applied_at=NOW(3) WHERE id=?",rawHash,finalAssetId);
-                if (rawHash!=null) db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result,metadata_json) VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_MAPPING_IMPORTED',?, 'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS',JSON_OBJECT('count',?))",actor,versionId,requestId(requestId),commands.size());
+                if (rawHash!=null) db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result,metadata_json) VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_MAPPING_IMPORTED',?, 'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS',JSON_OBJECT('count',?))",actor,versionId,requestId(requestId),toolsets.size());
                 db.update("INSERT INTO external_import_record(resource_version_id,entry_path,target_type,target_id,action,result,operator_id) VALUES(?,?,'ASDM_TOOL',?,?,'SUCCESS',?)",versionId,SOURCE_PATH,finalAssetId,existing.isEmpty()?"IMPORT":"UPDATE",actor);
                 return document;
             });
@@ -228,11 +234,11 @@ public class AsdmToolImportService {
     }
     private static boolean versionIdEquals(Object value,long id) { return value instanceof Number number && number.longValue()==id; }
 
-    private List<AsdmCommandSupport.Command> parseCommands(String rawJson) {
+    private List<AsdmCommandSupport.ToolsetCategory> parseToolsetCategories(String rawJson) {
         if (rawJson==null) return List.of();
         JsonNode root;
         try { root=mapper.readTree(rawJson); }
-        catch (Exception ex) { throw error("ASDM_COMMAND_MAPPING_IMPORT_FAILED","命令分类元数据无法解析",HttpStatus.UNPROCESSABLE_ENTITY); }
+        catch (Exception ex) { throw error("ASDM_TOOLSET_METADATA_INVALID","工具集分类元数据无法解析",HttpStatus.UNPROCESSABLE_ENTITY); }
         return AsdmCommandSupport.parse(root, code -> {
             if (code==null || code.isBlank()) return null;
             List<String> roots=db.query("SELECT category_key FROM skill_category WHERE category_key=? AND parent_id IS NULL AND status='ACTIVE'",(rs,n)->rs.getString(1),code);
@@ -242,37 +248,61 @@ public class AsdmToolImportService {
         });
     }
 
+    /** 同版本 JSON 更新时，从已就绪资产的内层 ZIP 重新校验工具集目录。 */
+    private void requireToolsetsInAsset(long assetId,List<AsdmCommandSupport.ToolsetCategory> toolsets) {
+        if (toolsets.isEmpty()) return;
+        Path archive=null;
+        try {
+            String objectKey=db.queryForObject("SELECT object_key FROM external_asdm_tool_asset WHERE id=?",String.class,assetId);
+            if (objectKey==null) throw error("ASDM_TOOLSET_ARCHIVE_INVALID","ASDM 工具包资产不存在",HttpStatus.UNPROCESSABLE_ENTITY);
+            archive=Files.createTempFile("asdm-asset-inspect-", ".zip");
+            try (InputStream in=storage.get(objectKey); var out=Files.newOutputStream(archive)) {
+                byte[] buffer=new byte[8192]; long count=0; int n;
+                while ((n=in.read(buffer))!=-1) {
+                    count+=n;
+                    if (count>maxInnerBytes) throw error("ASDM_TOOLSET_ARCHIVE_INVALID","ASDM 工具包超过大小限制",HttpStatus.UNPROCESSABLE_ENTITY);
+                    out.write(buffer,0,n);
+                }
+                if (count==0) throw error("ASDM_TOOLSET_ARCHIVE_INVALID","ASDM 工具包为空",HttpStatus.UNPROCESSABLE_ENTITY);
+            }
+            AsdmToolsetArchiveInspector.requireToolsetsPresent(
+                    AsdmToolsetArchiveInspector.inspectToolsets(archive),toolsets);
+        } catch (BusinessException ex) { throw ex; }
+        catch (Exception ex) { throw error("ASDM_TOOLSET_ARCHIVE_INVALID","ASDM 工具包无法读取",HttpStatus.UNPROCESSABLE_ENTITY); }
+        finally { if (archive!=null) try { Files.deleteIfExists(archive); } catch (Exception ignored) {} }
+    }
+
     /** 在一个数据库事务内重建当前资产的 ACTIVE 映射；旧行保留为 SUPERSEDED 以便追溯。 */
     private int applyMappings(long assetId,long resourceId,long versionId,Map<String,Object> source,
-            List<AsdmCommandSupport.Command> commands,String payloadHash,long actor) {
+            List<AsdmCommandSupport.ToolsetCategory> toolsets,String payloadHash,long actor) {
         try {
             db.update("UPDATE external_asdm_command_category SET mapping_status='SUPERSEDED' WHERE resource_id=? AND asset_id<>? AND mapping_status='ACTIVE'",resourceId,assetId);
             Map<String,Map<String,Object>> existing=new LinkedHashMap<>();
             for (Map<String,Object> row:db.queryForList("SELECT id,tool_name toolName,mapping_status mappingStatus FROM external_asdm_command_category WHERE asset_id=?",assetId))
                 existing.put((String)row.get("toolName"),row);
             Set<String> desired=new LinkedHashSet<>();
-            for (AsdmCommandSupport.Command command:commands) {
-                desired.add(command.toolName());
-                Map<String,Object> row=existing.get(command.toolName());
+            for (AsdmCommandSupport.ToolsetCategory toolset:toolsets) {
+                desired.add(toolset.toolsetName());
+                Map<String,Object> row=existing.get(toolset.toolsetName());
                 if (row!=null) {
                     db.update("UPDATE external_asdm_command_category SET source_kind='EXTERNAL_ASDM_PACKAGE',source_system=?,external_resource_id=?," +
                             "first_category_code=?,development_stage=?,mapping_payload_sha256=?,mapping_status='ACTIVE',imported_by=?,imported_at=NOW(3) WHERE id=?",
-                            source.get("source_system"),source.get("external_resource_id"),command.firstCategoryCode(),command.developmentStage(),payloadHash,actor,row.get("id"));
+                            source.get("source_system"),source.get("external_resource_id"),toolset.firstCategoryCode(),toolset.developmentStage(),payloadHash,actor,row.get("id"));
                 } else {
                     db.update("INSERT INTO external_asdm_command_category(asset_id,resource_id,resource_version_id,source_kind,source_system," +
                             "external_resource_id,tool_name,first_category_code,development_stage,mapping_payload_sha256,mapping_status,imported_by) " +
                             "VALUES(?,?,?,'EXTERNAL_ASDM_PACKAGE',?,?,?,?,?,?,'ACTIVE',?)",
                             assetId,resourceId,versionId,source.get("source_system"),source.get("external_resource_id"),
-                            command.toolName(),command.firstCategoryCode(),command.developmentStage(),payloadHash,actor);
+                            toolset.toolsetName(),toolset.firstCategoryCode(),toolset.developmentStage(),payloadHash,actor);
                 }
             }
             for (Map<String,Object> row:existing.values())
                 if (!desired.contains((String)row.get("toolName")) && "ACTIVE".equals(row.get("mappingStatus")))
                     db.update("UPDATE external_asdm_command_category SET mapping_status='SUPERSEDED' WHERE id=?",row.get("id"));
             db.update("UPDATE external_asdm_command_category SET resource_version_id=? WHERE asset_id=?",versionId,assetId);
-            return commands.size();
+            return toolsets.size();
         } catch (BusinessException ex) { throw ex; }
-        catch (Exception ex) { throw error("ASDM_COMMAND_MAPPING_IMPORT_FAILED","命令分类映射写入失败",HttpStatus.INTERNAL_SERVER_ERROR); }
+        catch (Exception ex) { throw error("ASDM_TOOLSET_MAPPING_IMPORT_FAILED","工具集分类映射写入失败",HttpStatus.INTERNAL_SERVER_ERROR); }
     }
 
     private static String mappingStatus(String rawHash,String appliedHash,int count) {
