@@ -1,8 +1,11 @@
 package com.company.skillplatform.external;
 
 import com.company.skillplatform.common.application.BusinessException;
+import com.company.skillplatform.skill.domain.DevelopmentStage;
 import com.company.skillplatform.storage.domain.ObjectStoragePort;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -15,8 +18,11 @@ import java.security.MessageDigest;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
@@ -36,42 +42,78 @@ public class AsdmToolImportService {
     private final ObjectStoragePort storage;
     private final WikiDocumentService wiki;
     private final TransactionTemplate transactions;
+    private final ObjectMapper mapper;
     private final String baseUrl;
     private final long maxInnerBytes;
     private final long maxOuterBytes;
 
     public AsdmToolImportService(JdbcTemplate db, ObjectStoragePort storage, WikiDocumentService wiki, TransactionTemplate transactions,
+            ObjectMapper mapper,
             @Value("${integration.external.asdm-tool.download-base-url:}") String baseUrl,
             @Value("${integration.external.asdm-tool.max-inner-zip-bytes:52428800}") long maxInnerBytes,
             @Value("${integration.external.max-file-bytes:52428800}") long maxOuterBytes) {
-        this.db=db; this.storage=storage; this.wiki=wiki; this.transactions=transactions; this.baseUrl=baseUrl; this.maxInnerBytes=maxInnerBytes; this.maxOuterBytes=maxOuterBytes;
+        this.db=db; this.storage=storage; this.wiki=wiki; this.transactions=transactions; this.mapper=mapper; this.baseUrl=baseUrl; this.maxInnerBytes=maxInnerBytes; this.maxOuterBytes=maxOuterBytes;
     }
 
     public record ImportCommand(boolean confirmUpdate, Integer expectedWikiVersionNo) {}
     public record ImportResult(String status, Long resourceVersionId, Long assetId, Long wikiDocumentId, String wikiTitle,
-            String toolFilename, long toolSizeBytes, String downloadUrl, String wikiUrl) {}
+            String toolFilename, long toolSizeBytes, String downloadUrl, String wikiUrl,
+            String commandMappingStatus, int commandMappingCount) {}
     public record Status(boolean imported, Long resourceVersionId, Long assetId, Long wikiDocumentId, boolean wikiActive,
-            String toolFilename, String downloadUrl, Instant importedAt, Integer wikiVersionNo) {}
+            String toolFilename, String downloadUrl, Instant importedAt, Integer wikiVersionNo,
+            String commandMappingStatus, int commandMappingCount) {}
 
     public Status status(long versionId) {
         Map<String,Object> source=source(versionId);
-        List<Map<String,Object>> rows=db.queryForList("SELECT a.id assetId,a.wiki_document_id wikiId,a.filename,a.created_at,d.status wikiStatus,d.version_no wikiVersionNo FROM external_asdm_tool_asset a LEFT JOIN wiki_document d ON d.id=a.wiki_document_id WHERE a.resource_version_id=? AND a.status='READY'", versionId);
+        String rawHash=text(source.get("asdmCommandsPayloadSha256"));
+        List<Map<String,Object>> rows=db.queryForList("SELECT a.id assetId,a.wiki_document_id wikiId,a.filename,a.created_at,a.command_mapping_applied_sha256 appliedHash,d.status wikiStatus,d.version_no wikiVersionNo FROM external_asdm_tool_asset a LEFT JOIN wiki_document d ON d.id=a.wiki_document_id WHERE a.resource_version_id=? AND a.status='READY'", versionId);
         if (rows.isEmpty()) {
             List<Map<String,Object>> existing=db.queryForList("SELECT id,status,version_no FROM wiki_document WHERE source_system=? AND source_resource_id=? AND source_entry_path=? AND team_id IS NULL AND status='ACTIVE' ORDER BY id DESC LIMIT 1",source.get("source_system"),source.get("external_resource_id"),SOURCE_PATH);
-            if (existing.isEmpty()) return new Status(false,versionId,null,null,false,null,null,null,null);
+            if (existing.isEmpty()) return new Status(false,versionId,null,null,false,null,null,null,null,mappingStatus(rawHash,null,0),0);
             var wiki=existing.get(0);
-            return new Status(false,versionId,null,((Number)wiki.get("id")).longValue(),"ACTIVE".equals(wiki.get("status")),null,null,null,((Number)wiki.get("version_no")).intValue());
+            return new Status(false,versionId,null,((Number)wiki.get("id")).longValue(),"ACTIVE".equals(wiki.get("status")),null,null,null,((Number)wiki.get("version_no")).intValue(),mappingStatus(rawHash,null,0),0);
         }
         var row=rows.get(0); long id=((Number)row.get("assetId")).longValue();
-        return new Status(true,versionId,id,((Number)row.get("wikiId")).longValue(),"ACTIVE".equals(row.get("wikiStatus")),(String)row.get("filename"),urlFor(id),((java.sql.Timestamp)row.get("created_at")).toInstant(),((Number)row.get("wikiVersionNo")).intValue());
+        int mappingCount=db.queryForObject("SELECT COUNT(*) FROM external_asdm_command_category WHERE asset_id=? AND mapping_status='ACTIVE'",Integer.class,id);
+        return new Status(true,versionId,id,((Number)row.get("wikiId")).longValue(),"ACTIVE".equals(row.get("wikiStatus")),(String)row.get("filename"),urlFor(id),((java.sql.Timestamp)row.get("created_at")).toInstant(),((Number)row.get("wikiVersionNo")).intValue(),mappingStatus(rawHash,text(row.get("appliedHash")),mappingCount),mappingCount);
+    }
+
+    /** 当前版本已入库的命令分类映射，可按管理端需要展示来源与状态。 */
+    public List<Map<String,Object>> commands(long versionId) {
+        source(versionId);
+        return db.queryForList("SELECT c.id,c.tool_name AS toolName,c.first_category_code AS firstCategoryCode," +
+                "c.development_stage AS developmentStage,c.mapping_status AS status,c.source_kind AS sourceKind," +
+                "c.source_system AS sourceSystem,c.external_resource_id AS externalResourceId," +
+                "c.resource_version_id AS resourceVersionId,c.asset_id AS assetId,c.imported_at AS importedAt " +
+                "FROM external_asdm_command_category c JOIN external_asdm_tool_asset a ON a.id=c.asset_id " +
+                "WHERE a.resource_version_id=? AND c.mapping_status IN ('ACTIVE','SUPERSEDED') " +
+                "ORDER BY CASE c.mapping_status WHEN 'ACTIVE' THEN 0 ELSE 1 END, c.tool_name",versionId);
     }
 
     public ImportResult importWiki(long versionId, ImportCommand command, long actor, String requestId) {
         Map<String,Object> source=source(versionId);
         Status prior=status(versionId);
-        if (prior.imported() && prior.wikiActive()) return result("UNCHANGED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
+        String rawJson=text(source.get("asdmCommandsRawJson"));
+        String rawHash=text(source.get("asdmCommandsPayloadSha256"));
+        if (prior.imported() && prior.wikiActive()) {
+            String appliedHash=prior.assetId()==null?null:db.queryForObject("SELECT command_mapping_applied_sha256 FROM external_asdm_tool_asset WHERE id=?",String.class,prior.assetId());
+            // 同一版本重复点击：JSON 未变化时保持原有 UNCHANGED 语义，不改 Wiki / ZIP / 分类。
+            if (Objects.equals(rawHash,appliedHash)) return result("UNCHANGED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
+            if (!versionIdEquals(source.get("current_version_id"),versionId)) throw error("ASDM_OLD_VERSION_NOT_CURRENT","只能导入当前外部资源版本",HttpStatus.CONFLICT);
+            List<AsdmCommandSupport.Command> commands=parseCommands(rawJson);
+            transactions.execute(tx -> {
+                db.queryForObject("SELECT id FROM external_asdm_tool_asset WHERE id=? FOR UPDATE",Long.class,prior.assetId());
+                applyMappings(prior.assetId(),((Number)source.get("resource_id")).longValue(),versionId,source,commands,rawHash,actor);
+                db.update("UPDATE external_asdm_tool_asset SET command_mapping_applied_sha256=?,command_mapping_applied_at=NOW(3) WHERE id=?",rawHash,prior.assetId());
+                db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result) VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_MAPPING_SYNCED',?, 'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS')",actor,versionId,requestId(requestId));
+                return null;
+            });
+            return result("UPDATED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
+        }
         if (!versionIdEquals(source.get("current_version_id"),versionId)) throw error("ASDM_OLD_VERSION_NOT_CURRENT","只能导入当前外部资源版本",HttpStatus.CONFLICT);
         validatedBaseUrl();
+        // 先校验命令分类，任何不合法项都在创建资产 / Wiki 之前失败，不留下部分映射。
+        List<AsdmCommandSupport.Command> commands=parseCommands(rawJson);
         Path outer=null, inner=null;
         Long assetId=null; String objectKey=null;
         try {
@@ -113,6 +155,9 @@ public class AsdmToolImportService {
                     document=wiki.update(current.id(),new WikiDocumentService.UpdateCommand((String)source.get("name"),content,current.versionNo(),List.of(),null,false),actor,requestId);
                 }
                 db.update("UPDATE external_asdm_tool_asset SET wiki_document_id=?,status='READY' WHERE id=?",document.id(),finalAssetId);
+                applyMappings(finalAssetId,((Number)source.get("resource_id")).longValue(),versionId,source,commands,rawHash,actor);
+                db.update("UPDATE external_asdm_tool_asset SET command_mapping_applied_sha256=?,command_mapping_applied_at=NOW(3) WHERE id=?",rawHash,finalAssetId);
+                if (rawHash!=null) db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result,metadata_json) VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_MAPPING_IMPORTED',?, 'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS',JSON_OBJECT('count',?))",actor,versionId,requestId(requestId),commands.size());
                 db.update("INSERT INTO external_import_record(resource_version_id,entry_path,target_type,target_id,action,result,operator_id) VALUES(?,?,'ASDM_TOOL',?,?,'SUCCESS',?)",versionId,SOURCE_PATH,finalAssetId,existing.isEmpty()?"IMPORT":"UPDATE",actor);
                 return document;
             });
@@ -162,7 +207,7 @@ public class AsdmToolImportService {
         }
     }
     private Map<String,Object> source(long id) {
-        List<Map<String,Object>> rows=db.queryForList("SELECT v.id,v.resource_id,v.object_key,v.storage_status,r.current_version_id,r.source_system,r.external_resource_id,r.name,r.resource_type FROM external_resource_version v JOIN external_resource r ON r.id=v.resource_id WHERE v.id=?",id);
+        List<Map<String,Object>> rows=db.queryForList("SELECT v.id,v.resource_id,v.object_key,v.storage_status,v.asdm_commands_raw_json AS asdmCommandsRawJson,v.asdm_commands_payload_sha256 AS asdmCommandsPayloadSha256,r.current_version_id,r.source_system,r.external_resource_id,r.name,r.resource_type FROM external_resource_version v JOIN external_resource r ON r.id=v.resource_id WHERE v.id=?",id);
         if (rows.isEmpty()) throw error("EXTERNAL_VERSION_NOT_FOUND","外部资源版本不存在",HttpStatus.NOT_FOUND);
         if (!"AVAILABLE".equals(rows.get(0).get("storage_status"))) throw error("EXTERNAL_VERSION_NOT_FOUND","外部资源版本不可读",HttpStatus.NOT_FOUND);
         if (!"ASDM-TOOL".equals(rows.get(0).get("resource_type"))) throw error("ASDM_RESOURCE_TYPE_MISMATCH","资源不是 ASDM-TOOL",HttpStatus.BAD_REQUEST);
@@ -170,7 +215,8 @@ public class AsdmToolImportService {
     }
     private ImportResult result(String status,Map<String,Object> source,long assetId,long wikiId,String filename) {
         long size=db.queryForObject("SELECT size_bytes FROM external_asdm_tool_asset WHERE id=?",Long.class,assetId);
-        return new ImportResult(status,((Number)source.get("id")).longValue(),assetId,wikiId,(String)source.get("name"),filename,size,urlFor(assetId),"/wiki?documentId="+wikiId);
+        Status current=status(((Number)source.get("id")).longValue());
+        return new ImportResult(status,((Number)source.get("id")).longValue(),assetId,wikiId,(String)source.get("name"),filename,size,urlFor(assetId),"/wiki?documentId="+wikiId,current.commandMappingStatus(),current.commandMappingCount());
     }
     public String urlFor(long assetId) { return validatedBaseUrl()+"/asdm-tools/download/"+assetId; }
     private String validatedBaseUrl() {
@@ -181,6 +227,62 @@ public class AsdmToolImportService {
         } catch (Exception ex) { throw error("ASDM_DOWNLOAD_BASE_URL_INVALID","ASDM_TOOL_DOWNLOAD_BASE_URL 未配置或无效",HttpStatus.INTERNAL_SERVER_ERROR); }
     }
     private static boolean versionIdEquals(Object value,long id) { return value instanceof Number number && number.longValue()==id; }
+
+    private List<AsdmCommandSupport.Command> parseCommands(String rawJson) {
+        if (rawJson==null) return List.of();
+        JsonNode root;
+        try { root=mapper.readTree(rawJson); }
+        catch (Exception ex) { throw error("ASDM_COMMAND_MAPPING_IMPORT_FAILED","命令分类元数据无法解析",HttpStatus.UNPROCESSABLE_ENTITY); }
+        return AsdmCommandSupport.parse(root, code -> {
+            if (code==null || code.isBlank()) return null;
+            List<String> roots=db.query("SELECT category_key FROM skill_category WHERE category_key=? AND parent_id IS NULL AND status='ACTIVE'",(rs,n)->rs.getString(1),code);
+            if (roots.isEmpty()) return null;
+            try { return DevelopmentStage.fromRootCategoryKey(code).name(); }
+            catch (RuntimeException invalid) { return null; }
+        });
+    }
+
+    /** 在一个数据库事务内重建当前资产的 ACTIVE 映射；旧行保留为 SUPERSEDED 以便追溯。 */
+    private int applyMappings(long assetId,long resourceId,long versionId,Map<String,Object> source,
+            List<AsdmCommandSupport.Command> commands,String payloadHash,long actor) {
+        try {
+            db.update("UPDATE external_asdm_command_category SET mapping_status='SUPERSEDED' WHERE resource_id=? AND asset_id<>? AND mapping_status='ACTIVE'",resourceId,assetId);
+            Map<String,Map<String,Object>> existing=new LinkedHashMap<>();
+            for (Map<String,Object> row:db.queryForList("SELECT id,tool_name toolName,mapping_status mappingStatus FROM external_asdm_command_category WHERE asset_id=?",assetId))
+                existing.put((String)row.get("toolName"),row);
+            Set<String> desired=new LinkedHashSet<>();
+            for (AsdmCommandSupport.Command command:commands) {
+                desired.add(command.toolName());
+                Map<String,Object> row=existing.get(command.toolName());
+                if (row!=null) {
+                    db.update("UPDATE external_asdm_command_category SET source_kind='EXTERNAL_ASDM_PACKAGE',source_system=?,external_resource_id=?," +
+                            "first_category_code=?,development_stage=?,mapping_payload_sha256=?,mapping_status='ACTIVE',imported_by=?,imported_at=NOW(3) WHERE id=?",
+                            source.get("source_system"),source.get("external_resource_id"),command.firstCategoryCode(),command.developmentStage(),payloadHash,actor,row.get("id"));
+                } else {
+                    db.update("INSERT INTO external_asdm_command_category(asset_id,resource_id,resource_version_id,source_kind,source_system," +
+                            "external_resource_id,tool_name,first_category_code,development_stage,mapping_payload_sha256,mapping_status,imported_by) " +
+                            "VALUES(?,?,?,'EXTERNAL_ASDM_PACKAGE',?,?,?,?,?,?,'ACTIVE',?)",
+                            assetId,resourceId,versionId,source.get("source_system"),source.get("external_resource_id"),
+                            command.toolName(),command.firstCategoryCode(),command.developmentStage(),payloadHash,actor);
+                }
+            }
+            for (Map<String,Object> row:existing.values())
+                if (!desired.contains((String)row.get("toolName")) && "ACTIVE".equals(row.get("mappingStatus")))
+                    db.update("UPDATE external_asdm_command_category SET mapping_status='SUPERSEDED' WHERE id=?",row.get("id"));
+            db.update("UPDATE external_asdm_command_category SET resource_version_id=? WHERE asset_id=?",versionId,assetId);
+            return commands.size();
+        } catch (BusinessException ex) { throw ex; }
+        catch (Exception ex) { throw error("ASDM_COMMAND_MAPPING_IMPORT_FAILED","命令分类映射写入失败",HttpStatus.INTERNAL_SERVER_ERROR); }
+    }
+
+    private static String mappingStatus(String rawHash,String appliedHash,int count) {
+        if (rawHash==null) return appliedHash==null?"NOT_PROVIDED":(count>0?"SYNCED":"OUTDATED");
+        if (appliedHash==null) return "PENDING";
+        return rawHash.equals(appliedHash)?"SYNCED":"OUTDATED";
+    }
+
+    private static String text(Object value) { return value==null?null:String.valueOf(value); }
+    private static String requestId(String value) { return value==null||value.isBlank()?"external-integration":value; }
     private static String decode(byte[] bytes) {
         try { return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString(); }
         catch (CharacterCodingException ex) { throw error("ASDM_MD_INVALID","Markdown 不是有效 UTF-8",HttpStatus.UNPROCESSABLE_ENTITY); }

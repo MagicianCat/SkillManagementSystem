@@ -5,12 +5,12 @@ import com.company.skillplatform.skill.domain.DevelopmentStage;
 import org.springframework.http.HttpStatus;
 
 /**
- * Generation 的研发阶段。取值与 Skill 的 {@link DevelopmentStage} 一致（9 值），
- * 另加 {@link #MULTI_STAGE} 表示一次 Generation 跨多个非 GENERAL 阶段。
+ * Generation 的研发阶段。取值与 Skill 的 {@link DevelopmentStage} 一致（10 值），
+ * 另加 {@link #MULTI_STAGE} 表示一次 Generation 跨多个阶段。
  */
 public enum GenerationStage {
     REQUIREMENT, PRODUCT, ARCHITECTURE_DESIGN, UI_DESIGN, BACKEND_CODING, FRONTEND_CODING,
-    SECURITY_REVIEW, TESTING, DEPLOYMENT,
+    SECURITY_REVIEW, TESTING, DEPLOYMENT, OTHER,
     MULTI_STAGE;
 
     /** 从 Skill 研发阶段映射为 Generation 阶段；枚举同名直接对应。 */

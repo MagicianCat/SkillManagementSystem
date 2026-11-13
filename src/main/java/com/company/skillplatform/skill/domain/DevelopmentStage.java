@@ -6,7 +6,7 @@ import org.springframework.http.HttpStatus;
 /** 开发阶段由分类树根节点派生，不单独存储。 */
 public enum DevelopmentStage {
     REQUIREMENT, PRODUCT, ARCHITECTURE_DESIGN, UI_DESIGN, BACKEND_CODING, FRONTEND_CODING,
-    SECURITY_REVIEW, TESTING, DEPLOYMENT;
+    SECURITY_REVIEW, TESTING, DEPLOYMENT, OTHER;
 
     /** null/空串返回 null（语义：不指定/不修改）；非法值抛出 400 业务异常而非 IllegalArgumentException。 */
     public static DevelopmentStage fromNullable(String raw) {
@@ -30,6 +30,7 @@ public enum DevelopmentStage {
             case "security" -> SECURITY_REVIEW;
             case "testing" -> TESTING;
             case "deployment" -> DEPLOYMENT;
+            case "other" -> OTHER;
             default -> throw new BusinessException("INVALID_CATEGORY_TREE", "Unknown development flow root: " + key, HttpStatus.INTERNAL_SERVER_ERROR);
         };
     }

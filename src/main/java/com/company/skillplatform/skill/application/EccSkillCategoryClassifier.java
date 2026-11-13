@@ -32,7 +32,8 @@ public final class EccSkillCategoryClassifier {
         if(has(key,"product","roadmap","delivery","project"))return "product.roadmap";
         if(has(key,"content","seo","marketing","growth","article","social"))return "product.growth";
         if(has(key,"ops","billing","finance","logistics","inventory","email","messages"))return "product.operations";
-        return "product.general";
+        // 无法稳定归类的新 Skill 归入“其他”，不批量回填历史 Skill。
+        return "other.general";
     }
     private static String testing(String k){if(has(k,"e2e","browser","click-path"))return "testing.web_e2e";if(has(k,"benchmark","performance"))return "testing.performance";if(has(k,"agent","llm","eval"))return "testing.agent_eval";if(has(k,"regression"))return "testing.regression";if(has(k,"security"))return "testing.security";if(has(k,"coverage","verification","quality","gate"))return "testing.quality_gate";return "testing.unit";}
     private static String deployment(String k){if(has(k,"docker","container"))return "deployment.docker";if(has(k,"kubernetes","cloud"))return "deployment.kubernetes";if(has(k,"canary","rollback"))return "deployment.canary";if(has(k,"config","secret","environment","flox"))return "deployment.configuration";if(has(k,"runtime","installer"))return "deployment.runtime";return "deployment.cicd";}

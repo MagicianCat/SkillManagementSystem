@@ -1,7 +1,10 @@
 package com.company.skillplatform.external;
 
 import com.company.skillplatform.storage.domain.ObjectStoragePort;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.DigestInputStream;
@@ -29,19 +32,21 @@ public class ExternalResourceService {
     private final TransactionTemplate transactions;
     private final ObjectStoragePort storage;
     private final DevelopmentStageCatalogService stages;
+    private final ObjectMapper mapper;
     private final long maxBytes;
     private final long maxInnerBytes;
 
     @org.springframework.beans.factory.annotation.Autowired
     public ExternalResourceService(JdbcTemplate db, TransactionTemplate transactions, ObjectStoragePort storage,
-            DevelopmentStageCatalogService stages,
+            DevelopmentStageCatalogService stages, ObjectMapper mapper,
             @Value("${integration.external.max-file-bytes:52428800}") long maxBytes,
             @Value("${integration.external.asdm-tool.max-inner-zip-bytes:52428800}") long maxInnerBytes) {
-        this.db = db; this.transactions = transactions; this.storage = storage; this.stages = stages; this.maxBytes = maxBytes; this.maxInnerBytes = maxInnerBytes;
+        this.db = db; this.transactions = transactions; this.storage = storage; this.stages = stages; this.mapper = mapper;
+        this.maxBytes = maxBytes; this.maxInnerBytes = maxInnerBytes;
     }
     ExternalResourceService(JdbcTemplate db, TransactionTemplate transactions, ObjectStoragePort storage,
             DevelopmentStageCatalogService stages, long maxBytes) {
-        this(db, transactions, storage, stages, maxBytes, 50L * 1024 * 1024);
+        this(db, transactions, storage, stages, new ObjectMapper(), maxBytes, 50L * 1024 * 1024);
     }
 
     public PushResult push(PushRequest request, MultiValueMap<String, MultipartFile> files, String requestId) {
@@ -73,18 +78,26 @@ public class ExternalResourceService {
     }
 
     private Receipt receive(PushRequest request, ResourceInput input, MultipartFile file, String requestId) throws Exception {
+        String resourceType = normalizeResourceType(input == null ? null : input.resourceType());
         if (input == null || blank(input.resourceId()) || blank(input.resourceName()) || blank(input.fileKey())
-                || !("SKILL".equals(input.resourceType()) || "DOCUMENT".equals(input.resourceType()) || "ASDM-TOOL".equals(input.resourceType()))
+                || !("SKILL".equals(resourceType) || "DOCUMENT".equals(resourceType) || "ASDM-TOOL".equals(resourceType))
                 || input.resourceId().length() > 255 || input.resourceName().length() > 512 || input.fileKey().length() > 128
                 || (input.description() != null && input.description().length() > 10000)
                 || (input.version() != null && input.version().length() > 128)) {
             throw new ResourceFailure("INVALID_RESOURCE", "资源字段无效");
         }
+        // ASDM_TOOL 仅是接收别名；入库与后续判断统一使用 ASDM-TOOL。
+        JsonNode commands = input.asdmCommandsProvided() && input.asdmCommands() != null && !input.asdmCommands().isNull()
+                ? input.asdmCommands() : null;
+        if (commands != null && !"ASDM-TOOL".equals(resourceType))
+            throw new ResourceFailure("INVALID_RESOURCE", "仅 ASDM-TOOL 可携带 asdmCommands");
+        if (commands != null && !commands.isArray())
+            throw new ResourceFailure("INVALID_RESOURCE", "asdmCommands 必须是 JSON 数组");
         DevelopmentStageCatalogService.ResolvedStage stage;
         try {
-            if (!"SKILL".equals(input.resourceType()) && (input.developmentStageProvided() || input.subStageKeyProvided()))
+            if (!"SKILL".equals(resourceType) && (input.developmentStageProvided() || input.subStageKeyProvided()))
                 throw new ResourceFailure("INVALID_RESOURCE", "该资源类型不允许携带研发阶段字段");
-            stage = "SKILL".equals(input.resourceType())
+            stage = "SKILL".equals(resourceType)
                     ? stages.resolve(input.developmentStage(), input.subStageKey())
                     : new DevelopmentStageCatalogService.ResolvedStage(null, null);
         } catch (DevelopmentStageCatalogService.StageValidationException invalid) {
@@ -110,9 +123,19 @@ public class ExternalResourceService {
                 if (header[0] != 'P' || header[1] != 'K' || !((header[2] == 3 && header[3] == 4) || (header[2] == 5 && header[3] == 6)))
                     throw new ResourceFailure("INVALID_FILE_TYPE", "文件不是 ZIP");
             }
-            if ("ASDM-TOOL".equals(input.resourceType())) {
+            if ("ASDM-TOOL".equals(resourceType)) {
                 try { AsdmOuterArchive.inspect(temp, maxInnerBytes); }
                 catch (com.company.skillplatform.common.application.BusinessException ex) { throw new ResourceFailure(ex.getCode(), ex.getMessage()); }
+            }
+            // 接收端只保留完整 JSON 与语义哈希，不解析命令或校验一级分类。
+            String commandJson = null, commandHash = null;
+            int commandCount = 0;
+            if (commands != null) {
+                commandJson = AsdmCommandSupport.canonicalJson(mapper, commands);
+                if (commandJson.getBytes(StandardCharsets.UTF_8).length > AsdmCommandSupport.MAX_PAYLOAD_BYTES)
+                    throw new ResourceFailure("INVALID_RESOURCE", "asdmCommands 元数据过大");
+                commandHash = AsdmCommandSupport.sha256Hex(commandJson);
+                commandCount = commands.size();
             }
             String sha = HexFormat.of().formatHex(digest.digest());
             String objectKey = "external-resources/raw/" + UUID.randomUUID() + ".zip";
@@ -122,7 +145,11 @@ public class ExternalResourceService {
                 // The original bytes remain untouched; parsing is explicitly deferred to an administrator.
                 uploaded = true; // Also compensate a partially written object when put itself fails.
                 try (InputStream in = Files.newInputStream(temp)) { storage.put(objectKey, in, size, "application/zip"); }
-                return transactions.execute(status -> persist(request, input, safeFilename, size, sha, objectKey, stage, requestId));
+                final String persistedCommandJson = commandJson;
+                final String persistedCommandHash = commandHash;
+                final int persistedCommandCount = commandCount;
+                return transactions.execute(status -> persist(request, input, resourceType, safeFilename, size, sha, objectKey, stage,
+                        persistedCommandJson, persistedCommandHash, persistedCommandCount, requestId));
             } finally {
                 // An unchanged or rejected upload never becomes an orphan; a failed DB transaction is compensated.
                 try {
@@ -134,23 +161,24 @@ public class ExternalResourceService {
         } finally { Files.deleteIfExists(temp); }
     }
 
-    private Receipt persist(PushRequest request, ResourceInput input, String filename, long size, String sha, String objectKey,
-            DevelopmentStageCatalogService.ResolvedStage stage, String requestId) {
+    private Receipt persist(PushRequest request, ResourceInput input, String resourceType, String filename, long size, String sha,
+            String objectKey, DevelopmentStageCatalogService.ResolvedStage stage, String commandJson, String commandHash,
+            int commandCount, String requestId) {
         Long roleId = db.queryForObject("SELECT id FROM external_role WHERE source_system=? AND external_role_id=?", Long.class, request.sourceSystem(), request.role().roleId());
         List<Map<String,Object>> existing = db.queryForList("SELECT id,resource_type,current_version_id,development_stage,sub_stage_key FROM external_resource WHERE source_system=? AND external_resource_id=? FOR UPDATE", request.sourceSystem(), input.resourceId());
         boolean isNew = existing.isEmpty();
         DevelopmentStageCatalogService.ResolvedStage effectiveStage = stage;
-        if ("SKILL".equals(input.resourceType()) && effectiveStage.developmentStage() == null && effectiveStage.subStageKey() == null && !isNew) {
+        if ("SKILL".equals(resourceType) && effectiveStage.developmentStage() == null && effectiveStage.subStageKey() == null && !isNew) {
             Map<String,Object> previous = existing.get(0);
             effectiveStage = new DevelopmentStageCatalogService.ResolvedStage(
                     (String) previous.get("development_stage"), (String) previous.get("sub_stage_key"));
         }
-        if (isNew) db.update("INSERT INTO external_resource(source_system,external_resource_id,resource_type,name,description,development_stage,sub_stage_key) VALUES(?,?,?,?,?,?,?)", request.sourceSystem(), input.resourceId(), input.resourceType(), input.resourceName(), input.description(), effectiveStage.developmentStage(), effectiveStage.subStageKey());
-        else if (!input.resourceType().equals(existing.get(0).get("resource_type"))) throw new ResourceFailure("RESOURCE_TYPE_CONFLICT", "相同资源 ID 的类型不可改变");
+        if (isNew) db.update("INSERT INTO external_resource(source_system,external_resource_id,resource_type,name,description,development_stage,sub_stage_key) VALUES(?,?,?,?,?,?,?)", request.sourceSystem(), input.resourceId(), resourceType, input.resourceName(), input.description(), effectiveStage.developmentStage(), effectiveStage.subStageKey());
+        else if (!resourceType.equals(existing.get(0).get("resource_type"))) throw new ResourceFailure("RESOURCE_TYPE_CONFLICT", "相同资源 ID 的类型不可改变");
         Long resourceId = db.queryForObject("SELECT id FROM external_resource WHERE source_system=? AND external_resource_id=?", Long.class, request.sourceSystem(), input.resourceId());
         db.update("INSERT IGNORE INTO external_role_resource(role_id,resource_id) VALUES(?,?)", roleId, resourceId);
         db.update("UPDATE external_resource SET name=?,description=?,development_stage=?,sub_stage_key=? WHERE id=?", input.resourceName(), input.description(), effectiveStage.developmentStage(), effectiveStage.subStageKey(), resourceId);
-        List<Map<String,Object>> versions = db.queryForList("SELECT id,sha256,external_version,development_stage,sub_stage_key FROM external_resource_version WHERE resource_id=? ORDER BY id DESC", resourceId);
+        List<Map<String,Object>> versions = db.queryForList("SELECT id,sha256,external_version,development_stage,sub_stage_key,asdm_commands_payload_sha256 FROM external_resource_version WHERE resource_id=? ORDER BY id DESC", resourceId);
         for (Map<String,Object> version : versions) {
             if (sha.equals(version.get("sha256"))) {
                 Long existingVersionId = ((Number)version.get("id")).longValue();
@@ -166,12 +194,25 @@ public class ExternalResourceService {
                             version.get("development_stage"), version.get("sub_stage_key"),
                             effectiveStage.developmentStage(), effectiveStage.subStageKey());
                 }
-                return new Receipt(sameMetadata ? "UNCHANGED" : "UPDATED", existingVersionId);
+                // 未携带 asdmCommands 时保留既有 JSON；显式 [] 或新数组则按哈希判断是否变化。
+                String previousHash = version.get("asdm_commands_payload_sha256") == null ? null
+                        : String.valueOf(version.get("asdm_commands_payload_sha256"));
+                boolean commandsChanged = commandHash != null && !commandHash.equals(previousHash);
+                if (commandsChanged) {
+                    db.update("UPDATE external_resource_version SET asdm_commands_raw_json=?,asdm_commands_payload_sha256=? WHERE id=?",
+                            commandJson, commandHash, existingVersionId);
+                    db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result,before_json,after_json) " +
+                                    "VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_METADATA_UPDATED',NULL,'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS'," +
+                                    "JSON_OBJECT('sha256',?),JSON_OBJECT('sha256',?, 'count',?))",
+                            existingVersionId, requestId == null || requestId.isBlank() ? "external-integration" : requestId,
+                            previousHash, commandHash, commandCount);
+                }
+                return new Receipt(sameMetadata && !commandsChanged ? "UNCHANGED" : "UPDATED", existingVersionId);
             }
             if (!blank(input.version()) && input.version().equals(version.get("external_version")))
                 throw new ResourceFailure("VERSION_CONTENT_CONFLICT", "同一版本号对应不同文件内容");
         }
-        db.update("INSERT INTO external_resource_version(resource_id,external_version,file_name,size_bytes,sha256,object_key,storage_status,development_stage,sub_stage_key) VALUES(?,?,?,?,?,?,'AVAILABLE',?,?)", resourceId, input.version(), filename, size, sha, objectKey, effectiveStage.developmentStage(), effectiveStage.subStageKey());
+        db.update("INSERT INTO external_resource_version(resource_id,external_version,file_name,size_bytes,sha256,object_key,storage_status,development_stage,sub_stage_key,asdm_commands_raw_json,asdm_commands_payload_sha256) VALUES(?,?,?,?,?,?,'AVAILABLE',?,?,?,?)", resourceId, input.version(), filename, size, sha, objectKey, effectiveStage.developmentStage(), effectiveStage.subStageKey(), commandJson, commandHash);
         Long versionId = db.queryForObject("SELECT id FROM external_resource_version WHERE object_key=?", Long.class, objectKey);
         db.update("UPDATE external_resource SET current_version_id=? WHERE id=?", versionId, resourceId);
         return new Receipt(isNew ? "CREATED" : "UPDATED", versionId);
@@ -192,6 +233,10 @@ public class ExternalResourceService {
     }
 
     private static boolean blank(String value) { return value == null || value.isBlank(); }
+
+    private static String normalizeResourceType(String value) {
+        return "ASDM_TOOL".equals(value) ? "ASDM-TOOL" : value;
+    }
 
     /** Recovers objects left behind when the process exits between MinIO and the database commit. */
     @Scheduled(fixedDelayString="${integration.external.orphan-sweep-ms:3600000}")
@@ -215,8 +260,10 @@ public class ExternalResourceService {
         private String developmentStage;
         private String subStageKey;
         private String fileKey;
+        private JsonNode asdmCommands;
         private boolean developmentStageProvided;
         private boolean subStageKeyProvided;
+        private boolean asdmCommandsProvided;
 
         public ResourceInput() {}
         public ResourceInput(String resourceId, String resourceName, String resourceType, String version, String description, String fileKey) {
@@ -231,12 +278,15 @@ public class ExternalResourceService {
         @com.fasterxml.jackson.annotation.JsonProperty public void setDevelopmentStage(String value) { developmentStage=value; developmentStageProvided=true; }
         @com.fasterxml.jackson.annotation.JsonProperty public void setSubStageKey(String value) { subStageKey=value; subStageKeyProvided=true; }
         @com.fasterxml.jackson.annotation.JsonProperty public void setFileKey(String value) { fileKey=value; }
+        @com.fasterxml.jackson.annotation.JsonProperty public void setAsdmCommands(JsonNode value) { asdmCommands=value; asdmCommandsProvided=true; }
         public String resourceId(){return resourceId;} public String resourceName(){return resourceName;}
         public String resourceType(){return resourceType;} public String version(){return version;}
         public String description(){return description;} public String developmentStage(){return developmentStage;}
         public String subStageKey(){return subStageKey;} public String fileKey(){return fileKey;}
+        public JsonNode asdmCommands(){return asdmCommands;}
         public boolean developmentStageProvided(){return developmentStageProvided;}
         public boolean subStageKeyProvided(){return subStageKeyProvided;}
+        public boolean asdmCommandsProvided(){return asdmCommandsProvided;}
     }
     public record PushRequest(String sourceSystem, RoleInput role, List<ResourceInput> resources) {}
     public record Failure(String resourceId, String fileKey, String errorCode, String reason) {}

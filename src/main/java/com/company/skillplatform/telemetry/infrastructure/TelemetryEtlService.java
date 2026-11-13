@@ -37,6 +37,7 @@ public class TelemetryEtlService {
                      WHEN 'security' THEN 'SECURITY_REVIEW'
                      WHEN 'testing' THEN 'TESTING'
                      WHEN 'deployment' THEN 'DEPLOYMENT'
+                     WHEN 'other' THEN 'OTHER'
                      ELSE 'OTHER'
                    END,
                    CASE WHEN c.parent_id IS NULL THEN 1 ELSE 2 END, c.sort_order, c.status

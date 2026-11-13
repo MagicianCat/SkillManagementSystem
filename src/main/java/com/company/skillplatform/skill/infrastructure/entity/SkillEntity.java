@@ -19,7 +19,7 @@ public class SkillEntity extends BaseJpaEntity {
     @Column(name="scope_type",nullable=false,length=32) private String scopeType="PLATFORM";
     @Column(name="team_id") private Long teamId;
     @Column(name="origin_team_id") private Long originTeamId;
-    @Formula("(select case coalesce(parent.category_key, leaf.category_key) when 'requirement' then 'REQUIREMENT' when 'product' then 'PRODUCT' when 'architecture' then 'ARCHITECTURE_DESIGN' when 'ui' then 'UI_DESIGN' when 'backend' then 'BACKEND_CODING' when 'frontend' then 'FRONTEND_CODING' when 'security' then 'SECURITY_REVIEW' when 'testing' then 'TESTING' when 'deployment' then 'DEPLOYMENT' end from skill_category leaf left join skill_category parent on parent.id=leaf.parent_id where leaf.id=category_id)")
+    @Formula("(select case coalesce(parent.category_key, leaf.category_key) when 'requirement' then 'REQUIREMENT' when 'product' then 'PRODUCT' when 'architecture' then 'ARCHITECTURE_DESIGN' when 'ui' then 'UI_DESIGN' when 'backend' then 'BACKEND_CODING' when 'frontend' then 'FRONTEND_CODING' when 'security' then 'SECURITY_REVIEW' when 'testing' then 'TESTING' when 'deployment' then 'DEPLOYMENT' when 'other' then 'OTHER' end from skill_category leaf left join skill_category parent on parent.id=leaf.parent_id where leaf.id=category_id)")
     @Enumerated(EnumType.STRING) private DevelopmentStage developmentStage;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="latest_published_version_id") private SkillVersionEntity latestPublishedVersion;
     @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="latest_platform_approved_version_id") private SkillVersionEntity latestPlatformApprovedVersion;

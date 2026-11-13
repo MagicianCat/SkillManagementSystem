@@ -46,6 +46,7 @@ public class ExternalResourceAdminController {
     }
     @GetMapping("/external-import-jobs/{id}") public Map<String,Object> importJob(@PathVariable Long id) { return bulk.job(id); }
     @GetMapping("/external-resource-versions/{id}/asdm-tool/status") public AsdmToolImportService.Status asdmStatus(@PathVariable Long id) { return asdm.status(id); }
+    @GetMapping("/external-resource-versions/{id}/asdm-tool/commands") public List<Map<String,Object>> asdmCommands(@PathVariable Long id, Authentication auth, HttpServletRequest request) { var result=asdm.commands(id); service.audit("EXTERNAL_ASDM_COMMANDS_LISTED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId()); return result; }
     @PostMapping("/external-resource-versions/{id}/asdm-tool:import-wiki") public AsdmToolImportService.ImportResult importAsdm(@PathVariable Long id, @RequestBody(required=false) AsdmToolImportService.ImportCommand body, Authentication auth, HttpServletRequest request) {
         return asdm.importWiki(id,body,(Long)auth.getPrincipal(),request.getRequestId());
     }
