@@ -29,11 +29,11 @@ public class KnowledgeIndexService {
         try{WikiDocumentEntity document=documents.findById(documentId).orElse(null);if(document==null||!"ACTIVE".equals(document.getStatus())||document.getCurrentRevision()==null){vectors.deleteDocument(documentId);return;}
             var skillLinks=links.findByDocumentIdOrderBySortOrderAsc(documentId);List<String> keys=skillLinks.stream().map(link->link.getSkill().getSkillKey()).distinct().toList();List<String> stages=skillLinks.stream().map(link->link.getSkill().getDevelopmentStage()).filter(java.util.Objects::nonNull).map(Enum::name).distinct().toList();var revision=document.getCurrentRevision();
             List<KnowledgeDocument> sources=new java.util.ArrayList<>();
-            if(document.getTeamId()!=null) sources.add(new KnowledgeDocument(documentId,revision.getRevisionNo(),revision.getContentSha256(),document.getTitle(),document.getTeamId(),false,document.getStatus(),keys,stages,revision.getMarkdownContent()));
+            if(document.getTeamId()!=null) sources.add(new KnowledgeDocument(documentId,revision.getRevisionNo(),revision.getContentSha256(),document.getTitle(),document.getTeamId(),false,document.getStatus(),keys,stages,revision.getMarkdownContent(),document.getKnowledgeCategory().name()));
             WikiPromotionStore.PlatformSnapshot approved=promotionStore==null?null:promotionStore.platform(documentId);
             if(document.isPlatformVisible()&&approved!=null){
                 List<String> approvedKeys=promotionStore.platformSkills(documentId).stream().map(WikiPromotionStore.PlatformSkillLink::skillKey).toList();
-                sources.add(new KnowledgeDocument(documentId,approved.revisionNo(),sha256(approved.markdownContent()),approved.title(),document.getTeamId(),true,document.getStatus(),approvedKeys,List.of(),approved.markdownContent()));
+                sources.add(new KnowledgeDocument(documentId,approved.revisionNo(),sha256(approved.markdownContent()),approved.title(),document.getTeamId(),true,document.getStatus(),approvedKeys,List.of(),approved.markdownContent(),approved.knowledgeCategory()));
             }
             List<KnowledgeChunk> chunks=sources.stream().flatMap(source->chunker.chunk(source).stream()).toList();
             List<float[]> embedded=chunks.isEmpty()?List.of():embedding.embedDocuments(chunks.stream().map(KnowledgeChunk::embeddingText).toList());if(embedded.size()!=chunks.size())throw new IllegalStateException("Embedding result count mismatch");

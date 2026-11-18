@@ -41,6 +41,7 @@ public record KnowledgeVectorPoint(String id, float[] vector, Map<String, Object
         payload.put("status", chunk.status());
         payload.put("skillKeys", chunk.skillKeys());
         payload.put("developmentStages", chunk.developmentStages());
+        payload.put("knowledgeCategory", chunk.knowledgeCategory());
         payload.put("chunkIndex", chunk.chunkIndex());
         payload.put("content", chunk.content());
         return new KnowledgeVectorPoint(stableId(chunk.documentId(), chunk.revisionNo(), chunk.chunkIndex(), chunk.platformVisible() ? "PLATFORM" : "TEAM"), vector, payload);

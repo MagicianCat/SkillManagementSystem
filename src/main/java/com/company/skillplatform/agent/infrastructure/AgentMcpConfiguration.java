@@ -97,11 +97,11 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of("skillKey")), this::detail),
                         tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run. Normal user results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
                                 schema("object", List.of()), this::searchWiki),
-                        tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. Normal user results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
+                        tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. When following a search_knowledge PLATFORM result, pass audience=PLATFORM to read the approved version. Results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
                                 schema("object", List.of("documentId")), this::wikiDocument),
                         tool("list_wiki_children", "List direct child Wiki documents of a visible parent. Call again with a returned child documentId to drill down one level. Results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiChildren),
-                        tool("search_knowledge", "Semantically search the current user's authorized Wiki snippets and linked Skills. Team scope is derived from the run token. Each Wiki result includes sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when the Wiki contains an ASDM package; inspect children before treating a matched parent as complete.",
+                        tool("search_knowledge", "Semantically search authorized Wiki snippets and linked Skills. Optional knowledgeCategory: SKILL_TOOL (Skill, ASDM tools, commands), PROJECT_CONTEXT (project background), INTERNAL_KNOWLEDGE (company knowledge), OTHER. Use PREFER for a confident single-topic hint; it falls back across categories. Use STRICT only when the user explicitly asks to limit the category. Omit the category for mixed or uncertain questions. Category never grants access. Cite the actual Wiki title and sourceUrl. Results include sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when present.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
@@ -139,6 +139,7 @@ public class AgentMcpConfiguration {
         props.put("skillKey", Map.of("type", "string")); props.put("path", Map.of("type", "string"));
         props.put("teamId", Map.of("type", "integer", "minimum", 1));
         props.put("documentId", Map.of("type", "integer", "minimum", 1));
+        props.put("audience", Map.of("type", "string", "enum", List.of("TEAM", "PLATFORM")));
         props.put("keyword", Map.of("type", "string", "maxLength", 200)); props.put("query", Map.of("type", "string", "minLength", 1, "maxLength", 200)); props.put("docId", Map.of("type", "string", "minLength", 1, "maxLength", 512));
         props.put("docType", Map.of("type", "string", "enum", List.of("DOCX", "DOC", "SHEET", "BITABLE", "SLIDES", "MINDNOTE", "WIKI", "UNKNOWN")));
         props.put("limit", Map.of("type", "integer", "minimum", 1, "maximum", 10));
@@ -163,6 +164,8 @@ public class AgentMcpConfiguration {
         Map<String,Object> props=new LinkedHashMap<>();
         props.put("query",Map.of("type","string","minLength",1,"maxLength",1000));
         props.put("developmentStage",Map.of("type","string","enum",Arrays.stream(DevelopmentStage.values()).map(Enum::name).toList()));
+        props.put("knowledgeCategory",Map.of("type","string","enum",List.of("SKILL_TOOL","PROJECT_CONTEXT","INTERNAL_KNOWLEDGE","OTHER")));
+        props.put("categoryMode",Map.of("type","string","enum",List.of("PREFER","STRICT"),"default","PREFER"));
         props.put("limit",Map.of("type","integer","minimum",1,"maximum",10,"default",5));
         return new McpSchema.JsonSchema("object",props,List.of("query"),false,Map.of(),Map.of());
     }
@@ -220,14 +223,14 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult searchKnowledge(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args){
         var agent=run(ex,"knowledge.search");String query=required(args,"query");String stage=str(args,"developmentStage");if(stage!=null)DevelopmentStage.valueOf(stage);
-        var result=knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,integer(args,"limit",5));
+        var result=knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,str(args,"knowledgeCategory"),str(args,"categoryMode"),integer(args,"limit",5));
         Map<String,Object> response=objectMapper.convertValue(result,new TypeReference<>() {});
         List<Map<String,Object>> documents=objectMapper.convertValue(result.results(),new TypeReference<>() {});
         for(Map<String,Object> document:documents) {
             long id=((Number)document.get("documentId")).longValue();
-            String asdmLink=asdmDownloadLink(wiki.get(id,agent.userId()).markdownContent());
+            String asdmLink=asdmDownloadLink(wiki.get(id,agent.userId(),"PLATFORM".equals(document.get("teamScope"))).markdownContent());
             if(asdmLink!=null) document.put("asdmToolDownloadUrl",asdmLink);
-            document.putAll(wikiLinks(id));addWikiDirectory(document,id,agent.userId(),"PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()),3,20);
+            document.putAll(wikiLinks(id,"PLATFORM".equals(document.get("teamScope"))));addWikiDirectory(document,id,agent.userId(),"PLATFORM".equals(document.get("teamScope")),3,20);
         }
         response.put("results",documents);return ok(response);
     }
@@ -252,12 +255,13 @@ public class AgentMcpConfiguration {
         Long workflowId = workflowRunId(agent);
         if (workflowId != null) return workflowWikiRead(workflowId, id, offset, max);
         if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
-        requireUserKnowledge(agent); var document = wiki.get(id, agent.userId()); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
+        requireUserKnowledge(agent); boolean platformAudience="PLATFORM".equals(str(args,"audience"));var document = wiki.get(id, agent.userId(),platformAudience); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
         response.put("parentId", document.parentId());
         String asdmLink = asdmDownloadLink(text);
         if (asdmLink != null) response.put("asdmToolDownloadUrl", asdmLink);
-        response.putAll(wikiLinks(id));addWikiDirectory(response,id,agent.userId(),false,3,20);return ok(response);
+        response.put("knowledgeCategory",document.knowledgeCategory());
+        response.putAll(wikiLinks(id,platformAudience));addWikiDirectory(response,id,agent.userId(),platformAudience,3,20);return ok(response);
     }
     private McpSchema.CallToolResult wikiChildren(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read");
@@ -493,14 +497,17 @@ public class AgentMcpConfiguration {
         return matcher.find() ? matcher.group() : null;
     }
     private Map<String,Object> wikiLinks(long documentId) {
-        String page=webBaseUrl+"/wiki?documentId="+documentId;
+        return wikiLinks(documentId,false);
+    }
+    private Map<String,Object> wikiLinks(long documentId,boolean platformAudience) {
+        String page=webBaseUrl+"/wiki?documentId="+documentId+(platformAudience?"&audience=PLATFORM":"");
         return Map.of("sourceUrl",page,"downloadUrl",page+"&download=1");
     }
     private void addWikiDirectory(Map<String,Object> response,long documentId,long userId,boolean platformOnly,int depth,int limit) {
         var directory=wiki.visibleDescendants(documentId,userId,platformOnly,depth,limit);
         List<Map<String,Object>> children=directory.items().stream().map(child -> {
             Map<String,Object> item=new LinkedHashMap<>(objectMapper.convertValue(child,new TypeReference<Map<String,Object>>() {}));
-            item.putAll(wikiLinks(child.documentId()));return item;
+            item.putAll(wikiLinks(child.documentId(),platformOnly));return item;
         }).toList();
         response.put("childDocuments",children);
         response.put("childrenTruncated",directory.truncated());

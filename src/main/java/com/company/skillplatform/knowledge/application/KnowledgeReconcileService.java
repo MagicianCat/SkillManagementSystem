@@ -42,7 +42,7 @@ public class KnowledgeReconcileService {
         var active=documents.findByStatusOrderByIdAsc("ACTIVE");
         Set<Long> activeIds=new HashSet<>();
         for(var document:active) activeIds.add(document.getId());
-        int rebuilt=0,deleted=0,failed=0;
+        int rebuilt=0,deleted=0,failed=0,categoryRepaired=0;
         if(!retry.isProviderQuotaExhausted()) for(var document:active){
             if(document.getCurrentRevision()==null||retry.isExhausted(document.getId())||retry.isScheduled(document.getId())) continue;
             try{
@@ -68,6 +68,19 @@ public class KnowledgeReconcileService {
                 boolean obsolete=!teamExpected&&!platformExpected&&vectors.documentState(document.getId())!=null;
                 if(teamStale||platformStale||platformUnexpected||obsolete){
                     index.reindex(document.getId());rebuilt++;
+                } else {
+                    boolean teamCategoryStale=teamExpected&&!Objects.equals(teamState.knowledgeCategory(),document.getKnowledgeCategory().name());
+                    boolean platformCategoryStale=platformExpected&&!Objects.equals(platformState.knowledgeCategory(),approved.knowledgeCategory());
+                    if(teamCategoryStale||platformCategoryStale){
+                        try {
+                            if(teamCategoryStale) vectors.setKnowledgeCategory(document.getId(),"TEAM",document.getKnowledgeCategory().name());
+                            if(platformCategoryStale) vectors.setKnowledgeCategory(document.getId(),"PLATFORM",approved.knowledgeCategory());
+                            categoryRepaired++;
+                        } catch(RuntimeException payloadFailure) {
+                            log.warn("event=knowledge.reconcile.category_update_failed documentId={} errorType={}",document.getId(),payloadFailure.getClass().getSimpleName());
+                            index.reindex(document.getId());rebuilt++;
+                        }
+                    }
                 }
             }catch(EmbeddingProviderException failure){
                 failed++;
@@ -83,7 +96,7 @@ public class KnowledgeReconcileService {
             }
         }
         for(Long indexed:vectors.indexedDocumentIds()) if(!activeIds.contains(indexed)){vectors.deleteDocument(indexed);deleted++;}
-        log.info("event=knowledge.reconcile mode={} activeDocuments={} rebuilt={} deleted={} failed={} providerQuotaExhausted={}",force?"FORCED":"DIFFERENTIAL",active.size(),rebuilt,deleted,failed,retry.isProviderQuotaExhausted());
+        log.info("event=knowledge.reconcile mode={} activeDocuments={} rebuilt={} categoryRepaired={} deleted={} failed={} providerQuotaExhausted={}",force?"FORCED":"DIFFERENTIAL",active.size(),rebuilt,categoryRepaired,deleted,failed,retry.isProviderQuotaExhausted());
         return new ReconcileResult(active.size(),rebuilt,deleted,failed,retry.isProviderQuotaExhausted());
     }
     @Transactional(readOnly=true) public ReconcileStatus status(){Set<Long> active=documents.findByStatusOrderByIdAsc("ACTIVE").stream().map(document->document.getId()).collect(java.util.stream.Collectors.toSet());Set<Long> indexed=vectors.indexedDocumentIds();Set<Long> missing=new HashSet<>(active);missing.removeAll(indexed);Set<Long> orphaned=new HashSet<>(indexed);orphaned.removeAll(active);return new ReconcileStatus(active.size(),indexed.size(),missing.size(),orphaned.size());}

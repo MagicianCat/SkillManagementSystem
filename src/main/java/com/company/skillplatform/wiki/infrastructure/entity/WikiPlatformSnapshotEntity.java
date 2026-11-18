@@ -12,7 +12,9 @@ public class WikiPlatformSnapshotEntity {
     @Column(name = "approved_revision_id") private Long approvedRevisionId;
     @Column(name = "approved_title") private String approvedTitle;
     @Column(name = "approved_parent_id") private Long approvedParentId;
+    @Column(name = "approved_knowledge_category", nullable = false, length = 32) private String approvedKnowledgeCategory;
     protected WikiPlatformSnapshotEntity() {}
+    public String getApprovedKnowledgeCategory() { return approvedKnowledgeCategory; }
     public Long getDocumentId() { return documentId; }
     public Long getApprovedRevisionId() { return approvedRevisionId; }
     public String getApprovedTitle() { return approvedTitle; }

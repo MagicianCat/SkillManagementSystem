@@ -72,7 +72,7 @@ public class WikiDocumentReviewService {
         WikiPromotionStore.Tree tree = promotionStore.collect(document);
         return new PromotionPreview(tree.rootId(), tree.teamId(), tree.items().size(), tree.skills().size(),
                 (int) tree.skills().stream().filter(skill -> "TEAM".equals(skill.scope())).count(), tree.fingerprint(),
-                tree.items().stream().map(item -> new WikiPromotionStore.ReviewWikiItem(item.documentId(), item.title(), item.parentId(), item.revisionId(), item.revisionNo())).toList(),
+                tree.items().stream().map(item -> new WikiPromotionStore.ReviewWikiItem(item.documentId(), item.title(), item.parentId(), item.revisionId(), item.revisionNo(), item.knowledgeCategory())).toList(),
                 tree.skills().stream().map(skill -> new WikiPromotionStore.ReviewSkillItem(skill.skillId(), skill.skillKey(), skill.skill().getDisplayName(), skill.scope(), skill.versionId())).toList());
     }
 

@@ -36,7 +36,10 @@ public class KnowledgeProperties {
     }
     public static class Search {
         private int chunkTopK=12; private int documentTopK=5; private int snippetsPerDocument=2;
+        private boolean categoryRoutingEnabled=true; private double categoryBoost=0.02;
         public int getChunkTopK(){return chunkTopK;} public void setChunkTopK(int v){chunkTopK=v;} public int getDocumentTopK(){return documentTopK;} public void setDocumentTopK(int v){documentTopK=v;} public int getSnippetsPerDocument(){return snippetsPerDocument;} public void setSnippetsPerDocument(int v){snippetsPerDocument=v;}
+        public boolean isCategoryRoutingEnabled(){return categoryRoutingEnabled;} public void setCategoryRoutingEnabled(boolean value){categoryRoutingEnabled=value;}
+        public double getCategoryBoost(){return categoryBoost;} public void setCategoryBoost(double value){categoryBoost=value;}
     }
     public static class Chunk {
         private int targetChars=3000; private int overlapChars=400;

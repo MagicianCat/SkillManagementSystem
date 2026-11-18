@@ -4,4 +4,11 @@ import java.util.List;
 
 public record KnowledgeDocument(Long documentId, int revisionNo, String contentSha256, String title,
         Long teamId, boolean platformVisible, String status, List<String> skillKeys,
-        List<String> developmentStages, String markdownContent) {}
+        List<String> developmentStages, String markdownContent, String knowledgeCategory) {
+    public KnowledgeDocument(Long documentId, int revisionNo, String contentSha256, String title,
+            Long teamId, boolean platformVisible, String status, List<String> skillKeys,
+            List<String> developmentStages, String markdownContent) {
+        this(documentId, revisionNo, contentSha256, title, teamId, platformVisible, status, skillKeys,
+                developmentStages, markdownContent, "OTHER");
+    }
+}

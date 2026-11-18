@@ -11,6 +11,7 @@ public class WikiDocumentEntity extends BaseJpaEntity {
     @Column(nullable = false, length = 255) private String title;
     @Column(name = "team_id") private Long teamId;
     @Column(name = "platform_visible", nullable = false) private boolean platformVisible;
+    @Enumerated(EnumType.STRING) @Column(name = "knowledge_category", nullable = false, length = 32) private com.company.skillplatform.wiki.domain.WikiKnowledgeCategory knowledgeCategory = com.company.skillplatform.wiki.domain.WikiKnowledgeCategory.OTHER;
     @Column(nullable = false, length = 32) private String status = "ACTIVE";
     @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "parent_id") private WikiDocumentEntity parent;
     @Column(name = "source_system", length = 128) private String sourceSystem;
@@ -33,6 +34,8 @@ public class WikiDocumentEntity extends BaseJpaEntity {
     public void archive(IamUserEntity actor) { this.status = "ARCHIVED"; this.deletedAt = Instant.now(); this.updatedBy = actor; }
     public void setParent(WikiDocumentEntity parent, IamUserEntity actor) { this.parent = parent; this.updatedBy = actor; }
     public void setExternalSource(String sourceSystem, String resourceId, String entryPath) { this.sourceSystem = sourceSystem; this.sourceResourceId = resourceId; this.sourceEntryPath = entryPath; }
+    public com.company.skillplatform.wiki.domain.WikiKnowledgeCategory getKnowledgeCategory() { return knowledgeCategory; }
+    public void setKnowledgeCategory(com.company.skillplatform.wiki.domain.WikiKnowledgeCategory value, IamUserEntity actor) { this.knowledgeCategory = value; this.updatedBy = actor; }
     public String getTitle() { return title; }
     public Long getTeamId() { return teamId; } public boolean isPlatformVisible() { return platformVisible; }
     public String getStatus() { return status; } public WikiDocumentRevisionEntity getCurrentRevision() { return currentRevision; }

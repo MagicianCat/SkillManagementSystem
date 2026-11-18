@@ -28,9 +28,9 @@ public class WikiDocumentController {
     public WikiDocumentController(WikiDocumentService service) { this.service = service; }
     @GetMapping("/teams") public List<WikiDocumentService.TeamView> teams(Authentication a) { return service.visibleTeams((Long) a.getPrincipal()); }
     @GetMapping("/teams/search") public PageResponse<WikiDocumentService.TeamView> searchTeams(@RequestParam(required=false) String keyword, Pageable pageable, Authentication a) { return service.searchTeams((Long) a.getPrincipal(), keyword, pageable); }
-    @GetMapping("/documents") public PageResponse<WikiDocumentService.DocumentView> search(@RequestParam(required=false) Long teamId, @RequestParam(required=false) String skillKey, @RequestParam(required=false) String keyword, Pageable pageable, Authentication a) { return service.search((Long) a.getPrincipal(), teamId, skillKey, keyword, pageable); }
+    @GetMapping("/documents") public PageResponse<WikiDocumentService.DocumentView> search(@RequestParam(required=false) Long teamId, @RequestParam(required=false) String skillKey, @RequestParam(required=false) String keyword, @RequestParam(required=false) String knowledgeCategory, Pageable pageable, Authentication a) { return service.search((Long) a.getPrincipal(), teamId, skillKey, keyword, knowledgeCategory, pageable); }
     @GetMapping("/documents/matches") public List<WikiDocumentService.DocumentMatchView> matches(@RequestParam Long teamId, @RequestParam String title, Authentication a) { return service.findTeamDocumentsByTitle((Long) a.getPrincipal(), teamId, title); }
-    @GetMapping("/documents/{id}") public WikiDocumentService.DocumentView get(@PathVariable Long id, Authentication a) { return service.get(id, (Long) a.getPrincipal()); }
+    @GetMapping("/documents/{id}") public WikiDocumentService.DocumentView get(@PathVariable Long id, @RequestParam(required=false) String audience, Authentication a) { return service.get(id, (Long) a.getPrincipal(), "PLATFORM".equals(audience)); }
     @GetMapping("/documents/{id}/metadata") public DocumentMetadata metadata(@PathVariable Long id, Authentication a) {
         var wiki = service.get(id, (Long) a.getPrincipal());
         return new DocumentMetadata(wiki.id(), wiki.title());
@@ -59,12 +59,12 @@ public class WikiDocumentController {
                 .body(new ByteArrayResource(bytes.toByteArray()));
     }
     @GetMapping("/documents/{id}/revisions") public List<WikiDocumentService.RevisionView> revisions(@PathVariable Long id, Authentication a) { return service.revisions(id, (Long) a.getPrincipal()); }
-    @PostMapping("/documents") @ResponseStatus(HttpStatus.CREATED) public WikiDocumentService.DocumentView create(@Valid @RequestBody CreateRequest r, Authentication a, HttpServletRequest h) { return service.create(new WikiDocumentService.CreateCommand(r.title, r.teamId, r.skillIds, r.markdownContent, r.parentId), (Long) a.getPrincipal(), h.getRequestId()); }
-    @PutMapping("/documents/{id}") public WikiDocumentService.DocumentView update(@PathVariable Long id, @Valid @RequestBody UpdateRequest r, Authentication a, HttpServletRequest h) { return service.update(id, new WikiDocumentService.UpdateCommand(r.title, r.markdownContent, r.versionNo, r.skillIds, r.parentId, Boolean.TRUE.equals(r.parentSpecified)), (Long) a.getPrincipal(), h.getRequestId()); }
+    @PostMapping("/documents") @ResponseStatus(HttpStatus.CREATED) public WikiDocumentService.DocumentView create(@Valid @RequestBody CreateRequest r, Authentication a, HttpServletRequest h) { return service.create(new WikiDocumentService.CreateCommand(r.title, r.teamId, r.skillIds, r.markdownContent, r.parentId, r.knowledgeCategory), (Long) a.getPrincipal(), h.getRequestId()); }
+    @PutMapping("/documents/{id}") public WikiDocumentService.DocumentView update(@PathVariable Long id, @Valid @RequestBody UpdateRequest r, Authentication a, HttpServletRequest h) { return service.update(id, new WikiDocumentService.UpdateCommand(r.title, r.markdownContent, r.versionNo, r.skillIds, r.parentId, Boolean.TRUE.equals(r.parentSpecified), r.knowledgeCategory), (Long) a.getPrincipal(), h.getRequestId()); }
     @PostMapping("/documents/{id}:restore") public WikiDocumentService.DocumentView restore(@PathVariable Long id, @Valid @RequestBody RestoreRequest r, Authentication a, HttpServletRequest h) { return service.restore(id, r.revisionId, r.versionNo, (Long) a.getPrincipal(), h.getRequestId()); }
     @DeleteMapping("/documents/{id}") @ResponseStatus(HttpStatus.NO_CONTENT) public void archive(@PathVariable Long id, Authentication a, HttpServletRequest h) { service.archive(id, (Long) a.getPrincipal(), h.getRequestId()); }
-    public record CreateRequest(@NotBlank @Size(max=255) String title, Long teamId, List<@NotNull Long> skillIds, @NotBlank String markdownContent, Long parentId) {}
-    public record UpdateRequest(@NotBlank @Size(max=255) String title, @NotBlank String markdownContent, int versionNo, List<@NotNull Long> skillIds, Long parentId, Boolean parentSpecified) {}
+    public record CreateRequest(@NotBlank @Size(max=255) String title, Long teamId, List<@NotNull Long> skillIds, @NotBlank String markdownContent, Long parentId, String knowledgeCategory) {}
+    public record UpdateRequest(@NotBlank @Size(max=255) String title, @NotBlank String markdownContent, int versionNo, List<@NotNull Long> skillIds, Long parentId, Boolean parentSpecified, String knowledgeCategory) {}
     public record RestoreRequest(@NotNull Long revisionId, int versionNo) {}
     public record DownloadRequest(@NotEmpty @Size(max=20) List<@NotNull @Positive Long> documentIds) {}
     public record DocumentMetadata(Long id, String title) {}

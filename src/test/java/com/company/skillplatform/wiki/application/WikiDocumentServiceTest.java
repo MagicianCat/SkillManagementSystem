@@ -52,6 +52,7 @@ class WikiDocumentServiceTest {
         assertThat(result.id()).isEqualTo(91L);
         assertThat(result.canEdit()).isTrue();
         assertThat(result.skills()).isEmpty();
+        assertThat(result.knowledgeCategory()).isEqualTo("OTHER");
     }
 
     @Test void memberOfTwoTeamsCannotLinkOtherTeamsPrivateSkill() {
@@ -119,21 +120,27 @@ class WikiDocumentServiceTest {
         when(members.findByUserId(9L)).thenReturn(List.of(membership));
         when(members.findByUserId(10L)).thenReturn(List.of());
         var promotion=mock(WikiPromotionStore.class);
-        when(promotion.platform(101L)).thenReturn(new WikiPromotionStore.PlatformSnapshot(101L,44L,"批准标题",null,1,"批准正文"));
+        when(promotion.platform(101L)).thenReturn(new WikiPromotionStore.PlatformSnapshot(101L,44L,"批准标题",null,1,"批准正文","OTHER"));
         when(promotion.platformSkills(101L)).thenReturn(List.of());
         SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(new SimpleGrantedAuthority("wiki:edit"))));
         var service=new WikiDocumentService(documents,revisions,links,mock(SkillRepository.class),mock(SkillOwnerRepository.class),
                 mock(OrgTeamRepository.class),members,mock(ScopedRoleAssignmentRepository.class),users,mock(AuditService.class),mock(ApplicationEventPublisher.class));
         service.setPromotionStore(promotion);
 
-        var teamView=service.update(101L,new WikiDocumentService.UpdateCommand("团队新标题","团队新正文",0,List.of()),9L,"edit");
+        var teamView=service.update(101L,new WikiDocumentService.UpdateCommand("团队新标题","团队新正文",0,List.of(),null,false,"PROJECT_CONTEXT"),9L,"edit");
         assertThat(teamView.title()).isEqualTo("团队新标题");
         assertThat(teamView.markdownContent()).isEqualTo("团队新正文");
+        assertThat(teamView.knowledgeCategory()).isEqualTo("PROJECT_CONTEXT");
+
+        var platformOnlyView=service.get(101L,9L,true);
+        assertThat(platformOnlyView.markdownContent()).isEqualTo("批准正文");
+        assertThat(platformOnlyView.knowledgeCategory()).isEqualTo("OTHER");
 
         SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(10L,null,List.of(new SimpleGrantedAuthority("skill:browse"))));
         var publicView=service.get(101L,10L);
         assertThat(publicView.title()).isEqualTo("批准标题");
         assertThat(publicView.markdownContent()).isEqualTo("批准正文");
+        assertThat(publicView.knowledgeCategory()).isEqualTo("OTHER");
         assertThat(publicView.canEdit()).isFalse();
     }
 
