@@ -42,7 +42,7 @@ public class ExternalResourceAdminController {
         return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueSkills(id,body.resourceIds(),(Long)auth.getPrincipal())));
     }
     @PostMapping("/external-resources/roles/{id}/wikis:import-all") public ResponseEntity<Map<String,Long>> importAllWikis(@PathVariable Long id, @RequestBody BulkWikiRequest body, Authentication auth) {
-        return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueWikis(id,body.teamId(),body.parentWikiId(),body.linkRoleSkills(),body.selections(),(Long)auth.getPrincipal())));
+        return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueWikis(id,body.teamId(),body.parentWikiId(),body.linkRoleSkills(),body.knowledgeCategory(),body.selections(),(Long)auth.getPrincipal())));
     }
     @GetMapping("/external-import-jobs/{id}") public Map<String,Object> importJob(@PathVariable Long id) { return bulk.job(id); }
     @GetMapping("/external-resource-versions/{id}/asdm-tool/status") public AsdmToolImportService.Status asdmStatus(@PathVariable Long id) { return asdm.status(id); }
@@ -54,5 +54,5 @@ public class ExternalResourceAdminController {
         return asdm.refreshLink(id,(Long)auth.getPrincipal(),request.getRequestId());
     }
     public record BulkSkillRequest(List<Long> resourceIds) {}
-    public record BulkWikiRequest(Long teamId,Long parentWikiId,boolean linkRoleSkills,List<ExternalBulkImportService.WikiSelection> selections) {}
+    public record BulkWikiRequest(Long teamId,Long parentWikiId,boolean linkRoleSkills,String knowledgeCategory,List<ExternalBulkImportService.WikiSelection> selections) {}
 }

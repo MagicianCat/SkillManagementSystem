@@ -5,6 +5,7 @@ import com.company.skillplatform.notification.application.NotificationService;
 import com.company.skillplatform.skill.application.SkillService;
 import com.company.skillplatform.wiki.application.WikiDocumentReviewService;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
+import com.company.skillplatform.wiki.domain.WikiKnowledgeCategory;
 import com.company.skillplatform.workflow.application.WorkflowService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -51,9 +52,10 @@ public class ExternalBulkImportService {
     public long enqueueSkills(long roleId, List<Long> resourceIds, long actorId) {
         if (resourceIds == null || resourceIds.isEmpty() || resourceIds.stream().anyMatch(id -> id == null || id <= 0))
             throw bad("EXTERNAL_SKILL_SELECTION_REQUIRED", "请至少选择一个 Skill");
-        return enqueue("SKILL", roleId, null, null, false, resourceIds, null, actorId);
+        return enqueue("SKILL", roleId, null, null, false, null, resourceIds, null, actorId);
     }
-    public long enqueueWikis(long roleId, Long teamId, Long parentWikiId, boolean linkRoleSkills, List<WikiSelection> selections, long actorId) {
+    public long enqueueWikis(long roleId, Long teamId, Long parentWikiId, boolean linkRoleSkills, String knowledgeCategory, List<WikiSelection> selections, long actorId) {
+        String category = requiredWikiCategory(knowledgeCategory);
         if (teamId != null && teamId <= 0) throw bad("WIKI_TEAM_INVALID", "目标团队无效");
         if (selections == null || selections.isEmpty() || selections.stream().anyMatch(selection ->
                 selection == null || selection.resourceId() == null || selection.resourceId() <= 0 ||
@@ -69,12 +71,19 @@ public class ExternalBulkImportService {
             if (!scopeMatches)
                 throw bad("WIKI_PARENT_SCOPE_INVALID", "父 Wiki 必须在目标范围内可见");
         }
-        return enqueue("DOCUMENT", roleId, teamId, parentWikiId, linkRoleSkills, null, selections, actorId);
+        return enqueue("DOCUMENT", roleId, teamId, parentWikiId, linkRoleSkills, category, null, selections, actorId);
+    }
+
+    static String requiredWikiCategory(String value) {
+        if (value == null || value.isBlank()) throw new BusinessException("EXTERNAL_WIKI_CATEGORY_REQUIRED", "请选择本批文档的知识分类", HttpStatus.BAD_REQUEST);
+        WikiKnowledgeCategory category = WikiKnowledgeCategory.parse(value, null);
+        if (category == WikiKnowledgeCategory.FDE_WIKI) throw new BusinessException("WIKI_KNOWLEDGE_CATEGORY_INVALID", "外部文档导入不支持 FDE 专区分类", HttpStatus.BAD_REQUEST);
+        return category.name();
     }
 
     public record WikiSelection(Long resourceId,List<String> paths) {}
 
-    private long enqueue(String kind, long roleId, Long teamId, Long parentWikiId, boolean linkRoleSkills, List<Long> resourceIds, List<WikiSelection> wikiSelections, long actorId) {
+    private long enqueue(String kind, long roleId, Long teamId, Long parentWikiId, boolean linkRoleSkills, String knowledgeCategory, List<Long> resourceIds, List<WikiSelection> wikiSelections, long actorId) {
         Integer role = db.queryForObject("SELECT COUNT(*) FROM external_role WHERE id=? AND status='ACTIVE'", Integer.class, roleId);
         if (role == null || role == 0) throw bad("EXTERNAL_ROLE_NOT_FOUND", "外部角色不存在或未启用");
         Integer running=db.queryForObject("SELECT COUNT(*) FROM external_import_job WHERE role_id=? AND kind=? AND team_id <=> ? AND status IN ('PENDING','RUNNING')",Integer.class,roleId,kind,teamId);
@@ -102,18 +111,18 @@ public class ExternalBulkImportService {
         try { json=mapper.writeValueAsString(snapshot); } catch (Exception ex) { throw new IllegalStateException(ex); }
         GeneratedKeyHolder keys = new GeneratedKeyHolder();
         db.update(connection -> {
-            var statement = connection.prepareStatement("INSERT INTO external_import_job(kind,role_id,team_id,parent_wiki_id,link_role_skills,status,operator_id,snapshot_json) VALUES(?,?,?,?,?,'PENDING',?,?)", Statement.RETURN_GENERATED_KEYS);
+            var statement = connection.prepareStatement("INSERT INTO external_import_job(kind,role_id,team_id,parent_wiki_id,link_role_skills,status,operator_id,snapshot_json,knowledge_category) VALUES(?,?,?,?,?,'PENDING',?,?,?)", Statement.RETURN_GENERATED_KEYS);
             statement.setString(1, kind); statement.setLong(2, roleId);
             if (teamId == null) statement.setNull(3, java.sql.Types.BIGINT); else statement.setLong(3, teamId);
             if (parentWikiId == null) statement.setNull(4, java.sql.Types.BIGINT); else statement.setLong(4, parentWikiId);
-            statement.setBoolean(5, linkRoleSkills); statement.setLong(6, actorId); statement.setString(7, json);
+            statement.setBoolean(5, linkRoleSkills); statement.setLong(6, actorId); statement.setString(7, json); statement.setString(8, knowledgeCategory);
             return statement;
         }, keys);
         return keys.getKey().longValue();
     }
 
     public Map<String,Object> job(long id) {
-        List<Map<String,Object>> jobs=db.queryForList("SELECT id,kind,role_id roleId,team_id teamId,parent_wiki_id parentWikiId,link_role_skills linkRoleSkills,status,total_count totalCount,success_count successCount,failure_count failureCount,error_message errorMessage,created_at createdAt,started_at startedAt,finished_at finishedAt FROM external_import_job WHERE id=?", id);
+        List<Map<String,Object>> jobs=db.queryForList("SELECT id,kind,role_id roleId,team_id teamId,parent_wiki_id parentWikiId,link_role_skills linkRoleSkills,knowledge_category knowledgeCategory,status,total_count totalCount,success_count successCount,failure_count failureCount,error_message errorMessage,created_at createdAt,started_at startedAt,finished_at finishedAt FROM external_import_job WHERE id=?", id);
         if (jobs.isEmpty()) throw bad("EXTERNAL_IMPORT_JOB_NOT_FOUND", "导入任务不存在");
         return Map.of("job", jobs.get(0), "items", db.queryForList("SELECT resource_id resourceId,version_id versionId,entry_path entryPath,status,target_id targetId,error_code errorCode,error_message errorMessage,created_at createdAt FROM external_import_job_item WHERE job_id=? ORDER BY id", id));
     }
@@ -133,11 +142,12 @@ public class ExternalBulkImportService {
                 new SimpleGrantedAuthority("skill:edit"),new SimpleGrantedAuthority("skill:browse"))));
         SecurityContextHolder.setContext(context);
         try {
+            String wikiCategory = "DOCUMENT".equals(job.get("kind")) ? requiredWikiCategory((String) job.get("knowledge_category")) : null;
             List<Map<String,Object>> resources=mapper.readValue(String.valueOf(job.get("snapshot_json")), new TypeReference<>() {});
             for (Map<String,Object> resource:resources) {
                 db.update("UPDATE external_import_job SET heartbeat_at=NOW(3) WHERE id=?",id);
                 if ("SKILL".equals(job.get("kind"))) processSkill(id,actor,resource);
-                else processWikiResource(id,actor,job,resource);
+                else processWikiResource(id,actor,job,resource,wikiCategory);
             }
             int total=db.queryForObject("SELECT COUNT(*) FROM external_import_job_item WHERE job_id=?",Integer.class,id);
             int success=db.queryForObject("SELECT COUNT(*) FROM external_import_job_item WHERE job_id=? AND status='SUCCESS'",Integer.class,id);
@@ -184,7 +194,7 @@ public class ExternalBulkImportService {
         } catch (RuntimeException ex) { record(jobId,resourceId,version,null,"FAILED",null,code(ex),safe(ex.getMessage())); }
     }
 
-    private void processWikiResource(long jobId,long actor,Map<String,Object> job,Map<String,Object> resource) {
+    private void processWikiResource(long jobId,long actor,Map<String,Object> job,Map<String,Object> resource,String knowledgeCategory) {
         long version=((Number)resource.get("versionId")).longValue();
         long resourceId=((Number)resource.get("resourceId")).longValue();
         Map<String,String> contents;
@@ -214,15 +224,15 @@ public class ExternalBulkImportService {
                     String title=path.substring(path.lastIndexOf('/')+1).replaceFirst("(?i)\\.md$","");
                     WikiDocumentService.DocumentView document;
                     if (existing.isEmpty()) {
-                        document=wiki.create(new WikiDocumentService.CreateCommand(title,teamId,skillIds,content,parentId),actor,"external-bulk-"+jobId);
+                        document=wiki.create(new WikiDocumentService.CreateCommand(title,teamId,skillIds,content,parentId,knowledgeCategory),actor,"external-bulk-"+jobId);
                         wiki.markExternalSource(document.id(),source,externalId,path);
                     } else {
                         var current=wiki.get(existing.get(0),actor);
                         if (current.pendingPlatformReviewId()!=null)
                             wikiReviews.withdraw(current.pendingPlatformReviewId(),"外部资源更新，替换待审修订",actor,"external-bulk-"+jobId);
-                        document=wiki.update(current.id(),new WikiDocumentService.UpdateCommand(title,content,current.versionNo(),skillIds,parentId,true),actor,"external-bulk-"+jobId);
+                        document=wiki.update(current.id(),new WikiDocumentService.UpdateCommand(title,content,current.versionNo(),skillIds,parentId,true,knowledgeCategory),actor,"external-bulk-"+jobId);
                     }
-                    if (!document.platformVisible()) wikiReviews.submit(document.id(),document.versionNo(),"外部资源批量导入，提交审核",actor,"external-bulk-"+jobId);
+                    if (teamId != null) wikiReviews.submit(document.id(),document.versionNo(),"外部资源批量导入，提交审核",actor,"external-bulk-"+jobId);
                     db.update("INSERT INTO external_import_record(resource_version_id,external_role_id,entry_path,target_type,target_id,action,result,operator_id) VALUES(?,?,?,'WIKI',?,?,'SUCCESS',?)",version,roleId,path,document.id(),existing.isEmpty()?"IMPORT":"UPDATE",actor);
                     return document.id();
                 });

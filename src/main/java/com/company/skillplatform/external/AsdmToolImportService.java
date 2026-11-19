@@ -96,15 +96,21 @@ public class AsdmToolImportService {
         String rawJson=text(source.get("asdmCommandsRawJson"));
         String rawHash=text(source.get("asdmCommandsPayloadSha256"));
         if (prior.imported() && prior.wikiActive()) {
+            var currentWiki=wiki.get(prior.wikiDocumentId(),actor);
+            boolean categoryNeedsFix=!"SKILL_TOOL".equals(currentWiki.knowledgeCategory());
             String appliedHash=prior.assetId()==null?null:db.queryForObject("SELECT command_mapping_applied_sha256 FROM external_asdm_tool_asset WHERE id=?",String.class,prior.assetId());
-            // 同一版本重复点击：JSON 未变化时保持原有 UNCHANGED 语义，不改 Wiki / ZIP / 分类。
-            if (Objects.equals(rawHash,appliedHash)) return result("UNCHANGED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
+            // 同一版本重复点击：仅在工具集映射或 Wiki 分类确有变化时更新。
+            if (Objects.equals(rawHash,appliedHash)) {
+                if (categoryNeedsFix) wiki.update(currentWiki.id(),new WikiDocumentService.UpdateCommand(currentWiki.title(),currentWiki.markdownContent(),currentWiki.versionNo(),null,null,false,"SKILL_TOOL"),actor,requestId);
+                return result(categoryNeedsFix?"UPDATED":"UNCHANGED",source,prior.assetId(),prior.wikiDocumentId(),prior.toolFilename());
+            }
             if (!versionIdEquals(source.get("current_version_id"),versionId)) throw error("ASDM_OLD_VERSION_NOT_CURRENT","只能导入当前外部资源版本",HttpStatus.CONFLICT);
             List<AsdmCommandSupport.ToolsetCategory> toolsets=parseToolsetCategories(rawJson);
             requireToolsetsInAsset(prior.assetId(),toolsets);
             transactions.execute(tx -> {
                 db.queryForObject("SELECT id FROM external_asdm_tool_asset WHERE id=? FOR UPDATE",Long.class,prior.assetId());
                 applyMappings(prior.assetId(),((Number)source.get("resource_id")).longValue(),versionId,source,toolsets,rawHash,actor);
+                if (categoryNeedsFix) wiki.update(currentWiki.id(),new WikiDocumentService.UpdateCommand(currentWiki.title(),currentWiki.markdownContent(),currentWiki.versionNo(),null,null,false,"SKILL_TOOL"),actor,requestId);
                 db.update("UPDATE external_asdm_tool_asset SET command_mapping_applied_sha256=?,command_mapping_applied_at=NOW(3) WHERE id=?",rawHash,prior.assetId());
                 db.update("INSERT INTO audit_log(time_created,time_updated,event_type,actor_user_id,target_type,target_id,request_id,result) VALUES(NOW(3),NOW(3),'EXTERNAL_ASDM_COMMAND_MAPPING_SYNCED',?, 'EXTERNAL_RESOURCE_VERSION',?,?,'SUCCESS')",actor,versionId,requestId(requestId));
                 return null;
@@ -158,7 +164,7 @@ public class AsdmToolImportService {
                     if (command==null || !command.confirmUpdate()) throw error("ASDM_WIKI_UPDATE_CONFIRM_REQUIRED","更新平台 Wiki 前需确认覆盖",HttpStatus.CONFLICT);
                     var current=wiki.get(existing.get(0),actor);
                     if (command.expectedWikiVersionNo()==null || command.expectedWikiVersionNo()!=current.versionNo()) throw error("OPTIMISTIC_LOCK_CONFLICT","Wiki 版本已变化，请刷新后重试",HttpStatus.CONFLICT);
-                    document=wiki.update(current.id(),new WikiDocumentService.UpdateCommand((String)source.get("name"),content,current.versionNo(),List.of(),null,false),actor,requestId);
+                    document=wiki.update(current.id(),new WikiDocumentService.UpdateCommand((String)source.get("name"),content,current.versionNo(),List.of(),null,false,"SKILL_TOOL"),actor,requestId);
                 }
                 db.update("UPDATE external_asdm_tool_asset SET wiki_document_id=?,status='READY' WHERE id=?",document.id(),finalAssetId);
                 applyMappings(finalAssetId,((Number)source.get("resource_id")).longValue(),versionId,source,toolsets,rawHash,actor);
@@ -194,8 +200,9 @@ public class AsdmToolImportService {
         if (begin<0 || end<begin) throw error("ASDM_MD_MARKER_CONFLICT","Wiki 中缺少系统下载链接标记",HttpStatus.CONFLICT);
         String block=BEGIN+"\n## ASDM 工具包下载\n\n[下载 ASDM 工具包（"+escape(current.toolFilename())+"）]("+urlFor(current.assetId())+")\n\n> 下载需要登录研途助手；下载文件为 ASDM 完整工具压缩包。\n"+END;
         String replaced=text.substring(0,begin)+block+text.substring(end+END.length());
-        if (!replaced.equals(text)) wiki.update(document.id(),new WikiDocumentService.UpdateCommand(document.title(),replaced,document.versionNo(),null,null,false),actor,requestId);
-        return result(replaced.equals(text)?"UNCHANGED":"UPDATED",source,current.assetId(),document.id(),current.toolFilename());
+        boolean changed=!replaced.equals(text) || !"SKILL_TOOL".equals(document.knowledgeCategory());
+        if (changed) wiki.update(document.id(),new WikiDocumentService.UpdateCommand(document.title(),replaced,document.versionNo(),null,null,false,"SKILL_TOOL"),actor,requestId);
+        return result(changed?"UPDATED":"UNCHANGED",source,current.assetId(),document.id(),current.toolFilename());
     }
 
     public Map<String,Object> asset(long id) {

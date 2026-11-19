@@ -167,6 +167,7 @@ public class ExternalResourceAdminService {
     }
 
     public List<DocumentImportResult> importDocuments(Long versionId,DocumentImportRequest request,Long actorId,String requestId) {
+        String knowledgeCategory=ExternalBulkImportService.requiredWikiCategory(request==null?null:request.knowledgeCategory());
         Map<String,Object> v=versionOfType(versionId,"DOCUMENT");
         if (request==null || request.externalRoleId()==null || request.paths()==null || request.paths().isEmpty() || request.paths().size()>50) throw bad("INVALID_REQUEST","请选择角色和文档");
         Integer linked=db.queryForObject("SELECT COUNT(*) FROM external_role_resource WHERE role_id=? AND resource_id=?",Integer.class,request.externalRoleId(),v.get("resource_id"));
@@ -181,11 +182,20 @@ public class ExternalResourceAdminService {
                 byte[] data=docs.get(path);
                 if (data==null) throw bad("DOCUMENT_NOT_FOUND","ZIP 中没有该文档");
                 List<Long> prior=db.query("SELECT i.target_id FROM external_import_record i JOIN wiki_document d ON d.id=i.target_id AND d.status='ACTIVE' WHERE i.resource_version_id=? AND i.external_role_id=? AND i.entry_path=? AND i.target_type='WIKI' AND i.result='SUCCESS' ORDER BY i.id DESC LIMIT 1",(rs,n)->rs.getLong(1),versionId,request.externalRoleId(),path);
-                if (!prior.isEmpty()) { results.add(new DocumentImportResult(path,"UNCHANGED",prior.get(0),null,ready.skillIds())); continue; }
+                if (!prior.isEmpty()) {
+                    var current=wiki.get(prior.get(0),actorId);
+                    if (knowledgeCategory.equals(current.knowledgeCategory())) {
+                        results.add(new DocumentImportResult(path,"UNCHANGED",prior.get(0),null,ready.skillIds()));
+                    } else {
+                        var updated=wiki.update(current.id(),new WikiDocumentService.UpdateCommand(current.title(),current.markdownContent(),current.versionNo(),null,null,false,knowledgeCategory),actorId,requestId);
+                        results.add(new DocumentImportResult(path,"UPDATED",updated.id(),null,ready.skillIds()));
+                    }
+                    continue;
+                }
                 Long createdId=transactions.execute(status -> {
                     Readiness latest=readiness(request.externalRoleId());
                     if (!latest.ready()) throw bad("ROLE_SKILLS_NOT_READY","Skill 导入状态已变化，请刷新");
-                    var created=wiki.create(new WikiDocumentService.CreateCommand(path.substring(path.lastIndexOf('/')+1).replaceFirst("(?i)\\.md$",""),request.teamId(),latest.skillIds(),new String(data,StandardCharsets.UTF_8)),actorId,requestId);
+                    var created=wiki.create(new WikiDocumentService.CreateCommand(path.substring(path.lastIndexOf('/')+1).replaceFirst("(?i)\\.md$",""),request.teamId(),latest.skillIds(),new String(data,StandardCharsets.UTF_8),null,knowledgeCategory),actorId,requestId);
                     db.update("INSERT INTO external_import_record(resource_version_id,external_role_id,entry_path,target_type,target_id,action,result,operator_id) VALUES(?,?,?,'WIKI',?,'IMPORT','SUCCESS',?)",versionId,request.externalRoleId(),path,created.id(),actorId);
                     return created.id();
                 });
@@ -251,7 +261,7 @@ public class ExternalResourceAdminService {
     public record SkillImportResult(String skillKey,Long skillId,Long draftVersionId) {}
     public record DocumentEntry(String path,long sizeBytes) {}
     public record Readiness(boolean ready,List<Map<String,Object>> pendingSkills,List<Long> skillIds) {}
-    public record DocumentImportRequest(Long externalRoleId,List<String> paths,Long teamId,List<Long> skillIds) {}
+    public record DocumentImportRequest(Long externalRoleId,List<String> paths,Long teamId,List<Long> skillIds,String knowledgeCategory) {}
     public record DocumentImportResult(String path,String status,Long wikiDocumentId,String errorCode,List<Long> linkedSkillIds) {}
     private record ByteMultipart(String filename,byte[] bytes) implements MultipartFile {
         public String getName(){return "file";} public String getOriginalFilename(){return filename;}
