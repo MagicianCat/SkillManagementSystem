@@ -29,6 +29,51 @@ import com.company.skillplatform.wiki.domain.WikiReviewStatus;
 class WikiDocumentServiceTest {
     @AfterEach void clearAuthentication() { SecurityContextHolder.clearContext(); }
 
+    @Test void nativePlatformWikiCanOnlyBeEditedByCreatorWhileDirectPermissionRemains() {
+        var creator=mock(IamUserEntity.class);when(creator.getId()).thenReturn(9L);
+        var document=new WikiDocumentEntity("原生平台知识",null,true,creator);
+        var service=new WikiDocumentService(mock(WikiDocumentRepository.class),mock(WikiDocumentRevisionRepository.class),
+                mock(WikiDocumentSkillRepository.class),mock(SkillRepository.class),mock(SkillOwnerRepository.class),
+                mock(OrgTeamRepository.class),mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),
+                mock(IamUserRepository.class),mock(AuditService.class),mock(ApplicationEventPublisher.class));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(
+                new SimpleGrantedAuthority("wiki:edit"),new SimpleGrantedAuthority("wiki:publish:direct"))));
+        assertThat(service.canEdit(document,9L)).isTrue();
+        assertThat(service.canEdit(document,10L)).isFalse();
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(
+                new SimpleGrantedAuthority("wiki:edit"))));
+        assertThat(service.canEdit(document,9L)).isFalse();
+    }
+
+    @Test void directPublisherCanCreateNativePlatformWikiAndOrdinaryMemberCannot() {
+        var documents=mock(WikiDocumentRepository.class);var revisions=mock(WikiDocumentRevisionRepository.class);
+        var links=mock(WikiDocumentSkillRepository.class);var users=mock(IamUserRepository.class);
+        var promotion=mock(WikiPromotionStore.class);var actor=mock(IamUserEntity.class);
+        when(actor.getId()).thenReturn(9L);when(users.findById(9L)).thenReturn(Optional.of(actor));
+        when(documents.save(any())).thenAnswer(invocation->{var document=(WikiDocumentEntity)invocation.getArgument(0);ReflectionTestUtils.setField(document,"id",101L);return document;});
+        when(revisions.save(any())).thenAnswer(invocation->invocation.getArgument(0));
+        when(links.findByDocumentIdOrderBySortOrderAsc(101L)).thenReturn(List.of());
+        var service=new WikiDocumentService(documents,revisions,links,mock(SkillRepository.class),mock(SkillOwnerRepository.class),
+                mock(OrgTeamRepository.class),mock(OrgTeamMemberRepository.class),mock(ScopedRoleAssignmentRepository.class),
+                users,mock(AuditService.class),mock(ApplicationEventPublisher.class));
+        service.setPromotionStore(promotion);
+        var command=new WikiDocumentService.CreateCommand("平台知识",null,List.of(),"正文",null,"FDE_WIKI");
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(
+                new SimpleGrantedAuthority("wiki:create"),new SimpleGrantedAuthority("wiki:edit"))));
+        assertThatThrownBy(()->service.create(command,9L,"ordinary"))
+                .isInstanceOfSatisfying(BusinessException.class,error->assertThat(error.getCode()).isEqualTo("WIKI_TEAM_MEMBER_REQUIRED"));
+        verify(documents,never()).save(any());
+
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(9L,null,List.of(
+                new SimpleGrantedAuthority("wiki:create"),new SimpleGrantedAuthority("wiki:edit"),
+                new SimpleGrantedAuthority("wiki:publish:direct"))));
+        var created=service.create(command,9L,"direct");
+        assertThat(created.teamId()).isNull();
+        assertThat(created.platformVisible()).isTrue();
+        assertThat(created.knowledgeCategory()).isEqualTo("FDE_WIKI");
+        verify(promotion).publishDirect(any(WikiDocumentEntity.class),eq(9L));
+    }
+
     @Test void ordinaryActiveMemberCreatesUnlinkedTeamWiki() {
         var documents=mock(WikiDocumentRepository.class);var revisions=mock(WikiDocumentRevisionRepository.class);
         var links=mock(WikiDocumentSkillRepository.class);var users=mock(IamUserRepository.class);

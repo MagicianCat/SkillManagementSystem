@@ -10,6 +10,8 @@ import com.company.skillplatform.user.infrastructure.repository.*;
 import com.company.skillplatform.wiki.domain.WikiReviewStatus;
 import com.company.skillplatform.wiki.infrastructure.entity.*;
 import com.company.skillplatform.wiki.infrastructure.repository.*;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.time.Clock;
 import java.util.*;
 import org.springframework.data.domain.*;
@@ -35,8 +37,10 @@ public class WikiDocumentReviewService {
     private final Clock clock;
     private NotificationService notifications;
     private WikiPromotionStore promotionStore;
+    private WikiPublicationService publicationService;
     private OrgTeamMemberRepository members;
     private org.springframework.transaction.support.TransactionTemplate reviewTransactions;
+    @PersistenceContext private EntityManager entityManager;
 
     @org.springframework.beans.factory.annotation.Autowired
     public WikiDocumentReviewService(WikiDocumentReviewRepository reviews, WikiDocumentRepository documents,
@@ -61,6 +65,8 @@ public class WikiDocumentReviewService {
     @org.springframework.beans.factory.annotation.Autowired
     public void setPromotionStore(WikiPromotionStore promotionStore) { this.promotionStore = promotionStore; }
     @org.springframework.beans.factory.annotation.Autowired
+    public void setPublicationService(WikiPublicationService publicationService) { this.publicationService = publicationService; }
+    @org.springframework.beans.factory.annotation.Autowired
     public void setMembers(OrgTeamMemberRepository members) { this.members = members; }
     @org.springframework.beans.factory.annotation.Autowired
     public void setTransactionManager(org.springframework.transaction.PlatformTransactionManager manager) { this.reviewTransactions = new org.springframework.transaction.support.TransactionTemplate(manager); }
@@ -80,8 +86,10 @@ public class WikiDocumentReviewService {
     @Transactional
     public ReviewView submit(Long documentId, int versionNo, String comment, Long actorId, String requestId) {
         WikiDocumentEntity document = document(documentId);
-        if (document.getVersionNo() != versionNo) throw conflict("OPTIMISTIC_LOCK_CONFLICT");
         if (!canManage(document, actorId)) throw error("WIKI_EDIT_FORBIDDEN", "You cannot submit this Wiki document", HttpStatus.FORBIDDEN);
+        if (document.getTeamId() != null) promotionStore.lockTeam(document.getTeamId());
+        if (entityManager != null) entityManager.refresh(document);
+        if (document.getVersionNo() != versionNo) throw conflict("OPTIMISTIC_LOCK_CONFLICT");
         for (WikiDocumentEntity ancestor = document.getParent(); ancestor != null; ancestor = ancestor.getParent())
             if (promotionStore.hasPendingAncestor(ancestor.getId())) throw conflict("WIKI_REVIEW_OVERLAP");
         WikiPromotionStore.Tree tree = promotionStore.collect(document);
@@ -123,13 +131,18 @@ public class WikiDocumentReviewService {
     public ReviewView approve(Long id, String comment, Long actorId, String requestId) {
         WikiDocumentReviewEntity review = reviews.findByIdForUpdate(id).orElseThrow(() -> notFound("WIKI_REVIEW_NOT_FOUND"));
         requireReviewer(review.getDocument().getTeamId(), actorId);
+        promotionStore.lockTeam(review.getDocument().getTeamId());
         if (review.getStatus() == WikiReviewStatus.APPROVED) return view(review, false);
         if (review.getStatus() != WikiReviewStatus.PENDING) throw conflict("WIKI_REVIEW_NOT_PENDING");
         WikiDocumentEntity document = review.getDocument();
-        for (WikiPromotionStore.ReviewWikiItem item : promotionStore.reviewItems(id))
-            documents.findByIdForUpdate(item.documentId()).orElseThrow(() -> conflict("WIKI_REVIEW_STALE"));
-        for (WikiPromotionStore.ReviewSkillItem item : promotionStore.reviewSkills(id))
-            skills.findBySkillKeyForUpdate(item.skillKey()).orElseThrow(() -> conflict("WIKI_REVIEW_STALE"));
+        for (WikiPromotionStore.ReviewWikiItem item : promotionStore.reviewItems(id)) {
+            var locked = documents.findByIdForUpdate(item.documentId()).orElseThrow(() -> conflict("WIKI_REVIEW_STALE"));
+            if (entityManager != null) entityManager.refresh(locked);
+        }
+        for (WikiPromotionStore.ReviewSkillItem item : promotionStore.reviewSkills(id)) {
+            var locked = skills.findBySkillKeyForUpdate(item.skillKey()).orElseThrow(() -> conflict("WIKI_REVIEW_STALE"));
+            if (entityManager != null) entityManager.refresh(locked);
+        }
         WikiPromotionStore.Tree tree;
         try { tree = promotionStore.collect(document); }
         catch (BusinessException stale) { return markStale(review, actorId); }
@@ -137,18 +150,9 @@ public class WikiDocumentReviewService {
         if (comment == null || comment.isBlank() || comment.length() > 2000) throw error("WIKI_REVIEW_COMMENT_INVALID", "Review comment must contain 1..2000 characters", HttpStatus.BAD_REQUEST);
         IamUserEntity actor = user(actorId);
         review.approve(actor, comment.trim(), clock.instant());
-        for (WikiPromotionStore.SkillItem skill : tree.skills()) if ("TEAM".equals(skill.scope())) skill.skill().promoteToPlatform(actor);
-        List<com.company.skillplatform.skill.infrastructure.entity.SkillEntity> promotedSkills = tree.skills().stream().filter(skill -> "TEAM".equals(skill.scope())).map(WikiPromotionStore.SkillItem::skill).toList();
-        if (!promotedSkills.isEmpty()) skills.saveAll(promotedSkills);
-        for (WikiPromotionStore.SkillItem promoted : tree.skills()) if ("TEAM".equals(promoted.scope()))
-            audit.success("SKILL_PROMOTED_VIA_WIKI_TREE", actor, "SKILL", promoted.skillId(), requestId,
-                    Map.of("scopeType", "TEAM"), Map.of("scopeType", "PLATFORM", "promotionSource", "WIKI_TREE_REVIEW",
-                            "wikiReviewId", id, "rootWikiId", tree.rootId(), "originTeamId", tree.teamId(), "approvedVersionId", promoted.versionId()), Map.of());
-        for (WikiPromotionStore.Item item : tree.items()) item.document().publishToPlatform(actor);
-        documents.saveAllAndFlush(tree.items().stream().map(WikiPromotionStore.Item::document).toList());
-        promotionStore.publish(id, tree, actorId, clock.instant());
+        publicationService.publish(tree, "REVIEW", id, actor, comment.trim(), requestId, clock.instant());
+        promotionStore.release(id);
         reviews.save(review);
-        for (WikiPromotionStore.Item item : tree.items()) events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(item.documentId(), com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
         audit.success("WIKI_PLATFORM_REVIEW_APPROVED", actor, "WIKI_DOCUMENT", document.getId(), requestId,
                 Map.of("platformVisible", false), Map.of("platformVisible", true, "reviewId", id), Map.of());
         if (notifications != null) notifications.wikiReviewCompleted(document, review.getId(), true, review.getSubmitter().getId(), comment);
@@ -204,7 +208,10 @@ public class WikiDocumentReviewService {
     }
 
     private boolean canManage(WikiDocumentEntity document, Long userId) {
-        return document.getTeamId() != null && isActiveMember(document.getTeamId(), userId);
+        return document.getTeamId() != null && (isActiveMember(document.getTeamId(), userId) ||
+                (org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication() != null &&
+                org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication().getAuthorities().stream()
+                        .anyMatch(authority -> "admin:identity".equals(authority.getAuthority()))));
     }
 
     private boolean isActiveMember(Long teamId, Long userId) {

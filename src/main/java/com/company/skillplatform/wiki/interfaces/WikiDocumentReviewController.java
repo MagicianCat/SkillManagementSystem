@@ -2,6 +2,8 @@ package com.company.skillplatform.wiki.interfaces;
 
 import com.company.skillplatform.common.interfaces.PageResponse;
 import com.company.skillplatform.wiki.application.WikiDocumentReviewService;
+import com.company.skillplatform.wiki.application.WikiDirectPublicationService;
+import com.company.skillplatform.wiki.application.WikiPromotionStore;
 import com.company.skillplatform.wiki.domain.WikiReviewStatus;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -19,13 +21,24 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/v1")
 public class WikiDocumentReviewController {
     private final WikiDocumentReviewService service;
-    public WikiDocumentReviewController(WikiDocumentReviewService service) { this.service = service; }
+    private final WikiDirectPublicationService directPublication;
+    public WikiDocumentReviewController(WikiDocumentReviewService service, WikiDirectPublicationService directPublication) { this.service = service; this.directPublication = directPublication; }
 
     @PostMapping("/wiki/documents/{id}:submit-platform-review")
     @ResponseStatus(HttpStatus.CREATED)
     public WikiDocumentReviewService.ReviewView submit(@PathVariable Long id, @Valid @RequestBody SubmitRequest request, Authentication authentication, HttpServletRequest servletRequest) { return service.submit(id, request.versionNo, request.comment, (Long) authentication.getPrincipal(), servletRequest.getRequestId()); }
     @GetMapping("/wiki/documents/{id}/platform-promotion-preview")
     public WikiDocumentReviewService.PromotionPreview preview(@PathVariable Long id, Authentication authentication) { return service.preview(id, (Long) authentication.getPrincipal()); }
+    @PostMapping("/wiki/documents/{id}:publish-direct")
+    public WikiDirectPublicationService.PublicationResult publishDirect(@PathVariable Long id, @Valid @RequestBody DirectPublishRequest request,
+                                                                         Authentication authentication, HttpServletRequest servletRequest) {
+        return directPublication.publish(id, request.versionNo, request.treeFingerprint, request.comment,
+                (Long) authentication.getPrincipal(), servletRequest.getRequestId());
+    }
+    @GetMapping("/wiki/publications/{publicationId}/index-status")
+    public WikiPromotionStore.PublicationIndexStatus publicationIndexStatus(@PathVariable long publicationId, Authentication authentication) {
+        return directPublication.indexStatus(publicationId, (Long) authentication.getPrincipal());
+    }
     @GetMapping("/wiki-reviews")
     public PageResponse<WikiDocumentReviewService.ReviewSummary> list(@RequestParam(required = false) WikiReviewStatus status, @RequestParam(required = false) String keyword, @RequestParam(required = false) Long teamId, Pageable pageable) { return PageResponse.from(service.list(status, keyword, teamId, pageable), value -> value); }
     @GetMapping("/wiki-reviews/{id}")
@@ -42,6 +55,7 @@ public class WikiDocumentReviewController {
     public WikiDocumentReviewService.BatchReviewView batchReject(@Valid @RequestBody BatchRequest request, Authentication authentication, HttpServletRequest servletRequest) { return service.batch(request.reviewIds, request.comment, (Long) authentication.getPrincipal(), servletRequest.getRequestId(), false); }
 
     public record SubmitRequest(@NotNull Integer versionNo, @NotBlank @Size(max = 2000) String comment) {}
+    public record DirectPublishRequest(@NotNull Integer versionNo, @NotBlank String treeFingerprint, @NotBlank @Size(max = 2000) String comment) {}
     public record CommentRequest(@NotBlank @Size(max = 2000) String comment) {}
     public record BatchRequest(@NotEmpty @Size(max = 50) List<@NotNull Long> reviewIds, @NotBlank @Size(max = 2000) String comment) {}
 }

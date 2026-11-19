@@ -2,6 +2,7 @@ package com.company.skillplatform.wiki.interfaces;
 
 import com.company.skillplatform.common.interfaces.PageResponse;
 import com.company.skillplatform.wiki.application.WikiDocumentService;
+import com.company.skillplatform.wiki.application.WikiPromotionStore;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import java.util.List;
@@ -28,9 +29,11 @@ public class WikiDocumentController {
     public WikiDocumentController(WikiDocumentService service) { this.service = service; }
     @GetMapping("/teams") public List<WikiDocumentService.TeamView> teams(Authentication a) { return service.visibleTeams((Long) a.getPrincipal()); }
     @GetMapping("/teams/search") public PageResponse<WikiDocumentService.TeamView> searchTeams(@RequestParam(required=false) String keyword, Pageable pageable, Authentication a) { return service.searchTeams((Long) a.getPrincipal(), keyword, pageable); }
-    @GetMapping("/documents") public PageResponse<WikiDocumentService.DocumentView> search(@RequestParam(required=false) Long teamId, @RequestParam(required=false) String skillKey, @RequestParam(required=false) String keyword, @RequestParam(required=false) String knowledgeCategory, Pageable pageable, Authentication a) { return service.search((Long) a.getPrincipal(), teamId, skillKey, keyword, knowledgeCategory, pageable); }
+    @GetMapping("/documents") public PageResponse<WikiDocumentService.DocumentView> search(@RequestParam(required=false) Long teamId, @RequestParam(required=false) String skillKey, @RequestParam(required=false) String keyword, @RequestParam(required=false) String knowledgeCategory, @RequestParam(required=false) String scope, Pageable pageable, Authentication a) { return service.search((Long) a.getPrincipal(), teamId, skillKey, keyword, knowledgeCategory, scope, pageable); }
     @GetMapping("/documents/matches") public List<WikiDocumentService.DocumentMatchView> matches(@RequestParam Long teamId, @RequestParam String title, Authentication a) { return service.findTeamDocumentsByTitle((Long) a.getPrincipal(), teamId, title); }
     @GetMapping("/documents/{id}") public WikiDocumentService.DocumentView get(@PathVariable Long id, @RequestParam(required=false) String audience, Authentication a) { return service.get(id, (Long) a.getPrincipal(), "PLATFORM".equals(audience)); }
+    @GetMapping("/documents/{id}/index-status") public WikiPromotionStore.PublicationIndexStatus indexStatus(@PathVariable Long id, Authentication a) { return service.indexStatus(id, (Long) a.getPrincipal()); }
+    @GetMapping("/documents/{id}/publication-state") public WikiDocumentService.PublicationState publicationState(@PathVariable Long id, Authentication a) { return service.publicationState(id, (Long) a.getPrincipal()); }
     @GetMapping("/documents/{id}/metadata") public DocumentMetadata metadata(@PathVariable Long id, Authentication a) {
         var wiki = service.get(id, (Long) a.getPrincipal());
         return new DocumentMetadata(wiki.id(), wiki.title());

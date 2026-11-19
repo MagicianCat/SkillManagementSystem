@@ -101,7 +101,7 @@ public class AgentMcpConfiguration {
                                 schema("object", List.of("documentId")), this::wikiDocument),
                         tool("list_wiki_children", "List direct child Wiki documents of a visible parent. Call again with a returned child documentId to drill down one level. Results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiChildren),
-                        tool("search_knowledge", "Semantically search authorized Wiki snippets and linked Skills. Optional knowledgeCategory: SKILL_TOOL (Skill, ASDM tools, commands), PROJECT_CONTEXT (project background), INTERNAL_KNOWLEDGE (company knowledge), OTHER. Use PREFER for a confident single-topic hint; it falls back across categories. Use STRICT only when the user explicitly asks to limit the category. Omit the category for mixed or uncertain questions. Category never grants access. Cite the actual Wiki title and sourceUrl. Results include sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when present.",
+                        tool("search_knowledge", "Semantically search authorized Wiki snippets and linked Skills. Optional knowledgeCategory: SKILL_TOOL (Skill, ASDM tools, commands), PROJECT_CONTEXT (project background), INTERNAL_KNOWLEDGE (company knowledge), FDE_WIKI (FDE area), OTHER. Use PREFER for a confident single-topic hint; it falls back across categories. Use STRICT only when the user explicitly asks to limit the category. Omit the category for mixed or uncertain questions. Category never grants access. Cite the actual Wiki title and sourceUrl. Results include sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when present.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
@@ -164,7 +164,7 @@ public class AgentMcpConfiguration {
         Map<String,Object> props=new LinkedHashMap<>();
         props.put("query",Map.of("type","string","minLength",1,"maxLength",1000));
         props.put("developmentStage",Map.of("type","string","enum",Arrays.stream(DevelopmentStage.values()).map(Enum::name).toList()));
-        props.put("knowledgeCategory",Map.of("type","string","enum",List.of("SKILL_TOOL","PROJECT_CONTEXT","INTERNAL_KNOWLEDGE","OTHER")));
+        props.put("knowledgeCategory",Map.of("type","string","enum",List.of("SKILL_TOOL","PROJECT_CONTEXT","INTERNAL_KNOWLEDGE","FDE_WIKI","OTHER")));
         props.put("categoryMode",Map.of("type","string","enum",List.of("PREFER","STRICT"),"default","PREFER"));
         props.put("limit",Map.of("type","integer","minimum",1,"maximum",10,"default",5));
         return new McpSchema.JsonSchema("object",props,List.of("query"),false,Map.of(),Map.of());

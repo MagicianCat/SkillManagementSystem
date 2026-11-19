@@ -163,6 +163,16 @@ public class NotificationService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void wikiCategoryBatchReady(Long actorId, Long batchId, int succeeded, int failed, int skipped) {
+        LinkedHashMap<Long,IamUserEntity> recipients = new LinkedHashMap<>();
+        users.findById(actorId).ifPresent(user -> recipients.put(user.getId(), user));
+        userRoles.findActiveSuperAdmins().forEach(user -> recipients.put(user.getId(), user));
+        save(recipients.values(), failed > 0 ? NotificationType.WIKI_CATEGORY_BATCH_FAILED : NotificationType.WIKI_CATEGORY_BATCH_READY,
+                "Wiki 批量分类待审核", "AI 建议 " + succeeded + " 篇，失败 " + failed + " 篇，失效 " + skipped + " 篇。请进入审核工作台确认。",
+                "WIKI_CATEGORY_BATCH", batchId, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void externalImportCompleted(Long actorId, Long jobId, String kind, int succeeded, int failed, String summary) {
         LinkedHashMap<Long,IamUserEntity> recipients = new LinkedHashMap<>();
         users.findById(actorId).ifPresent(actor -> recipients.put(actor.getId(), actor));

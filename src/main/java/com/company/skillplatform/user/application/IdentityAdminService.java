@@ -4,6 +4,7 @@ import com.company.skillplatform.audit.application.AuditService;
 import com.company.skillplatform.common.application.BusinessException;
 import com.company.skillplatform.common.logging.LogContext;
 import com.company.skillplatform.user.domain.UserStatus;
+import com.company.skillplatform.user.domain.RoleStatus;
 import com.company.skillplatform.user.infrastructure.entity.IamPermissionEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamRoleEntity;
 import com.company.skillplatform.user.infrastructure.entity.IamRolePermissionEntity;
@@ -49,6 +50,40 @@ public class IdentityAdminService {
     @Transactional(readOnly = true) public List<Long> rolePermissionIds(Long roleId) {
         if (!roles.existsById(roleId)) throw notFound("ROLE_NOT_FOUND", "Role not found");
         return rolePermissions.findAllByRoleId(roleId).stream().map(link -> link.getPermission().getId()).toList();
+    }
+    @Transactional(readOnly = true)
+    public Page<IamUserEntity> wikiDirectPublishers(String keyword, Pageable pageable) {
+        return userRoles.findWikiDirectPublishers(keyword == null || keyword.isBlank() ? null : keyword.trim(), pageable);
+    }
+    @Transactional(readOnly = true)
+    public boolean isWikiDirectPublisher(Long userId) {
+        user(userId);
+        return userRoles.findRoleKeysByUserId(userId).contains("WIKI_DIRECT_PUBLISHER");
+    }
+    @Transactional
+    public void grantWikiDirectPublisher(Long userId, Long operatorId, String requestId) {
+        IamUserEntity target = users.findByIdForUpdate(userId).orElseThrow(() -> notFound("USER_NOT_FOUND", "User not found"));
+        if (target.getStatus() != UserStatus.ACTIVE) throw new BusinessException("USER_INACTIVE", "Target user is not active", HttpStatus.CONFLICT);
+        IamRoleEntity role = directPublisherRole();
+        if (userRoles.findAllByUserId(userId).stream().anyMatch(link -> link.getRole().getId().equals(role.getId()))) return;
+        userRoles.save(new IamUserRoleEntity(target, role, user(operatorId)));
+        audit.success("WIKI_DIRECT_PUBLISHER_GRANTED", user(operatorId), "IAM_USER", userId, requestId,
+                Map.of("wikiDirectPublisher", false), Map.of("wikiDirectPublisher", true), Map.of());
+    }
+    @Transactional
+    public void revokeWikiDirectPublisher(Long userId, Long operatorId, String requestId) {
+        users.findByIdForUpdate(userId).orElseThrow(() -> notFound("USER_NOT_FOUND", "User not found"));
+        IamRoleEntity role = directPublisherRole();
+        var assignment = userRoles.findAllByUserId(userId).stream().filter(link -> link.getRole().getId().equals(role.getId())).findFirst();
+        if (assignment.isEmpty()) return;
+        userRoles.delete(assignment.get());
+        audit.success("WIKI_DIRECT_PUBLISHER_REVOKED", user(operatorId), "IAM_USER", userId, requestId,
+                Map.of("wikiDirectPublisher", true), Map.of("wikiDirectPublisher", false), Map.of());
+    }
+    private IamRoleEntity directPublisherRole() {
+        IamRoleEntity role = roles.findByRoleKey("WIKI_DIRECT_PUBLISHER").orElseThrow(() -> notFound("ROLE_NOT_FOUND", "Wiki direct publisher role not found"));
+        if (role.getStatus() != RoleStatus.ACTIVE) throw new BusinessException("ROLE_INACTIVE", "Wiki direct publisher role is inactive", HttpStatus.CONFLICT);
+        return role;
     }
     @Transactional
     public IamUserEntity changeStatus(Long userId, UserStatus status, int versionNo, Long operatorId, String requestId) {

@@ -48,6 +48,8 @@ class WikiDocumentReviewServiceTest {
         var secondItem=new WikiPromotionStore.SkillItem(202L,"second","TEAM",7L,302L,second);
         var tree=new WikiPromotionStore.Tree(90L,7L,List.of(new WikiPromotionStore.Item(90L,null,"根知识",91L,1,"sha",List.of(201L,202L),document)),List.of(firstItem,secondItem),"fingerprint");
         var promotion=mock(WikiPromotionStore.class);
+        when(actor.getId()).thenReturn(9L);
+        when(promotion.recordPublication(anyString(),anyLong(),any(),any(),anyLong(),anyString(),anyInt(),anyInt(),anyInt(),anyString(),any())).thenReturn(101L);
         when(reviews.findByIdForUpdate(92L)).thenReturn(Optional.of(review));
         when(documents.findByIdForUpdate(90L)).thenReturn(Optional.of(document));
         when(promotion.reviewItems(92L)).thenReturn(List.of(new WikiPromotionStore.ReviewWikiItem(90L,"根知识",null,91L,1)));
@@ -65,19 +67,22 @@ class WikiDocumentReviewServiceTest {
         var service=new WikiDocumentReviewService(reviews,documents,links,mock(OrgTeamRepository.class),skills,roles,users,
                 mock(ApplicationEventPublisher.class),mock(AuditService.class),Clock.fixed(Instant.EPOCH,ZoneOffset.UTC));
         service.setMembers(members);service.setPromotionStore(promotion);
+        service.setPublicationService(new WikiPublicationService(documents, skills, promotion, mock(ApplicationEventPublisher.class), mock(AuditService.class)));
 
         var result=service.approve(92L,"通过",9L,"multi-skill");
 
         assertThat(result.status()).isEqualTo(WikiReviewStatus.APPROVED);
         assertThat(document.isPlatformVisible()).isTrue();
         verify(first).promoteToPlatform(actor);verify(second).promoteToPlatform(actor);
-        verify(promotion).publish(92L,tree,9L,Instant.EPOCH);
+        verify(promotion).publishSnapshot(tree,"REVIEW",92L,9L,Instant.EPOCH,101L);
+        verify(promotion).release(92L);
     }
     @Test void submitsAndApprovesTeamGuideWithoutSkills() {
         var reviews=mock(WikiDocumentReviewRepository.class);var documents=mock(WikiDocumentRepository.class);var skills=mock(SkillRepository.class);
         var links=mock(WikiDocumentSkillRepository.class);var events=mock(ApplicationEventPublisher.class);
         var roles=mock(ScopedRoleAssignmentRepository.class);var users=mock(IamUserRepository.class);
         var actor=mock(IamUserEntity.class);var document=new WikiDocumentEntity("独立 Wiki",7L,false,actor);
+        when(actor.getId()).thenReturn(9L);
         ReflectionTestUtils.setField(document,"id",81L);
         var revision=new WikiDocumentRevisionEntity(document,1,"# 独立知识","sha",actor);
         ReflectionTestUtils.setField(revision,"id",82L);document.setCurrentRevision(revision,actor);
@@ -100,6 +105,7 @@ class WikiDocumentReviewServiceTest {
         when(membership.getTeam()).thenReturn(team);when(membership.getStatus()).thenReturn("ACTIVE");
         when(members.findByUserId(9L)).thenReturn(List.of(membership));
         var promotion=mock(WikiPromotionStore.class);
+        when(promotion.recordPublication(anyString(),anyLong(),any(),any(),anyLong(),anyString(),anyInt(),anyInt(),anyInt(),anyString(),any())).thenReturn(102L);
         var tree=new WikiPromotionStore.Tree(81L,7L,List.of(new WikiPromotionStore.Item(81L,null,"独立 Wiki",82L,1,"sha",List.of(),document)),List.of(),"fingerprint");
         when(promotion.collect(document)).thenReturn(tree);
         when(promotion.reviewItems(55L)).thenReturn(List.of(new WikiPromotionStore.ReviewWikiItem(81L,"独立 Wiki",null,82L,1)));
@@ -108,6 +114,7 @@ class WikiDocumentReviewServiceTest {
             var service=new WikiDocumentReviewService(reviews,documents,links,mock(OrgTeamRepository.class),skills,
                     roles,users,events,mock(AuditService.class),Clock.fixed(Instant.parse("2026-10-26T00:00:00Z"),ZoneOffset.UTC));
             service.setMembers(members);service.setPromotionStore(promotion);
+            service.setPublicationService(new WikiPublicationService(documents, skills, promotion, events, mock(AuditService.class)));
             var submitted=service.submit(81L,0,"请审核",9L,"submit-request");
             assertThat(submitted.skills()).isEmpty();assertThat(submitted.status()).isEqualTo(WikiReviewStatus.PENDING);
             var approved=service.approve(55L,"通过",9L,"approve-request");

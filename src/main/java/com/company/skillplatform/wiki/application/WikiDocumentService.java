@@ -41,6 +41,16 @@ public class WikiDocumentService {
     private final ApplicationEventPublisher events;
     private WikiDocumentReviewRepository reviewRepository;
     private WikiPromotionStore promotionStore;
+    private org.springframework.jdbc.core.JdbcTemplate categoryDb;
+    @org.springframework.beans.factory.annotation.Autowired public void setCategoryDb(org.springframework.jdbc.core.JdbcTemplate categoryDb) { this.categoryDb=categoryDb; }
+    private void confirmCategory(WikiDocumentEntity document, WikiDocumentRevisionEntity revision, Long actorId, List<Long> skillIds) {
+        if (categoryDb == null) return;
+        String fingerprint = WikiCategoryFingerprint.of(document.getTitle(), revision.getMarkdownContent(), document.getTeamId(),
+                document.getParent() == null ? null : document.getParent().getId(), skillIds);
+        categoryDb.update("INSERT INTO wiki_category_confirmation(wiki_document_id,confirmed_category,confirmed_input_fingerprint,confirmed_revision_id,confirmed_by,confirmation_source) VALUES(?,?,?,?,?,'USER_MANUAL') ON DUPLICATE KEY UPDATE confirmed_category=VALUES(confirmed_category),confirmed_input_fingerprint=VALUES(confirmed_input_fingerprint),confirmed_revision_id=VALUES(confirmed_revision_id),confirmed_by=VALUES(confirmed_by),confirmation_source='USER_MANUAL',confirmed_at=NOW(3)",
+                document.getId(),document.getKnowledgeCategory().name(),fingerprint,revision.getId(),actorId);
+    }
+
 
     public WikiDocumentService(WikiDocumentRepository documents, WikiDocumentRevisionRepository revisions,
             WikiDocumentSkillRepository links, SkillRepository skills, SkillOwnerRepository owners,
@@ -108,7 +118,7 @@ public class WikiDocumentService {
             var own = cb.equal(root.get("knowledgeCategory"), category);
             return isAdmin() ? own : visibleTeamIds.isEmpty() ? root.get("id").in(approved)
                     : cb.or(cb.and(root.get("teamId").in(visibleTeamIds), own),
-                            cb.and(cb.not(root.get("teamId").in(visibleTeamIds)), root.get("id").in(approved)));
+                            cb.and(cb.or(cb.isNull(root.get("teamId")), cb.not(root.get("teamId").in(visibleTeamIds))), root.get("id").in(approved)));
         });
         if (skillKey != null && !skillKey.isBlank()) {
             List<Long> publicIds = promotionStore == null ? List.of() : promotionStore.publicDocumentIdsForSkillKey(skillKey);
@@ -119,6 +129,35 @@ public class WikiDocumentService {
             });
         }
         return PageResponse.from(documents.findAll(spec, limited(pageable)), this::view);
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<DocumentView> search(Long userId, Long teamId, String skillKey, String keyword,
+                                             String knowledgeCategory, String scope, Pageable pageable) {
+        if (scope == null || "ALL".equals(scope)) return search(userId, teamId, skillKey, keyword, knowledgeCategory, pageable);
+        if ("TEAM".equals(scope)) {
+            if (teamId == null) throw error("WIKI_TEAM_REQUIRED", "Team scope requires teamId", HttpStatus.BAD_REQUEST);
+            return search(userId, teamId, skillKey, keyword, knowledgeCategory, pageable);
+        }
+        if (!"PLATFORM".equals(scope)) throw error("WIKI_SCOPE_INVALID", "Invalid Wiki scope", HttpStatus.BAD_REQUEST);
+        if (teamId != null) throw error("WIKI_SCOPE_INVALID", "Platform scope cannot use teamId", HttpStatus.BAD_REQUEST);
+        WikiKnowledgeCategory category = WikiKnowledgeCategory.parse(knowledgeCategory, null);
+        Specification<WikiDocumentEntity> spec = (root, q, cb) -> {
+            var snapshotIds = q.subquery(Long.class);
+            var snapshot = snapshotIds.from(WikiPlatformSnapshotEntity.class);
+            var conditions = new ArrayList<jakarta.persistence.criteria.Predicate>();
+            conditions.add(cb.equal(snapshot.get("documentId"), root.get("id")));
+            if (category != null) conditions.add(cb.equal(snapshot.get("approvedKnowledgeCategory"), category.name()));
+            if (keyword != null && !keyword.isBlank())
+                conditions.add(cb.like(cb.lower(snapshot.get("approvedTitle")), "%" + keyword.trim().toLowerCase(Locale.ROOT) + "%"));
+            snapshotIds.select(snapshot.get("documentId")).where(conditions.toArray(jakarta.persistence.criteria.Predicate[]::new));
+            return cb.and(cb.equal(root.get("status"), "ACTIVE"), cb.isTrue(root.get("platformVisible")), cb.exists(snapshotIds));
+        };
+        if (skillKey != null && !skillKey.isBlank()) {
+            List<Long> publicIds = promotionStore == null ? List.of() : promotionStore.publicDocumentIdsForSkillKey(skillKey);
+            spec = spec.and((root, q, cb) -> root.get("id").in(publicIds));
+        }
+        return PageResponse.from(documents.findAll(spec, limited(pageable)), document -> view(document, true));
     }
 
     @Transactional(readOnly = true)
@@ -195,10 +234,41 @@ public class WikiDocumentService {
     @Transactional(readOnly = true)
     public DocumentView get(Long id, Long userId) { return view(visibleDocument(id, userId)); }
     @Transactional(readOnly = true)
+    public List<String> validateSuggestionContext(Long teamId, List<Long> skillIds, Long parentId, Long userId) {
+        requireAuthority("wiki:create");
+        if (teamId == null ? !isAdmin() && !hasAuthority("wiki:publish:direct") : !isActiveMember(teamId, userId) && !isAdmin())
+            throw error("WIKI_TEAM_MEMBER_REQUIRED", "Active team membership required", HttpStatus.FORBIDDEN);
+        List<SkillEntity> selected = selectedSkills(skillIds, true);
+        validateLinks(selected, teamId, userId);
+        if (parentId != null) {
+            WikiDocumentEntity parent = visibleDocument(parentId, userId);
+            if (!Objects.equals(parent.getTeamId(), teamId))
+                throw error("WIKI_PARENT_SCOPE_INVALID", "Parent Wiki must belong to the same team", HttpStatus.BAD_REQUEST);
+        }
+        return selected.stream().map(SkillEntity::getDisplayName).toList();
+    }
+    @Transactional(readOnly = true)
     public DocumentView get(Long id, Long userId, boolean platformOnly) {
         WikiDocumentEntity document = visibleDocument(id, userId);
         if (platformOnly && !document.isPlatformVisible()) throw error("WIKI_DOCUMENT_NOT_FOUND", "Wiki document not found", HttpStatus.NOT_FOUND);
         return view(document, platformOnly);
+    }
+    @Transactional(readOnly = true)
+    public WikiPromotionStore.PublicationIndexStatus indexStatus(Long id, Long userId) {
+        WikiDocumentEntity document = visibleDocument(id, userId);
+        if (!document.isPlatformVisible() || promotionStore == null) throw error("WIKI_PUBLICATION_NOT_FOUND", "Wiki is not published", HttpStatus.NOT_FOUND);
+        Long publicationId = promotionStore.platformPublicationId(id);
+        if (publicationId == null) return promotionStore.legacyIndexStatus(id);
+        var status = promotionStore.publicationIndexStatus(publicationId);
+        return status == null ? new WikiPromotionStore.PublicationIndexStatus(id, "PENDING") : status;
+    }
+    @Transactional(readOnly = true)
+    public PublicationState publicationState(Long id, Long userId) {
+        WikiDocumentEntity document = visibleDocument(id, userId);
+        if (document.getTeamId() == null || !canEdit(document, userId))
+            return new PublicationState(false);
+        if (!document.isPlatformVisible() || promotionStore == null) return new PublicationState(false);
+        return new PublicationState(promotionStore.isPublishedTreeCurrent(promotionStore.collect(document)));
     }
 
     /** Validates that the actor may explicitly share this Wiki with a project stage. */
@@ -226,7 +296,7 @@ public class WikiDocumentService {
     @Transactional(readOnly = true)
     public List<RevisionView> revisions(Long id, Long userId) {
         WikiDocumentEntity document = visibleDocument(id, userId);
-        if (!isAdmin() && !isActiveMember(document.getTeamId(), userId)) {
+        if (!isAdmin() && !isActiveMember(document.getTeamId(), userId) && !canEdit(document, userId)) {
             WikiPromotionStore.PlatformSnapshot approved = promotionStore.platform(id);
             return revisions.findById(approved.revisionId()).stream().map(r -> new RevisionView(r.getId(), r.getRevisionNo(), r.getMarkdownContent(), r.getCreatedBy().getId(), r.getCreatedBy().getDisplayName(), r.getTimeCreated())).toList();
         }
@@ -240,7 +310,7 @@ public class WikiDocumentService {
         IamUserEntity actor = user(userId);
         String title = title(command.title()); String content = content(command.markdownContent());
         Long teamId = command.teamId();
-        if (teamId == null ? !isAdmin() : !isActiveMember(teamId, userId) && !isAdmin())
+        if (teamId == null ? !isAdmin() && !hasAuthority("wiki:publish:direct") : !isActiveMember(teamId, userId) && !isAdmin())
             throw error("WIKI_TEAM_MEMBER_REQUIRED", "Active team membership required", HttpStatus.FORBIDDEN);
         List<SkillEntity> selected = selectedSkills(command.skillIds(), true);
         validateLinks(selected, teamId, userId);
@@ -251,6 +321,7 @@ public class WikiDocumentService {
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, 1, content, sha256(content), actor));
         document.setCurrentRevision(revision, actor); documents.save(document);
         saveLinks(document, selected);
+        if (command.knowledgeCategory() != null) confirmCategory(document, revision, userId, selected.stream().map(SkillEntity::getId).toList());
         if (platform && promotionStore != null) promotionStore.publishDirect(document, userId);
         audit.success("WIKI_DOCUMENT_CREATED", actor, "WIKI_DOCUMENT", document.getId(), requestId, null, Map.of(), Map.of());
         events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(document.getId(), com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
@@ -272,6 +343,7 @@ public class WikiDocumentService {
         int next = document.getCurrentRevision() == null ? 1 : document.getCurrentRevision().getRevisionNo() + 1;
         WikiDocumentRevisionEntity revision = revisions.save(new WikiDocumentRevisionEntity(document, next, value, sha256(value), actor));
         document.setCurrentRevision(revision, actor); documents.saveAndFlush(document);
+        if (command.knowledgeCategory() != null) confirmCategory(document, revision, userId, links.findByDocumentIdOrderBySortOrderAsc(document.getId()).stream().map(link -> link.getSkill().getId()).toList());
         if (document.getTeamId() == null && promotionStore != null) promotionStore.publishDirect(document, userId);
         audit.success("WIKI_DOCUMENT_UPDATED", actor, "WIKI_DOCUMENT", id, requestId, null, Map.of("revisionNo", next), Map.of());
         events.publishEvent(new com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent(id, com.company.skillplatform.knowledge.application.WikiKnowledgeChangedEvent.Operation.UPSERT));
@@ -354,7 +426,10 @@ public class WikiDocumentService {
 
     public boolean canEdit(WikiDocumentEntity document, Long userId) {
         if (isAdmin()) return true;
-        return hasAuthority("wiki:edit") && document.getTeamId() != null && isActiveMember(document.getTeamId(), userId);
+        if (!hasAuthority("wiki:edit")) return false;
+        if (document.getTeamId() == null)
+            return hasAuthority("wiki:publish:direct") && userId != null && Objects.equals(document.getCreatedBy().getId(), userId);
+        return isActiveMember(document.getTeamId(), userId);
     }
     private boolean canArchive(WikiDocumentEntity document, Long userId) {
         return isAdmin() || (document.getTeamId() != null && isActiveMember(document.getTeamId(), userId)
@@ -392,6 +467,9 @@ public class WikiDocumentService {
         for (SkillEntity skill : selected) {
             if (skill.getStatus() != SkillStatus.ACTIVE)
                 throw error("WIKI_INACTIVE_SKILL_LINK", "A Wiki cannot link an inactive Skill", HttpStatus.BAD_REQUEST);
+            if (teamId == null && (!"PLATFORM".equals(skill.getScopeType()) || skill.getLatestPlatformApprovedVersion() == null ||
+                    skill.getLatestPlatformApprovedVersion().getLifecycleStatus() != com.company.skillplatform.version.domain.LifecycleStatus.PUBLISHED))
+                throw error("WIKI_PLATFORM_SKILL_REQUIRED", "Platform Wiki requires approved platform Skills", HttpStatus.BAD_REQUEST);
             if ("TEAM".equals(skill.getScopeType()) && !Objects.equals(teamId, skill.getTeamId()))
                 throw error("WIKI_CROSS_TEAM_SKILL", "A team Wiki cannot link another team's private Skill", HttpStatus.BAD_REQUEST);
             if ("TEAM".equals(skill.getScopeType()) && !isActiveMember(skill.getTeamId(), userId) && !isAdmin())
@@ -418,7 +496,8 @@ public class WikiDocumentService {
     private DocumentView view(WikiDocumentEntity d) { return view(d, false); }
     private DocumentView view(WikiDocumentEntity d, boolean forcePlatform) {
         Long actorId = currentUserId();
-        boolean teamAudience = !forcePlatform && (isAdmin() || isActiveMember(d.getTeamId(), actorId));
+        boolean teamAudience = !forcePlatform && (isAdmin() || isActiveMember(d.getTeamId(), actorId) ||
+                d.getTeamId() == null && canEdit(d, actorId));
         WikiPromotionStore.PlatformSnapshot approved = !teamAudience && promotionStore != null ? promotionStore.platform(d.getId()) : null;
         if (!teamAudience && approved == null && (forcePlatform || d.getTeamId() != null))
             throw error("WIKI_DOCUMENT_NOT_FOUND", "Wiki document not found", HttpStatus.NOT_FOUND);
@@ -427,12 +506,12 @@ public class WikiDocumentService {
                 : promotionStore.platformSkills(d.getId()).stream().map(link -> new SkillLinkView(link.skillId(), link.skillKey(), link.displayName())).toList();
         WikiDocumentRevisionEntity revision = d.getCurrentRevision();
         WikiDocumentReviewEntity pending = teamAudience ? pendingReview(d.getId()) : null;
-        boolean canManage = teamAudience && canEdit(d, actorId) && (!d.isPlatformVisible() || promotionStore == null || promotionStore.platform(d.getId()) != null);
+        boolean canManage = canEdit(d, actorId) && (!d.isPlatformVisible() || promotionStore == null || promotionStore.platform(d.getId()) != null);
         return new DocumentView(d.getId(), approved == null ? d.getTitle() : approved.title(), d.getTeamId(), d.isPlatformVisible(),
                 approved == null ? revision == null ? "" : revision.getMarkdownContent() : approved.markdownContent(),
                 approved == null ? revision == null ? 0 : revision.getRevisionNo() : approved.revisionNo(), teamAudience ? d.getVersionNo() : 0, skillViews,
                 canManage, "ACTIVE".equals(d.getStatus()), pending == null ? null : pending.getId(), pending == null ? null : pending.getStatus().name(),
-                approved == null ? d.getParent() == null ? null : d.getParent().getId() : approved.parentId(), teamAudience ? d.getSourceResourceId() : null, teamAudience && canArchive(d, actorId), approved == null ? d.getKnowledgeCategory().name() : approved.knowledgeCategory());
+                approved == null ? d.getParent() == null ? null : d.getParent().getId() : approved.parentId(), teamAudience ? d.getSourceResourceId() : null, canArchive(d, actorId), approved == null ? d.getKnowledgeCategory().name() : approved.knowledgeCategory());
     }
     private TeamView teamView(com.company.skillplatform.user.infrastructure.entity.OrgTeamEntity t) { return new TeamView(t.getId(), t.getTeamName(), t.getParent() == null ? null : t.getParent().getId()); }
     private Pageable limited(Pageable p) { return PageRequest.of(p.getPageNumber(), Math.min(Math.max(p.getPageSize(), 1), 50), p.getSort().isSorted() ? p.getSort() : Sort.by("timeUpdated").descending()); }
@@ -459,6 +538,7 @@ public class WikiDocumentService {
         public UpdateCommand(String title, String markdownContent, int versionNo, List<Long> skillIds) { this(title, markdownContent, versionNo, skillIds, null, false); }
     }
     public record TeamView(Long id, String name, Long parentId) {}
+    public record PublicationState(boolean upToDate) {}
     public record SkillLinkView(Long id, String skillKey, String displayName) {}
     public record DocumentView(Long id, String title, Long teamId, boolean platformVisible, String markdownContent, int revisionNo, int versionNo, List<SkillLinkView> skills, boolean canEdit, boolean active, Long pendingPlatformReviewId, String pendingPlatformReviewStatus, Long parentId, String sourceResourceId, boolean canArchive, String knowledgeCategory) {
         public DocumentView(Long id, String title, Long teamId, boolean platformVisible, String markdownContent, int revisionNo, int versionNo, List<SkillLinkView> skills, boolean canEdit, boolean active, Long pendingPlatformReviewId, String pendingPlatformReviewStatus, Long parentId, String sourceResourceId, boolean canArchive) { this(id, title, teamId, platformVisible, markdownContent, revisionNo, versionNo, skills, canEdit, active, pendingPlatformReviewId, pendingPlatformReviewStatus, parentId, sourceResourceId, canArchive, "OTHER"); }

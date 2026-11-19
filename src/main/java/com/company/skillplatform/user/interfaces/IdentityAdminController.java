@@ -15,6 +15,8 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,6 +33,18 @@ public class IdentityAdminController {
     public IdentityAdminController(IdentityAdminService service) { this.service = service; }
     @GetMapping("/users") PageResponse<UserView> users(Pageable pageable) {
         return PageResponse.from(service.users(pageable), UserView::from);
+    }
+    @GetMapping("/wiki-direct-publishers") PageResponse<UserView> wikiDirectPublishers(@RequestParam(required = false) String keyword, Pageable pageable) {
+        return PageResponse.from(service.wikiDirectPublishers(keyword, pageable), UserView::from);
+    }
+    @GetMapping("/wiki-direct-publishers/{userId}") WikiDirectPublisherStatus wikiDirectPublisher(@PathVariable Long userId) {
+        return new WikiDirectPublisherStatus(service.isWikiDirectPublisher(userId));
+    }
+    @PutMapping("/wiki-direct-publishers/{userId}") void grantWikiDirectPublisher(@PathVariable Long userId, Authentication auth, HttpServletRequest request) {
+        service.grantWikiDirectPublisher(userId, (Long) auth.getPrincipal(), request.getRequestId());
+    }
+    @DeleteMapping("/wiki-direct-publishers/{userId}") void revokeWikiDirectPublisher(@PathVariable Long userId, Authentication auth, HttpServletRequest request) {
+        service.revokeWikiDirectPublisher(userId, (Long) auth.getPrincipal(), request.getRequestId());
     }
     @PatchMapping("/users/{id}/status") UserView status(@PathVariable Long id, @Valid @RequestBody StatusRequest request,
                                                         Authentication auth, HttpServletRequest servletRequest) {
@@ -67,4 +81,5 @@ public class IdentityAdminController {
         static PermissionView from(IamPermissionEntity e) { return new PermissionView(e.getId(), e.getPermissionKey(), e.getPermissionName(), e.getDescription()); }
     }
     public record IdList(List<Long> ids) {}
+    public record WikiDirectPublisherStatus(boolean granted) {}
 }

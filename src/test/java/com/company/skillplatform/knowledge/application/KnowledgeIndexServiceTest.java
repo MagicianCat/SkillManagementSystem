@@ -39,7 +39,7 @@ class KnowledgeIndexServiceTest {
         ReflectionTestUtils.setField(document, "id", 91L);
         var revision = new WikiDocumentRevisionEntity(document, 1, "# 接口约定\n\n不关联 Skill 的知识内容。", "sha", actor);
         document.setCurrentRevision(revision, actor);
-        document.setKnowledgeCategory(WikiKnowledgeCategory.PROJECT_CONTEXT, actor);
+        document.setKnowledgeCategory(WikiKnowledgeCategory.FDE_WIKI, actor);
         when(documents.findById(91L)).thenReturn(Optional.of(document));
         when(links.findByDocumentIdOrderBySortOrderAsc(91L)).thenReturn(List.of());
         when(embedding.embedDocuments(anyList())).thenAnswer(invocation ->
@@ -59,7 +59,7 @@ class KnowledgeIndexServiceTest {
             assertThat(point.payload().get("skillKeys")).isEqualTo(List.of());
             assertThat(point.payload().get("developmentStages")).isEqualTo(List.of());
             assertThat(point.payload().get("teamId")).isEqualTo(7L);
-            assertThat(point.payload().get("knowledgeCategory")).isEqualTo("PROJECT_CONTEXT");
+            assertThat(point.payload().get("knowledgeCategory")).isEqualTo("FDE_WIKI");
         });
     }
 

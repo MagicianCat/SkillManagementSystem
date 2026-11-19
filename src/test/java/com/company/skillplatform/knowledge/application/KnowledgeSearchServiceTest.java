@@ -23,6 +23,24 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 class KnowledgeSearchServiceTest {
+    @Test void fdeCategoryCanBeStrictlyFilteredWithoutChangingTeamVisibility() {
+        var embedding=mock(EmbeddingPort.class);var rerank=mock(RerankPort.class);var vectors=mock(VectorStorePort.class);
+        var wiki=mock(WikiDocumentService.class);var documents=mock(WikiDocumentRepository.class);var links=mock(WikiDocumentSkillRepository.class);
+        var properties=new KnowledgeProperties();properties.getRerank().setEnabled(false);
+        when(embedding.embedQuery(anyString())).thenReturn(new float[1024]);
+        when(wiki.visibleTeams(9L)).thenReturn(List.of(new WikiDocumentService.TeamView(7L,"A",null)));
+        var fde=teamDocument(15L,1,"fde-sha",WikiKnowledgeCategory.FDE_WIKI);
+        when(documents.findAllById(any())).thenReturn(List.of(fde));
+        when(vectors.search(any(),any(),anyInt())).thenReturn(List.of(hit("fde",15L,"TEAM",1,"fde-sha","FDE_WIKI",0.9)));
+        var service=new KnowledgeSearchService(embedding,rerank,vectors,wiki,documents,links,properties,new SimpleMeterRegistry());
+
+        var result=service.search(9L,"USER_VISIBLE","FDE 经验",null,"FDE_WIKI","STRICT",5);
+
+        assertThat(result.results()).extracting(KnowledgeSearchResult.DocumentResult::knowledgeCategory).containsExactly("FDE_WIKI");
+        var filter=ArgumentCaptor.forClass(VectorStorePort.KnowledgeFilter.class);
+        verify(vectors).search(any(),filter.capture(),anyInt());
+        assertThat(filter.getValue().knowledgeCategory()).isEqualTo("FDE_WIKI");
+    }
     @Test void preferFallsBackOnceWithSameEmbeddingAndStrictStaysInCategory() {
         var embedding=mock(EmbeddingPort.class);var rerank=mock(RerankPort.class);var vectors=mock(VectorStorePort.class);
         var wiki=mock(WikiDocumentService.class);var documents=mock(WikiDocumentRepository.class);var links=mock(WikiDocumentSkillRepository.class);

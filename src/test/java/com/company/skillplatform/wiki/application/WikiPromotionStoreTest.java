@@ -17,6 +17,28 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 class WikiPromotionStoreTest {
+    @Test void publishedTreeStateTracksDescendantChanges() {
+        var documents=mock(WikiDocumentRepository.class);
+        var links=mock(WikiDocumentSkillRepository.class);
+        var root=node(1L,null);var child=node(2L,root);
+        when(root.isPlatformVisible()).thenReturn(true);
+        when(child.isPlatformVisible()).thenReturn(true);
+        when(documents.findByParentIdAndStatusOrderByIdAsc(1L,"ACTIVE")).thenReturn(List.of(child));
+        when(documents.findByParentIdAndStatusOrderByIdAsc(2L,"ACTIVE")).thenReturn(List.of());
+        when(links.findByDocumentIdOrderBySortOrderAsc(anyLong())).thenReturn(List.of());
+        var store=spy(new WikiPromotionStore(documents,links,mock(JdbcTemplate.class)));
+        var tree=store.collect(root);
+        doReturn(new WikiPromotionStore.PlatformSnapshot(1L,101L,"Wiki 1",null,1,"root","OTHER")).when(store).platform(1L);
+        doReturn(new WikiPromotionStore.PlatformSnapshot(2L,102L,"Wiki 2",1L,1,"child","OTHER")).when(store).platform(2L);
+        doReturn(List.of()).when(store).platformSkills(anyLong());
+        doReturn(List.of(2L)).when(store).platformChildren(1L);
+        doReturn(List.of()).when(store).platformChildren(2L);
+
+        assertThat(store.isPublishedTreeCurrent(tree)).isTrue();
+        doReturn(new WikiPromotionStore.PlatformSnapshot(2L,99L,"Wiki 2",1L,1,"old child","OTHER")).when(store).platform(2L);
+        assertThat(store.isPublishedTreeCurrent(tree)).isFalse();
+    }
+
     @Test void collectsDeepDescendantsAndDeduplicatesSkills() {
         var documents=mock(WikiDocumentRepository.class);
         var links=mock(WikiDocumentSkillRepository.class);
@@ -45,6 +67,7 @@ class WikiPromotionStoreTest {
         when(document.getId()).thenReturn(id);when(document.getTeamId()).thenReturn(7L);
         when(document.getStatus()).thenReturn("ACTIVE");when(document.getTitle()).thenReturn("Wiki "+id);
         when(document.getParent()).thenReturn(parent);when(document.getCurrentRevision()).thenReturn(revision);
+        when(document.getKnowledgeCategory()).thenReturn(com.company.skillplatform.wiki.domain.WikiKnowledgeCategory.OTHER);
         when(revision.getId()).thenReturn(100L+id);when(revision.getRevisionNo()).thenReturn(1);
         when(revision.getContentSha256()).thenReturn("sha"+id);
         return document;

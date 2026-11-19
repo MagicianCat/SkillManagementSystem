@@ -4,7 +4,7 @@ import com.company.skillplatform.common.application.BusinessException;
 import org.springframework.http.HttpStatus;
 
 public enum WikiKnowledgeCategory {
-    SKILL_TOOL, PROJECT_CONTEXT, INTERNAL_KNOWLEDGE, OTHER;
+    SKILL_TOOL, PROJECT_CONTEXT, INTERNAL_KNOWLEDGE, FDE_WIKI, OTHER;
 
     public static WikiKnowledgeCategory parse(String value, WikiKnowledgeCategory fallback) {
         if (value == null) return fallback;

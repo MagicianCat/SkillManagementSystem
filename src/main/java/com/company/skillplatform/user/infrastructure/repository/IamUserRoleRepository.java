@@ -6,9 +6,13 @@ import com.company.skillplatform.user.infrastructure.entity.IamUserEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 public interface IamUserRoleRepository extends JpaRepository<IamUserRoleEntity, Long> {
     List<IamUserRoleEntity> findAllByUserId(Long userId);
+    @Query("select distinct ur.user from IamUserRoleEntity ur where ur.role.roleKey = 'WIKI_DIRECT_PUBLISHER' and ur.role.status = com.company.skillplatform.user.domain.RoleStatus.ACTIVE and ur.user.status = com.company.skillplatform.user.domain.UserStatus.ACTIVE and (:keyword is null or lower(ur.user.displayName) like lower(concat('%', :keyword, '%')) or lower(ur.user.username) like lower(concat('%', :keyword, '%'))) ")
+    Page<IamUserEntity> findWikiDirectPublishers(String keyword, Pageable pageable);
     @Modifying
     @Query(value = "INSERT INTO iam_user_role (user_id, role_id, created_by, time_created, time_updated) " +
             "SELECT u.id, r.id, u.id, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6) " +
