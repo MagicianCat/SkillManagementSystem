@@ -188,6 +188,16 @@ public class NotificationService {
         users.findById(actorId).ifPresent(user -> notifications.save(new UserNotificationEntity(user, type, title, content, "FEISHU_DOCUMENT_PUBLICATION", taskId, null).withTargetData(targetData)));
     }
 
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void wikiFeishuTransferCompleted(Long actorId, Long jobId, boolean succeeded, String direction, String errorCode) {
+        String action = "IMPORT".equals(direction) ? "飞书导入 Wiki" : "Wiki 推送飞书";
+        users.findById(actorId).ifPresent(user -> save(java.util.List.of(user),
+                succeeded ? NotificationType.WIKI_FEISHU_TRANSFER_SUCCEEDED : NotificationType.WIKI_FEISHU_TRANSFER_FAILED,
+                action + (succeeded ? "成功" : "失败"),
+                succeeded ? "任务已完成，可在 Wiki 页面查看结果" : "任务失败：" + errorCode,
+                "WIKI_FEISHU_TRANSFER", jobId, null));
+    }
+
     /** Reserved orchestration hook; call after publish when version-update recommendation is enabled. */
     @Transactional
     public void versionUpdated(SkillVersionEntity version, VersionUpdateRecipientProvider provider) {
