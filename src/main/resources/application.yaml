@@ -47,6 +47,12 @@ server:
 
 integration:
   external:
+    role-card:
+      enabled: ${INTEGRATION_EXTERNAL_ROLE_CARD_ENABLED:false}
+      poll-ms: ${INTEGRATION_EXTERNAL_ROLE_CARD_POLL_MS:5000}
+      max-wiki-options: ${INTEGRATION_EXTERNAL_ROLE_CARD_MAX_WIKI_OPTIONS:80}
+      expiry-days: ${INTEGRATION_EXTERNAL_ROLE_CARD_EXPIRY_DAYS:14}
+      source-systems: ${INTEGRATION_EXTERNAL_ROLE_CARD_SOURCE_SYSTEMS:}
     api-keys-json: '${EXTERNAL_RESOURCE_API_KEYS_JSON:{}}'
     max-file-bytes: ${INTEGRATION_EXTERNAL_MAX_FILE_BYTES:52428800}
     requests-per-minute: ${INTEGRATION_EXTERNAL_REQUESTS_PER_MINUTE:60}

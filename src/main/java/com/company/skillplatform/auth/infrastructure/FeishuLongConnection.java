@@ -36,6 +36,7 @@ public class FeishuLongConnection implements SmartLifecycle {
     private final CollabApprovalCardService collabApprovalCards;
     private final com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards;
     private final com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards;
+    private final com.company.skillplatform.external.ExternalRoleCardService externalRoleCards;
     private volatile Client client;
     private volatile boolean running;
 
@@ -43,9 +44,11 @@ public class FeishuLongConnection implements SmartLifecycle {
             com.company.skillplatform.agent.application.FeishuBotMessageService botMessages,
             CollabApprovalCardService collabApprovalCards,
             com.company.skillplatform.collabproject.application.CollabStagePromptCardService collabStagePromptCards,
-            com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards) {
+            com.company.skillplatform.collabproject.asdm.application.CollabAsdmPublishCardService collabAsdmPublishCards,
+            com.company.skillplatform.external.ExternalRoleCardService externalRoleCards) {
         this.properties = properties; this.botMessages = botMessages; this.collabApprovalCards = collabApprovalCards;
         this.collabStagePromptCards = collabStagePromptCards; this.collabAsdmPublishCards = collabAsdmPublishCards;
+        this.externalRoleCards = externalRoleCards;
     }
 
     @Override
@@ -69,6 +72,7 @@ public class FeishuLongConnection implements SmartLifecycle {
                         if (collabApprovalCards.handles(event)) return collabApprovalCards.handle(event);
                         if (collabStagePromptCards.handles(event)) return collabStagePromptCards.handle(event);
                         if (collabAsdmPublishCards.handles(event)) return collabAsdmPublishCards.handle(event);
+                        if (externalRoleCards.handles(event)) return externalRoleCards.handle(event);
                         log.info("event=feishu.card_action.unmatched route=agent_fallback");
                         return botMessages.handleCardAction(event);
                     }

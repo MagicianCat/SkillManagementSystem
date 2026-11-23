@@ -173,13 +173,20 @@ public class NotificationService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void externalRoleCardCreated(Long eventId,String roleName) {
+        save(userRoles.findActiveSuperAdmins(),NotificationType.EXTERNAL_ROLE_CARD_CREATED,
+                "外部角色资源更新",roleName+" 有新的外部资源通知，可在外部资源接入页面处理。",
+                "EXTERNAL_ROLE_CARD",eventId,null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void externalImportCompleted(Long actorId, Long jobId, String kind, int succeeded, int failed, String summary) {
         LinkedHashMap<Long,IamUserEntity> recipients = new LinkedHashMap<>();
         users.findById(actorId).ifPresent(actor -> recipients.put(actor.getId(), actor));
         userRoles.findActiveUsersByPermission("admin:identity").forEach(admin -> recipients.put(admin.getId(), admin));
         String content = "成功 " + succeeded + "，失败 " + failed + "。" + summary;
         save(recipients.values(), NotificationType.EXTERNAL_IMPORT_COMPLETED,
-                "外部" + ("SKILL".equals(kind) ? " Skill" : " Wiki") + "批量导入完成",
+                "外部" + ("SKILL".equals(kind) ? " Skill" : "ASDM_TOOL".equals(kind)?" ASDM 工具":" Wiki") + "批量导入完成",
                 content.substring(0, Math.min(2048, content.length())), "EXTERNAL_IMPORT_JOB", jobId, null);
     }
 

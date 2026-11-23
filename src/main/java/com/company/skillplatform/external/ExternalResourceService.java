@@ -36,6 +36,8 @@ public class ExternalResourceService {
     private final ObjectMapper mapper;
     private final long maxBytes;
     private final long maxInnerBytes;
+    private ExternalRoleCardOutbox cards;
+    @org.springframework.beans.factory.annotation.Autowired public void setCards(ExternalRoleCardOutbox value) { cards=value; }
 
     @org.springframework.beans.factory.annotation.Autowired
     public ExternalResourceService(JdbcTemplate db, TransactionTemplate transactions, ObjectStoragePort storage,
@@ -56,7 +58,7 @@ public class ExternalResourceService {
         List<Success> successes = new ArrayList<>();
         // Role state is committed independently from resource processing, so partial resource
         // failures (or a state-only request with resources=[]) cannot roll it back.
-        persistRole(request);
+        boolean roleChanged=persistRole(request);
         for (ResourceInput input : request.resources()) {
             String resourceId = input == null ? null : input.resourceId();
             String fileKey = input == null ? null : input.fileKey();
@@ -75,7 +77,12 @@ public class ExternalResourceService {
                 failures.add(new Failure(resourceId, fileKey, "STORAGE_ERROR", "资源保存失败，请重试"));
             }
         }
-        return new PushResult(request.resources().size(), created, updated, unchanged, failures.size(), failures, successes, requestId);
+        PushResult result=new PushResult(request.resources().size(), created, updated, unchanged, failures.size(), failures, successes, requestId);
+        if(cards!=null && (roleChanged || created>0 || updated>0)) {
+            try { cards.capture(request,result); }
+            catch(RuntimeException ex) { log.error("event=external.role.card.capture_failed requestId={}",requestId,ex); }
+        }
+        return result;
     }
 
     private Receipt receive(PushRequest request, ResourceInput input, MultipartFile file, String requestId) throws Exception {
@@ -172,8 +179,10 @@ public class ExternalResourceService {
             String objectKey, DevelopmentStageCatalogService.ResolvedStage stage, String commandJson, String commandHash,
             int commandCount, String requestId) {
         Long roleId = db.queryForObject("SELECT id FROM external_role WHERE source_system=? AND external_role_id=?", Long.class, request.sourceSystem(), request.role().roleId());
-        List<Map<String,Object>> existing = db.queryForList("SELECT id,resource_type,current_version_id,development_stage,sub_stage_key FROM external_resource WHERE source_system=? AND external_resource_id=? FOR UPDATE", request.sourceSystem(), input.resourceId());
+        List<Map<String,Object>> existing = db.queryForList("SELECT id,resource_type,current_version_id,development_stage,sub_stage_key,name,description FROM external_resource WHERE source_system=? AND external_resource_id=? FOR UPDATE", request.sourceSystem(), input.resourceId());
         boolean isNew = existing.isEmpty();
+        boolean metadataChanged=!isNew && (!java.util.Objects.equals(existing.get(0).get("name"),input.resourceName()) ||
+                !java.util.Objects.equals(existing.get(0).get("description"),input.description()));
         DevelopmentStageCatalogService.ResolvedStage effectiveStage = stage;
         if ("SKILL".equals(resourceType) && effectiveStage.developmentStage() == null && effectiveStage.subStageKey() == null && !isNew) {
             Map<String,Object> previous = existing.get(0);
@@ -183,7 +192,7 @@ public class ExternalResourceService {
         if (isNew) db.update("INSERT INTO external_resource(source_system,external_resource_id,resource_type,name,description,development_stage,sub_stage_key) VALUES(?,?,?,?,?,?,?)", request.sourceSystem(), input.resourceId(), resourceType, input.resourceName(), input.description(), effectiveStage.developmentStage(), effectiveStage.subStageKey());
         else if (!resourceType.equals(existing.get(0).get("resource_type"))) throw new ResourceFailure("RESOURCE_TYPE_CONFLICT", "相同资源 ID 的类型不可改变");
         Long resourceId = db.queryForObject("SELECT id FROM external_resource WHERE source_system=? AND external_resource_id=?", Long.class, request.sourceSystem(), input.resourceId());
-        db.update("INSERT IGNORE INTO external_role_resource(role_id,resource_id) VALUES(?,?)", roleId, resourceId);
+        boolean linkChanged=db.update("INSERT IGNORE INTO external_role_resource(role_id,resource_id) VALUES(?,?)", roleId, resourceId)>0;
         db.update("UPDATE external_resource SET name=?,description=?,development_stage=?,sub_stage_key=? WHERE id=?", input.resourceName(), input.description(), effectiveStage.developmentStage(), effectiveStage.subStageKey(), resourceId);
         List<Map<String,Object>> versions = db.queryForList("SELECT id,sha256,external_version,development_stage,sub_stage_key,asdm_commands_payload_sha256 FROM external_resource_version WHERE resource_id=? ORDER BY id DESC", resourceId);
         for (Map<String,Object> version : versions) {
@@ -214,7 +223,7 @@ public class ExternalResourceService {
                             existingVersionId, requestId == null || requestId.isBlank() ? "external-integration" : requestId,
                             previousHash, commandHash, commandCount);
                 }
-                return new Receipt(sameMetadata && !commandsChanged ? "UNCHANGED" : "UPDATED", existingVersionId);
+                return new Receipt(sameMetadata && !commandsChanged && !metadataChanged && !linkChanged ? "UNCHANGED" : "UPDATED", existingVersionId);
             }
             if (!blank(input.version()) && input.version().equals(version.get("external_version")))
                 throw new ResourceFailure("VERSION_CONTENT_CONFLICT", "同一版本号对应不同文件内容");
@@ -225,8 +234,9 @@ public class ExternalResourceService {
         return new Receipt(isNew ? "CREATED" : "UPDATED", versionId);
     }
 
-    private void persistRole(PushRequest request) {
+    private boolean persistRole(PushRequest request) {
         RoleInput role = request.role();
+        List<Map<String,Object>> before=db.queryForList("SELECT role_name,status FROM external_role WHERE source_system=? AND external_role_id=?",request.sourceSystem(),role.roleId());
         if (role.status() == null) {
             // On insert the DB default initializes ACTIVE; on update an omitted status is preserved.
             db.update("INSERT INTO external_role(source_system,external_role_id,role_name) VALUES(?,?,?) " +
@@ -237,6 +247,8 @@ public class ExternalResourceService {
                             "ON DUPLICATE KEY UPDATE role_name=VALUES(role_name),status=VALUES(status),updated_at=CURRENT_TIMESTAMP",
                     request.sourceSystem(), role.roleId(), role.roleName(), role.status());
         }
+        return before.isEmpty() || !java.util.Objects.equals(before.get(0).get("role_name"),role.roleName()) ||
+                role.status()!=null && !java.util.Objects.equals(before.get(0).get("status"),role.status());
     }
 
     private static boolean blank(String value) { return value == null || value.isBlank(); }

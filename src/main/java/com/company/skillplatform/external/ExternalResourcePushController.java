@@ -64,7 +64,9 @@ public class ExternalResourcePushController {
         }
         if (!windows.computeIfAbsent(body.sourceSystem(), ignored -> new Window()).allow(requestsPerMinute))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(new ApiResponse(4290,"rate_limited",null));
-        ExternalResourceService.PushResult result = service.push(body, files, request.getRequestId());
+        String requestId=com.company.skillplatform.common.logging.LogContext.requestId();
+        if("-".equals(requestId))requestId=request.getRequestId();
+        ExternalResourceService.PushResult result = service.push(body, files, requestId);
         int code = result.failed() == 0 ? 0 : result.failed() == result.total() ? 1002 : 1001;
         HttpStatus status = code == 1002 ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.OK;
         return ResponseEntity.status(status).body(new ApiResponse(code,

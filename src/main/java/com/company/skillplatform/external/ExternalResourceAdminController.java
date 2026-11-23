@@ -41,10 +41,18 @@ public class ExternalResourceAdminController {
     @PostMapping("/external-resources/roles/{id}/skills:import-all") public ResponseEntity<Map<String,Long>> importAllSkills(@PathVariable Long id, @RequestBody BulkSkillRequest body, Authentication auth) {
         return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueSkills(id,body.resourceIds(),(Long)auth.getPrincipal())));
     }
+    @PreAuthorize("hasAuthority('admin:identity') and hasAuthority('external:resource:skill:publish:direct')")
+    @PostMapping("/external-resources/roles/{id}/skills:publish-all") public ResponseEntity<Map<String,Long>> publishAllSkills(@PathVariable Long id, @RequestBody BulkSkillRequest body, Authentication auth) {
+        return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueSkillsDirect(id,body.resourceIds(),(Long)auth.getPrincipal())));
+    }
     @PostMapping("/external-resources/roles/{id}/wikis:import-all") public ResponseEntity<Map<String,Long>> importAllWikis(@PathVariable Long id, @RequestBody BulkWikiRequest body, Authentication auth) {
         return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueWikis(id,body.teamId(),body.parentWikiId(),body.linkRoleSkills(),body.knowledgeCategory(),body.selections(),(Long)auth.getPrincipal())));
     }
     @GetMapping("/external-import-jobs/{id}") public Map<String,Object> importJob(@PathVariable Long id) { return bulk.job(id); }
+    @PreAuthorize("hasAuthority('external:resource:skill:publish:direct')")
+    @GetMapping("/external-role-card-events") public List<Map<String,Object>> cardEvents() { return service.cardEvents(); }
+    @PreAuthorize("hasAuthority('external:resource:skill:publish:direct')")
+    @PostMapping("/external-role-card-events/{id}:retry") public Map<String,Object> retryCard(@PathVariable Long id) { return service.retryCard(id); }
     @GetMapping("/external-resource-versions/{id}/asdm-tool/status") public AsdmToolImportService.Status asdmStatus(@PathVariable Long id) { return asdm.status(id); }
     @GetMapping("/external-resource-versions/{id}/asdm-tool/commands") public List<Map<String,Object>> asdmCommands(@PathVariable Long id, Authentication auth, HttpServletRequest request) { var result=asdm.commands(id); service.audit("EXTERNAL_ASDM_COMMANDS_LISTED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId()); return result; }
     @PostMapping("/external-resource-versions/{id}/asdm-tool:import-wiki") public AsdmToolImportService.ImportResult importAsdm(@PathVariable Long id, @RequestBody(required=false) AsdmToolImportService.ImportCommand body, Authentication auth, HttpServletRequest request) {

@@ -51,4 +51,8 @@ public class SkillEntity extends BaseJpaEntity {
     public void approvePlatformVersion(SkillVersionEntity version,IamUserEntity actor){if(!"PLATFORM".equals(scopeType)||originTeamId!=null)throw new IllegalStateException("Not a native platform Skill");latestPlatformApprovedVersion=version;updatedBy=actor;}
     public void promoteToPlatform(){if(originTeamId==null)originTeamId=teamId;latestPlatformApprovedVersion=latestPublishedVersion;scopeType="PLATFORM";teamId=null;}
     public void promoteToPlatform(IamUserEntity actor){scopeType="PLATFORM";originTeamId=teamId;latestPlatformApprovedVersion=latestPublishedVersion;teamId=null;updatedBy=actor;}
+    public void markDirectPlatformPublished(SkillVersionEntity version,IamUserEntity actor){
+        if("TEAM".equals(scopeType)){if(originTeamId==null)originTeamId=teamId;scopeType="PLATFORM";teamId=null;}
+        latestPlatformApprovedVersion=version;updatedBy=actor;
+    }
 }

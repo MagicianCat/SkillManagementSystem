@@ -55,6 +55,17 @@ public class ExternalResourceAdminService {
         return db.queryForList("SELECT id,source_system AS sourceSystem,external_role_id AS externalRoleId,role_name AS roleName,status,updated_at AS updatedAt FROM external_role ORDER BY updated_at DESC");
     }
 
+    public List<Map<String,Object>> cardEvents() {
+        return db.queryForList("SELECT e.id,e.role_id roleId,e.source_system sourceSystem,e.role_name roleName,e.status,e.attempt_count attemptCount,e.last_error lastError,e.created_at createdAt,e.sent_at sentAt FROM external_role_card_event e ORDER BY e.id DESC LIMIT 100");
+    }
+
+    public Map<String,Object> retryCard(long id) {
+        int updated=db.update("UPDATE external_role_card_event SET status='PENDING',next_attempt_at=NULL,last_error=NULL WHERE id=? AND status IN ('FAILED','PARTIAL') AND expires_at>NOW(3)",id);
+        if(updated!=1)throw bad("EXTERNAL_CARD_RETRY_UNAVAILABLE","卡片事件不可重试或已过期");
+        db.update("UPDATE external_role_card_delivery SET status='PENDING',next_attempt_at=NULL WHERE event_id=? AND status IN ('FAILED','RETRY_WAIT')",id);
+        return Map.of("eventId",id,"status","PENDING");
+    }
+
     public List<Map<String,Object>> resources(Long roleId, String type, String keyword, int page, int size) {
         StringBuilder sql = new StringBuilder("SELECT r.id,r.source_system AS sourceSystem,r.external_resource_id AS externalResourceId,r.resource_type AS resourceType,r.name,r.description,r.development_stage AS developmentStage,r.sub_stage_key AS subStageKey,r.current_version_id AS currentVersionId,v.external_version AS externalVersion,v.size_bytes AS sizeBytes,v.received_at AS receivedAt,rr.role_id AS roleId FROM external_resource r JOIN external_role_resource rr ON rr.resource_id=r.id LEFT JOIN external_resource_version v ON v.id=r.current_version_id WHERE 1=1");
         List<Object> args = new ArrayList<>();
@@ -158,13 +169,18 @@ public class ExternalResourceAdminService {
         List<Map<String,Object>> pending = new ArrayList<>(); Set<Long> ids = new LinkedHashSet<>();
         List<Map<String,Object>> resources=db.queryForList("SELECT r.id,r.name,r.external_resource_id AS externalResourceId,r.current_version_id AS versionId FROM external_role_resource rr JOIN external_resource r ON r.id=rr.resource_id WHERE rr.role_id=? AND r.resource_type='SKILL'",roleId);
         for (Map<String,Object> resource:resources) {
+            if(resource.get("versionId")==null){pending.add(withReason(resource,"没有当前版本"));continue;}
             Long versionId=((Number)resource.get("versionId")).longValue();
             List<Long> imported=db.query("SELECT target_id FROM external_import_record WHERE resource_version_id=? AND target_type='SKILL' AND result='SUCCESS' ORDER BY id DESC LIMIT 1",(rs,n)->rs.getLong(1),versionId);
-            if (imported.isEmpty() || !skillRepository.existsById(imported.get(0))) pending.add(resource);
+            if(imported.isEmpty()){pending.add(withReason(resource,"当前版本尚未成功导入"));continue;}
+            Integer published=db.queryForObject("SELECT COUNT(*) FROM skill s JOIN skill_version v ON v.id=s.latest_platform_approved_version_id WHERE s.id=? AND s.scope_type='PLATFORM' AND v.lifecycle_status='PUBLISHED' AND s.latest_published_version_id=v.id",Integer.class,imported.get(0));
+            if(published==null||published==0)pending.add(withReason(resource,"Skill 尚未全平台发布"));
             else ids.add(imported.get(0));
         }
         return new Readiness(!resources.isEmpty() && pending.isEmpty(),pending,List.copyOf(ids));
     }
+
+    private Map<String,Object> withReason(Map<String,Object> resource,String reason){Map<String,Object> row=new LinkedHashMap<>(resource);row.put("reason",reason);return row;}
 
     public List<DocumentImportResult> importDocuments(Long versionId,DocumentImportRequest request,Long actorId,String requestId) {
         String knowledgeCategory=ExternalBulkImportService.requiredWikiCategory(request==null?null:request.knowledgeCategory());
