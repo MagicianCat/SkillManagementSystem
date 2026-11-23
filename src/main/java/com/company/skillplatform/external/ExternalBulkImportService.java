@@ -43,6 +43,8 @@ public class ExternalBulkImportService {
     private final TransactionTemplate transactions;
     private AsdmToolImportService asdm;
     @org.springframework.beans.factory.annotation.Autowired public void setAsdm(AsdmToolImportService value) { this.asdm=value; }
+    private ExternalRoleWikiParentService roleWikiParents;
+    @org.springframework.beans.factory.annotation.Autowired public void setRoleWikiParents(ExternalRoleWikiParentService value) { this.roleWikiParents=value; }
 
     public ExternalBulkImportService(JdbcTemplate db, ObjectMapper mapper, ExternalResourceAdminService imports,
             SkillService skills, WorkflowService workflow, WikiDocumentService wiki,
@@ -84,6 +86,7 @@ public class ExternalBulkImportService {
         Set<Long> selectedIds=selections.stream().map(WikiSelection::resourceId).collect(Collectors.toSet());
         if (selectedIds.size()!=selections.size()) throw bad("EXTERNAL_WIKI_SELECTION_INVALID", "ZIP 选择包含重复资源");
         if (parentWikiId != null) {
+            roleWikiParents.requireEligible(roleId,teamId,parentWikiId);
             var parent = wiki.get(parentWikiId, actorId);
             boolean scopeMatches=java.util.Objects.equals(teamId,parent.teamId());
             if (!scopeMatches)
@@ -235,6 +238,7 @@ public class ExternalBulkImportService {
             if (content==null) { record(jobId,resourceId,version,path,"FAILED",null,"EXTERNAL_WIKI_PATH_INVALID","所选文档不在 ZIP 中"); continue; }
             try {
                 Long target=transactions.execute(status -> {
+                    if(parentId!=null) roleWikiParents.requireEligible(roleId,teamId,parentId);
                     List<Long> skillIds=List.of();
                     Object requestedLinks=job.get("link_role_skills");
                     if (Boolean.TRUE.equals(requestedLinks) || requestedLinks instanceof Number number && number.intValue()!=0) {

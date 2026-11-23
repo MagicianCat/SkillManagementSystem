@@ -48,4 +48,19 @@ class ExternalRoleCardFactoryTest {
         Map<String,Object> card=factory.card(event,Map.of("resources",List.of(),"docs",Map.of()));
         assertThat(card.toString()).contains("更新 1","未变化 1","更新：发布核对 Skill","未变化：总纲文档","1.0.2","1.0.1");
     }
+
+    @Test void cardUsesOnlyCurrentRolePublishedWikiParents() {
+        var parents=mock(ExternalRoleWikiParentService.class);
+        factory.setRoleWikiParents(parents);
+        when(parents.listForCard(3L,81)).thenReturn(List.of(new ExternalRoleWikiParentService.ParentOption(
+                203L,"总纲",null,"平台","DOCUMENT","doc-1","总纲.md",java.time.LocalDateTime.now(),
+                "[平台] 总纲 · 文档 ZIP：总纲.md（Wiki #203）")));
+        when(imports.readiness(3L)).thenReturn(new ExternalResourceAdminService.Readiness(true,List.of(),List.of()));
+        Map<String,Object> event=Map.of("id",8L,"role_id",3L,"source_system","source","external_role_id","role",
+                "role_name","联调角色","role_status","ACTIVE","change_summary_json","{}","created_at","now");
+        Map<String,Object> doc=Map.of("resourceId",1L,"versionId",11L,"path","总纲.md","label","总纲.md");
+        Map<String,Object> card=factory.card(event,Map.of("resources",List.of(),"docs",Map.of("doc_001",doc)));
+        assertThat(card.toString()).contains("parent:203","[平台] 总纲","form_submit")
+                .doesNotContain("父 Wiki 较多","团队选项较多");
+    }
 }

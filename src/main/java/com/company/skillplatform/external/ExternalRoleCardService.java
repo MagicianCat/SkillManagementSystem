@@ -28,6 +28,8 @@ public class ExternalRoleCardService {
     private final ExternalBulkImportService bulk;
     private final ExternalResourceAdminService imports;
     private final TransactionTemplate transactions;
+    private ExternalRoleWikiParentService roleWikiParents;
+    @org.springframework.beans.factory.annotation.Autowired public void setRoleWikiParents(ExternalRoleWikiParentService value) { this.roleWikiParents=value; }
 
     public ExternalRoleCardService(JdbcTemplate db,ObjectMapper json,ExternalBulkImportService bulk,
             ExternalResourceAdminService imports,TransactionTemplate transactions) {
@@ -108,7 +110,7 @@ public class ExternalRoleCardService {
             else if(!"platform".equals(scope))throw bad("Wiki 发布范围无效");
             category=ExternalBulkImportService.requiredWikiCategory(String.valueOf(form.get("category")));
             String parent=String.valueOf(form.getOrDefault("parent","root"));
-            if(parent.startsWith("parent:")){parentId=number(parent.substring(7));Integer valid=db.queryForObject("SELECT COUNT(*) FROM wiki_document WHERE id=? AND status='ACTIVE' AND team_id <=> ?",Integer.class,parentId,teamId);if(valid==null||valid==0)throw bad("父 Wiki 与目标范围不匹配");}
+            if(parent.startsWith("parent:")){parentId=number(parent.substring(7));roleWikiParents.requireEligible(roleId,teamId,parentId);}
             else if(!"root".equals(parent))throw bad("父 Wiki 选项无效");
             link="true".equals(String.valueOf(form.getOrDefault("linkSkills","false")));
             if(link&&!imports.readiness(roleId).ready())throw bad("请先完成全部 Skill 全平台发布，再关联 Wiki");

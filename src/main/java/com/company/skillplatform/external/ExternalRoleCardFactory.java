@@ -19,6 +19,8 @@ public class ExternalRoleCardFactory {
     private final AsdmToolImportService asdm;
     private final int limit;
     private final String webBase;
+    private ExternalRoleWikiParentService roleWikiParents;
+    @org.springframework.beans.factory.annotation.Autowired public void setRoleWikiParents(ExternalRoleWikiParentService value) { this.roleWikiParents=value; }
 
     public ExternalRoleCardFactory(JdbcTemplate db,ObjectMapper json,ExternalResourceAdminService imports,AsdmToolImportService asdm,
             @Value("${integration.external.role-card.max-wiki-options:80}") int limit,
@@ -94,12 +96,11 @@ public class ExternalRoleCardFactory {
                 form.add(select("select_static","scope","Wiki 发布范围",scopes,"platform"));
                 form.add(select("select_static","category","知识分类",List.of(option("Skill 与工具","SKILL_TOOL"),option("项目背景","PROJECT_CONTEXT"),option("内部知识","INTERNAL_KNOWLEDGE"),option("其他","OTHER")),"OTHER"));
                 List<Map<String,Object>> parents=new ArrayList<>();parents.add(option("根目录 / 不指定","root"));
-                List<Map<String,Object>> rows=db.queryForList("SELECT d.id,d.title,d.team_id,t.team_name FROM wiki_document d LEFT JOIN org_team t ON t.id=d.team_id WHERE d.status='ACTIVE' ORDER BY d.id DESC LIMIT ?",limit+1);
-                if(rows.size()>limit) form.add(markdown("父 Wiki 较多，请[打开后台选择父节点]("+webBase+"/admin/external-resources)"));
-                else {
-                    for(var row:rows)parents.add(option("["+(row.get("team_id")==null?"平台":row.get("team_name"))+"] "+row.get("title"),"parent:"+row.get("id")));
-                    form.add(select("select_static","parent","父 Wiki",parents,"root"));
-                }
+                List<ExternalRoleWikiParentService.ParentOption> candidates=roleWikiParents.listForCard(roleId,limit+1);
+                if(candidates.size()>limit) form.add(markdown("当前角色可用父 Wiki 超过卡片上限，请[打开外部资源页面按角色筛选]("+webBase+"/admin/external-resources)；仍可选择根目录导入。"));
+                else candidates.forEach(candidate->parents.add(option(candidate.label(),"parent:"+candidate.id())));
+                form.add(select("select_static","parent","父 Wiki",parents,"root"));
+                if(candidates.isEmpty()) form.add(markdown("当前角色尚无可用的已发布父 Wiki，可选择根目录导入。"));
                 var ready=imports.readiness(roleId);
                 if(!ready.ready()) form.add(markdown("请先完成全部 Skill 推送，之后再关联。"));
                 form.add(select("select_static","linkSkills","关联全部已发布 Skill",List.of(option("不关联 Skill","false"),option("关联当前角色全部已成功发布的 Skill","true")),"false"));

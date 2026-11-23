@@ -26,7 +26,8 @@ public class ExternalResourceAdminController {
     private final ExternalResourceAdminService service;
     private final ExternalBulkImportService bulk;
     private final AsdmToolImportService asdm;
-    public ExternalResourceAdminController(ExternalResourceAdminService service, ExternalBulkImportService bulk, AsdmToolImportService asdm) { this.service=service; this.bulk=bulk; this.asdm=asdm; }
+    private final ExternalRoleWikiParentService roleWikiParents;
+    public ExternalResourceAdminController(ExternalResourceAdminService service, ExternalBulkImportService bulk, AsdmToolImportService asdm, ExternalRoleWikiParentService roleWikiParents) { this.service=service; this.bulk=bulk; this.asdm=asdm; this.roleWikiParents=roleWikiParents; }
 
     @GetMapping("/external-resources/roles") public List<Map<String,Object>> roles(){return service.roles();}
     @GetMapping("/external-resources") public List<Map<String,Object>> resources(@RequestParam(required=false)Long roleId,@RequestParam(required=false)String type,@RequestParam(required=false)String keyword,@RequestParam(defaultValue="0")int page,@RequestParam(defaultValue="50")int size){return service.resources(roleId,type,keyword,page,size);}
@@ -38,6 +39,13 @@ public class ExternalResourceAdminController {
     @GetMapping("/external-resource-versions/{id}/documents") public List<ExternalResourceAdminService.DocumentEntry> documents(@PathVariable Long id,Authentication auth,HttpServletRequest request){var result=service.documents(id);service.audit("EXTERNAL_DOCUMENTS_LISTED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId());return result;}
     @GetMapping("/external-resource-versions/{id}/documents/content") public String content(@PathVariable Long id,@RequestParam String path,Authentication auth,HttpServletRequest request){var result=service.documentContent(id,path);service.audit("EXTERNAL_DOCUMENT_PREVIEWED","EXTERNAL_RESOURCE_VERSION",id,(Long)auth.getPrincipal(),request.getRequestId());return result;}
     @GetMapping("/external-resources/roles/{id}/import-readiness") public ExternalResourceAdminService.Readiness readiness(@PathVariable Long id){return service.readiness(id);}
+    @GetMapping("/external-resources/roles/{id}/wiki-parent-options") public ExternalRoleWikiParentService.Page wikiParentOptions(@PathVariable Long id,
+            @RequestParam(defaultValue="PLATFORM") String scope,@RequestParam(required=false) Long teamId,
+            @RequestParam(required=false) String keyword,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="30") int size) {
+        if(!"PLATFORM".equals(scope) && !"TEAM".equals(scope) || "PLATFORM".equals(scope) && teamId!=null || "TEAM".equals(scope) && (teamId==null || teamId<=0))
+            throw new com.company.skillplatform.common.application.BusinessException("EXTERNAL_WIKI_PARENT_QUERY_INVALID","Wiki 发布范围无效",HttpStatus.BAD_REQUEST);
+        return roleWikiParents.list(id,teamId,keyword,page,size);
+    }
     @PostMapping("/external-resources/roles/{id}/skills:import-all") public ResponseEntity<Map<String,Long>> importAllSkills(@PathVariable Long id, @RequestBody BulkSkillRequest body, Authentication auth) {
         return ResponseEntity.accepted().body(Map.of("jobId",bulk.enqueueSkills(id,body.resourceIds(),(Long)auth.getPrincipal())));
     }
