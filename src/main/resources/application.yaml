@@ -96,6 +96,12 @@ management:
       show-details: when_authorized
 
 knowledge:
+  role-metadata:
+    enabled: ${KNOWLEDGE_ROLE_METADATA_ENABLED:true}
+    sync-poll-ms: ${KNOWLEDGE_ROLE_METADATA_SYNC_POLL_MS:3000}
+    sync-batch-size: ${KNOWLEDGE_ROLE_METADATA_SYNC_BATCH_SIZE:20}
+    reconcile-interval-ms: ${KNOWLEDGE_ROLE_METADATA_RECONCILE_MS:600000}
+    reconcile-page-size: ${KNOWLEDGE_ROLE_METADATA_RECONCILE_PAGE_SIZE:200}
   enabled: ${KNOWLEDGE_ENABLED:true}
   qdrant:
     base-url: ${QDRANT_BASE_URL:http://127.0.0.1:6333}
@@ -117,6 +123,7 @@ knowledge:
     model: ${KB_RERANK_MODEL:qwen3-reranker-0.6b}
     timeout: ${KB_RERANK_TIMEOUT:PT10S}
   search:
+    role-routing-enabled: ${KNOWLEDGE_ROLE_ROUTING_ENABLED:false}
     chunk-top-k: ${KB_CHUNK_TOP_K:12}
     document-top-k: ${KB_DOCUMENT_TOP_K:5}
     snippets-per-document: ${KB_SNIPPETS_PER_DOCUMENT:2}

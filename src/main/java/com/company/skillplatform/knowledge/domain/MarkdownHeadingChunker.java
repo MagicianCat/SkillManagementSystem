@@ -27,7 +27,7 @@ public class MarkdownHeadingChunker {
                 result.add(new KnowledgeChunk(document.documentId(), document.revisionNo(), document.contentSha256(),
                         document.title(), document.teamId(), document.platformVisible(),
                         document.status(), List.copyOf(document.skillKeys()), List.copyOf(document.developmentStages()),
-                        index++, section.heading(), List.copyOf(section.path()), content, embedding, document.knowledgeCategory()));
+                        index++, section.heading(), List.copyOf(section.path()), content, embedding, document.knowledgeCategory(), document.externalRoleMetadata()));
             }
         }
         return result;

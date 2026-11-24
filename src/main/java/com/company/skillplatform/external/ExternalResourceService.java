@@ -36,6 +36,8 @@ public class ExternalResourceService {
     private final ObjectMapper mapper;
     private final long maxBytes;
     private final long maxInnerBytes;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.company.skillplatform.knowledge.application.KnowledgeRoleMetadataSync roleMetadataSync;
     private ExternalRoleCardOutbox cards;
     @org.springframework.beans.factory.annotation.Autowired public void setCards(ExternalRoleCardOutbox value) { cards=value; }
 
@@ -58,7 +60,11 @@ public class ExternalResourceService {
         List<Success> successes = new ArrayList<>();
         // Role state is committed independently from resource processing, so partial resource
         // failures (or a state-only request with resources=[]) cannot roll it back.
-        boolean roleChanged=persistRole(request);
+        boolean roleChanged = roleMetadataSync == null ? persistRole(request) : Boolean.TRUE.equals(transactions.execute(status -> {
+            boolean changed = persistRole(request);
+            if (changed) roleMetadataSync.enqueueForRole(request.sourceSystem(), request.role().roleId());
+            return changed;
+        }));
         for (ResourceInput input : request.resources()) {
             String resourceId = input == null ? null : input.resourceId();
             String fileKey = input == null ? null : input.fileKey();
@@ -193,6 +199,7 @@ public class ExternalResourceService {
         else if (!resourceType.equals(existing.get(0).get("resource_type"))) throw new ResourceFailure("RESOURCE_TYPE_CONFLICT", "相同资源 ID 的类型不可改变");
         Long resourceId = db.queryForObject("SELECT id FROM external_resource WHERE source_system=? AND external_resource_id=?", Long.class, request.sourceSystem(), input.resourceId());
         boolean linkChanged=db.update("INSERT IGNORE INTO external_role_resource(role_id,resource_id) VALUES(?,?)", roleId, resourceId)>0;
+        if (linkChanged && roleMetadataSync != null && !"SKILL".equals(resourceType)) roleMetadataSync.enqueueForResource(resourceId);
         db.update("UPDATE external_resource SET name=?,description=?,development_stage=?,sub_stage_key=? WHERE id=?", input.resourceName(), input.description(), effectiveStage.developmentStage(), effectiveStage.subStageKey(), resourceId);
         List<Map<String,Object>> versions = db.queryForList("SELECT id,sha256,external_version,development_stage,sub_stage_key,asdm_commands_payload_sha256 FROM external_resource_version WHERE resource_id=? ORDER BY id DESC", resourceId);
         for (Map<String,Object> version : versions) {

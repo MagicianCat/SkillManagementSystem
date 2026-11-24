@@ -23,6 +23,56 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 class KnowledgeSearchServiceTest {
+    @Test void roleRoutingRechecksDatabaseAndOnlyAddsLocalFallback() {
+        var embedding=mock(EmbeddingPort.class);
+        var vectors=mock(VectorStorePort.class);
+        var wiki=mock(WikiDocumentService.class);
+        var documents=mock(WikiDocumentRepository.class);
+        var links=mock(WikiDocumentSkillRepository.class);
+        var lookup=mock(ExternalRoleLookupService.class);
+        var resolver=mock(ExternalWikiRoleResolver.class);
+        var sync=mock(KnowledgeRoleMetadataSync.class);
+        var settings=new KnowledgeProperties();
+        settings.getRerank().setEnabled(false);
+        when(wiki.visibleTeams(9L)).thenReturn(List.of(new WikiDocumentService.TeamView(7L,"A",null)));
+        when(lookup.requireVisible(List.of(54L),List.of(7L))).thenReturn(
+                List.of(new ExternalRoleLookupService.Role(54,"A","source","a")));
+        when(embedding.embedQuery(anyString())).thenReturn(new float[1024]);
+        var fixtures=List.of(
+                teamDocument(1L,1,"sha",WikiKnowledgeCategory.PROJECT_CONTEXT),
+                teamDocument(2L,1,"sha",WikiKnowledgeCategory.PROJECT_CONTEXT),
+                teamDocument(3L,1,"sha",WikiKnowledgeCategory.PROJECT_CONTEXT));
+        when(documents.findAllById(any())).thenReturn(fixtures);
+        when(resolver.resolveAll(any())).thenAnswer(call -> {
+            List<Long> ids=call.getArgument(0);
+            Map<Long,ExternalRoleMetadata> metadata=new HashMap<>();
+            if(ids.contains(1L))metadata.put(1L,new ExternalRoleMetadata("source","a","DOCUMENT",List.of(new ExternalRoleMetadata.Role(54,"A","a"))));
+            if(ids.contains(2L))metadata.put(2L,new ExternalRoleMetadata("source","b","DOCUMENT",List.of(new ExternalRoleMetadata.Role(58,"B","b"))));
+            if(ids.contains(3L))metadata.put(3L,ExternalRoleMetadata.LOCAL);
+            return metadata;
+        });
+        var a=hit("a",1L,"TEAM",1,"sha","PROJECT_CONTEXT",0.5);
+        var b=hit("b",2L,"TEAM",1,"sha","PROJECT_CONTEXT",0.9);
+        var general=hit("general",3L,"TEAM",1,"sha","PROJECT_CONTEXT",1);
+        when(vectors.search(any(),any(),anyInt())).thenAnswer(call -> {
+            VectorStorePort.KnowledgeFilter filter=call.getArgument(1);
+            return filter.generalOnly()?List.of(b,general):List.of(b,a);
+        });
+        var service=new KnowledgeSearchService(embedding,mock(RerankPort.class),vectors,wiki,documents,links,settings,new SimpleMeterRegistry());
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"roleLookup",lookup);
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"roleResolver",resolver);
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"roleSync",sync);
+
+        var strict=service.search(9,"USER_VISIBLE","背景",null,"PROJECT_CONTEXT","STRICT",5,List.of(54L),"STRICT");
+        assertThat(strict.results()).extracting(KnowledgeSearchResult.DocumentResult::documentId).containsExactly(1L);
+        assertThat(strict.roleFallbackUsed()).isFalse();
+        var preferred=service.search(9,"USER_VISIBLE","背景",null,"PROJECT_CONTEXT","STRICT",5,List.of(54L),"PREFER");
+        assertThat(preferred.results()).extracting(KnowledgeSearchResult.DocumentResult::documentId).containsExactly(1L,3L);
+        assertThat(preferred.results()).extracting(KnowledgeSearchResult.DocumentResult::roleMatch)
+                .containsExactly("MATCHED","GENERAL_FALLBACK");
+        verify(sync,atLeastOnce()).requestRepair(2L);
+    }
+
     @Test void fdeCategoryCanBeStrictlyFilteredWithoutChangingTeamVisibility() {
         var embedding=mock(EmbeddingPort.class);var rerank=mock(RerankPort.class);var vectors=mock(VectorStorePort.class);
         var wiki=mock(WikiDocumentService.class);var documents=mock(WikiDocumentRepository.class);var links=mock(WikiDocumentSkillRepository.class);

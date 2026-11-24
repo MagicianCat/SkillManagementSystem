@@ -19,6 +19,7 @@ public class KnowledgeIndexService {
     private static final Logger log=LoggerFactory.getLogger(KnowledgeIndexService.class);
     private final WikiDocumentRepository documents;private final WikiDocumentSkillRepository links;private final MarkdownHeadingChunker chunker;
     private final EmbeddingPort embedding;private final VectorStorePort vectors;private final KnowledgeProperties properties;private final MeterRegistry metrics;
+    @org.springframework.beans.factory.annotation.Autowired private ExternalWikiRoleResolver roleResolver;
     private WikiPromotionStore promotionStore;
     @org.springframework.beans.factory.annotation.Autowired public void setPromotionStore(WikiPromotionStore value){promotionStore=value;}
     public KnowledgeIndexService(WikiDocumentRepository documents,WikiDocumentSkillRepository links,MarkdownHeadingChunker chunker,
@@ -37,7 +38,9 @@ public class KnowledgeIndexService {
             }
             List<KnowledgeChunk> chunks=sources.stream().flatMap(source->chunker.chunk(source).stream()).toList();
             List<float[]> embedded=chunks.isEmpty()?List.of():embedding.embedDocuments(chunks.stream().map(KnowledgeChunk::embeddingText).toList());if(embedded.size()!=chunks.size())throw new IllegalStateException("Embedding result count mismatch");
-            List<KnowledgeVectorPoint> points=new java.util.ArrayList<>();for(int i=0;i<chunks.size();i++)points.add(KnowledgeVectorPoint.from(chunks.get(i),embedded.get(i)));vectors.replaceDocument(documentId,points);metrics.counter("knowledge.index.total").increment();metrics.summary("knowledge.index.chunk.count").record(chunks.size());
+            List<KnowledgeVectorPoint> points=new java.util.ArrayList<>();for(int i=0;i<chunks.size();i++)points.add(KnowledgeVectorPoint.from(chunks.get(i),embedded.get(i)));if (roleResolver == null) vectors.replaceDocument(documentId,points);
+            else vectors.replaceDocument(documentId,points,() -> roleResolver.resolveForIndex(documentId));
+            metrics.counter("knowledge.index.total").increment();metrics.summary("knowledge.index.chunk.count").record(chunks.size());
             log.info("event=knowledge.index documentId={} revisionNo={} chunkCount={} durationMs={}",documentId,revision.getRevisionNo(),chunks.size(),elapsed(started));
         }catch(RuntimeException failure){metrics.counter("knowledge.index.failure").increment();String errorCode=failure instanceof EmbeddingProviderException provider?provider.providerCode():failure.getClass().getSimpleName();log.warn("event=knowledge.index.failed documentId={} errorType={} errorCode={} durationMs={}",documentId,failure.getClass().getSimpleName(),errorCode,elapsed(started));throw failure;}
         finally{metrics.timer("knowledge.index.duration").record(java.time.Duration.ofNanos(System.nanoTime()-started));}

@@ -64,6 +64,10 @@ public class AgentMcpConfiguration {
     private final RestClient workflowGateway;
     private final String workflowServiceToken;
     private final KnowledgeSearchService knowledge;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.company.skillplatform.knowledge.application.ExternalRoleLookupService externalRoles;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.company.skillplatform.knowledge.application.ExternalWikiRoleResolver wikiRoles;
     private final CodeGraphToolPolicyGuard codeGraphPolicy;
 
     public AgentMcpConfiguration(ObjectMapper objectMapper, SkillService skills, SkillVersionRepository versions,
@@ -88,7 +92,7 @@ public class AgentMcpConfiguration {
                 .contextExtractor(req -> io.modelcontextprotocol.common.McpTransportContext.create(Map.of("request", req)))
                 .maxRequestSize(256 * 1024).build();
         McpSyncServer server = McpServer.sync(transport).serverInfo("skill-platform", "1.0")
-                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. Matched Wiki results contain a bounded directory of visible descendants; inspect childDocuments before answering from a parent Wiki, and read relevant children with get_wiki_document. If the user asks to download an ASDM tool package, search the platform Wiki for that tool, read its Markdown with get_wiki_document, and include the exact /asdm-tools/download/{assetId} Markdown link from the document in the answer. Do not invent an asset ID or link. If no relevant platform evidence exists, search Feishu documents. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
+                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. Matched Wiki results contain a bounded directory of visible descendants; inspect childDocuments before answering from a parent Wiki, and read relevant children with get_wiki_document. If the user asks to download an ASDM tool package, search the platform Wiki for that tool, read its Markdown with get_wiki_document, and include the exact /asdm-tools/download/{assetId} Markdown link from the document in the answer. Do not invent an asset ID or link. For external role context, resolve_external_roles first and use the confirmed internal IDs in search_knowledge. Prefer PROJECT_CONTEXT. Use STRICT when explicitly limited to a role. Ask for clarification on ambiguity. Cite only role-matched Wiki as role evidence and label GENERAL_FALLBACK as general knowledge. For STRICT with no evidence, report the empty result or pending synchronization. Use Feishu or unfiltered Wiki as general fallback only for unrestricted requests or after user approval. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
                 .tools(tool("get_current_user_context", "Get the current user's visible teams before recommending skills.",
                         schema("object", List.of()), this::currentUserContext),
                         tool("search_skills", "Search published skills by development stage, platform and OS.",
@@ -98,10 +102,14 @@ public class AgentMcpConfiguration {
                         tool("search_wiki_documents", "Search Wiki documents visible to the current user, or only the selected job whitelist for a document-agent run. Normal user results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
                                 schema("object", List.of()), this::searchWiki),
                         tool("get_wiki_document", "Read a bounded segment of a visible Wiki Markdown document. When following a search_knowledge PLATFORM result, pass audience=PLATFORM to read the approved version. Results include sourceUrl, downloadUrl and a bounded childDocuments directory.",
-                                schema("object", List.of("documentId")), this::wikiDocument),
+                                wikiReadSchema(), this::wikiDocument),
                         tool("list_wiki_children", "List direct child Wiki documents of a visible parent. Call again with a returned child documentId to drill down one level. Results include sourceUrl and downloadUrl.",
                                 schema("object", List.of("documentId")), this::wikiChildren),
-                        tool("search_knowledge", "Semantically search authorized Wiki snippets and linked Skills. Optional knowledgeCategory: SKILL_TOOL (Skill, ASDM tools, commands), PROJECT_CONTEXT (project background), INTERNAL_KNOWLEDGE (company knowledge), FDE_WIKI (FDE area), OTHER. Use PREFER for a confident single-topic hint; it falls back across categories. Use STRICT only when the user explicitly asks to limit the category. Omit the category for mixed or uncertain questions. Category never grants access. Cite the actual Wiki title and sourceUrl. Results include sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when present.",
+                        tool("resolve_external_roles", "Resolve an external role among Wiki visible to this run. Use only confirmed IDs for role search. Ask the user to disambiguate non-exact matches.",
+                                new McpSchema.JsonSchema("object",Map.of("name",Map.of("type","string"),
+                                        "sourceSystem",Map.of("type","string"),"limit",Map.of("type","integer","maximum",10)),
+                                        List.of("name"),false,Map.of(),Map.of()), this::resolveExternalRoles),
+                        tool("search_knowledge", "Semantically search authorized Wiki snippets and linked Skills. Pass confirmed externalRoleIds with roleMode STRICT for explicit role limits or PREFER for role results with clearly labeled general fallback. Optional knowledgeCategory: SKILL_TOOL (Skill, ASDM tools, commands), PROJECT_CONTEXT (project background), INTERNAL_KNOWLEDGE (company knowledge), FDE_WIKI (FDE area), OTHER. Use PREFER for a confident single-topic hint; it falls back across categories. Use STRICT only when the user explicitly asks to limit the category. Omit the category for mixed or uncertain questions. Category never grants access. Cite the actual Wiki title and sourceUrl. Results include sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when present.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
                         tool("search_feishu_documents", "Search documents visible to the current Feishu user.",
                                 schema("object", List.of("query")), this::searchFeishu),
@@ -160,11 +168,23 @@ public class AgentMcpConfiguration {
         props.put("choices", Map.of("type", "array", "items", Map.of("type", "string", "minLength", 1, "maxLength", 500), "maxItems", 10));
         return new McpSchema.JsonSchema(type, props, required, false, Map.of(), Map.of());
     }
+    private McpSchema.JsonSchema wikiReadSchema() {
+        Map<String,Object> props=new LinkedHashMap<>();
+        props.put("documentId",Map.of("type","integer","minimum",1));
+        props.put("offset",Map.of("type","integer","minimum",0));
+        props.put("maxBytes",Map.of("type","integer","minimum",1));
+        props.put("audience",Map.of("type","string","enum",List.of("PLATFORM","TEAM")));
+        props.put("externalRoleIds",Map.of("type","array","items",Map.of("type","integer","minimum",1),"minItems",1,"maxItems",10,"uniqueItems",true));
+        props.put("roleMode",Map.of("type","string","enum",List.of("STRICT")));
+        return new McpSchema.JsonSchema("object",props,List.of("documentId"),false,Map.of(),Map.of());
+    }
     private McpSchema.JsonSchema knowledgeSearchSchema() {
         Map<String,Object> props=new LinkedHashMap<>();
         props.put("query",Map.of("type","string","minLength",1,"maxLength",1000));
         props.put("developmentStage",Map.of("type","string","enum",Arrays.stream(DevelopmentStage.values()).map(Enum::name).toList()));
         props.put("knowledgeCategory",Map.of("type","string","enum",List.of("SKILL_TOOL","PROJECT_CONTEXT","INTERNAL_KNOWLEDGE","FDE_WIKI","OTHER")));
+        props.put("externalRoleIds", Map.of("type","array","items",Map.of("type","integer","minimum",1),"minItems",1,"maxItems",10,"uniqueItems",true));
+        props.put("roleMode",Map.of("type","string","enum",List.of("STRICT","PREFER")));
         props.put("categoryMode",Map.of("type","string","enum",List.of("PREFER","STRICT"),"default","PREFER"));
         props.put("limit",Map.of("type","integer","minimum",1,"maximum",10,"default",5));
         return new McpSchema.JsonSchema("object",props,List.of("query"),false,Map.of(),Map.of());
@@ -221,16 +241,42 @@ public class AgentMcpConfiguration {
         return ok(Map.of("userId", agent.userId(), "knowledgeScope", agent.knowledgeScope(), "teams", teams,
                 "rankingRule", "Prefer skills linked from the current user's team Wiki; never infer access to another team."));
     }
+    private McpSchema.CallToolResult resolveExternalRoles(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args) {
+        var agent=run(ex,"knowledge.search");
+        requireRoleSearchScope(agent);
+        return ok(externalRoles.lookup(agent.userId(),agent.knowledgeScope(),required(args,"name"),
+                str(args,"sourceSystem"),integer(args,"limit",10)));
+    }
+
+    private void requireRoleSearchScope(AgentRun run) {
+        if(run.sessionKey()!=null || run.projectKey()!=null || (run.runRef()!=null && run.runRef().startsWith("workflow-")))
+            throw new org.springframework.security.access.AccessDeniedException("External role search is unavailable in a restricted run");
+    }
+
+    private List<Long> roleIds(Map<String,Object> args) {
+        Object input=args.get("externalRoleIds");
+        if(input==null)return null;
+        if(!(input instanceof List<?> values))throw new IllegalArgumentException("externalRoleIds must be an array");
+        return values.stream().map(value -> {
+            if(!(value instanceof Integer || value instanceof Long || value instanceof java.math.BigInteger))
+                throw new IllegalArgumentException("externalRoleIds must contain integers");
+            return Long.valueOf(value.toString());
+        }).toList();
+    }
+
     private McpSchema.CallToolResult searchKnowledge(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args){
         var agent=run(ex,"knowledge.search");String query=required(args,"query");String stage=str(args,"developmentStage");if(stage!=null)DevelopmentStage.valueOf(stage);
-        var result=knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,str(args,"knowledgeCategory"),str(args,"categoryMode"),integer(args,"limit",5));
+        List<Long> ids=roleIds(args);
+        String roleMode=str(args,"roleMode");
+        if(ids!=null||roleMode!=null)requireRoleSearchScope(agent);
+        var result=knowledge.search(agent.userId(),agent.knowledgeScope(),query,stage,str(args,"knowledgeCategory"),str(args,"categoryMode"),integer(args,"limit",5),ids,roleMode);
         Map<String,Object> response=objectMapper.convertValue(result,new TypeReference<>() {});
         List<Map<String,Object>> documents=objectMapper.convertValue(result.results(),new TypeReference<>() {});
         for(Map<String,Object> document:documents) {
             long id=((Number)document.get("documentId")).longValue();
             String asdmLink=asdmDownloadLink(wiki.get(id,agent.userId(),"PLATFORM".equals(document.get("teamScope"))).markdownContent());
             if(asdmLink!=null) document.put("asdmToolDownloadUrl",asdmLink);
-            document.putAll(wikiLinks(id,"PLATFORM".equals(document.get("teamScope"))));addWikiDirectory(document,id,agent.userId(),"PLATFORM".equals(document.get("teamScope")),3,20);
+            document.putAll(wikiLinks(id,"PLATFORM".equals(document.get("teamScope"))));addWikiDirectory(document,id,agent.userId(),"PLATFORM".equals(document.get("teamScope")),3,20,"STRICT".equals(result.roleMode())?ids:null);
         }
         response.put("results",documents);return ok(response);
     }
@@ -252,6 +298,14 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult wikiDocument(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read"); long id = longRequired(args,"documentId"); int offset = integer(args,"offset",0); int max = bounded(args);
+        List<Long> ids=roleIds(args);
+        String mode=str(args,"roleMode");
+        if(ids!=null||mode!=null){
+            requireRoleSearchScope(agent);
+            KnowledgeSearchService.validateRoleOptions(ids,mode);
+            if(mode!=null&&!"STRICT".equals(mode))throw new IllegalArgumentException("Wiki reads require STRICT role mode");
+            externalRoles.requireReady();
+        }
         Long workflowId = workflowRunId(agent);
         if (workflowId != null) return workflowWikiRead(workflowId, id, offset, max);
         if (agent.sessionKey() != null) return ok(objectMapper.convertValue(documentAgents.readSelectedWiki(agent.sessionKey(), agent.runRef(), id, offset, max), new TypeReference<Map<String,Object>>() {}));
@@ -261,7 +315,13 @@ public class AgentMcpConfiguration {
         String asdmLink = asdmDownloadLink(text);
         if (asdmLink != null) response.put("asdmToolDownloadUrl", asdmLink);
         response.put("knowledgeCategory",document.knowledgeCategory());
-        response.putAll(wikiLinks(id,platformAudience));addWikiDirectory(response,id,agent.userId(),platformAudience,3,20);return ok(response);
+        if(wikiRoles!=null) {
+            var metadata=wikiRoles.resolve(id);
+            if(ids!=null&&metadata.roles().stream().noneMatch(role->ids.contains(role.id())))
+                throw new org.springframework.security.access.AccessDeniedException("Wiki does not match the selected external roles");
+            response.putAll(metadata.toPayload());
+        }
+        response.putAll(wikiLinks(id,platformAudience));addWikiDirectory(response,id,agent.userId(),platformAudience,3,20,ids);return ok(response);
     }
     private McpSchema.CallToolResult wikiChildren(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
         var agent = run(ex, "wiki.read");
@@ -504,9 +564,18 @@ public class AgentMcpConfiguration {
         return Map.of("sourceUrl",page,"downloadUrl",page+"&download=1");
     }
     private void addWikiDirectory(Map<String,Object> response,long documentId,long userId,boolean platformOnly,int depth,int limit) {
+        addWikiDirectory(response,documentId,userId,platformOnly,depth,limit,null);
+    }
+
+    private void addWikiDirectory(Map<String,Object> response,long documentId,long userId,boolean platformOnly,int depth,int limit,List<Long> strictRoleIds) {
         var directory=wiki.visibleDescendants(documentId,userId,platformOnly,depth,limit);
-        List<Map<String,Object>> children=directory.items().stream().map(child -> {
+        var metadata=wikiRoles==null?Map.<Long,com.company.skillplatform.knowledge.domain.ExternalRoleMetadata>of():
+                wikiRoles.resolveAll(directory.items().stream().map(WikiDocumentService.DescendantSummary::documentId).toList());
+        List<Map<String,Object>> children=directory.items().stream().filter(child -> strictRoleIds==null
+                || metadata.get(child.documentId()).roles().stream().anyMatch(role->strictRoleIds.contains(role.id()))).map(child -> {
             Map<String,Object> item=new LinkedHashMap<>(objectMapper.convertValue(child,new TypeReference<Map<String,Object>>() {}));
+            var roles=metadata.get(child.documentId());
+            if(roles!=null)item.putAll(roles.toPayload());
             item.putAll(wikiLinks(child.documentId(),platformOnly));return item;
         }).toList();
         response.put("childDocuments",children);
