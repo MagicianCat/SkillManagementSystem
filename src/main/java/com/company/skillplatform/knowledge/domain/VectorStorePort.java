@@ -26,7 +26,11 @@ public interface VectorStorePort {
     default void setKnowledgeCategory(long documentId, String audience, String category) { throw new UnsupportedOperationException("Category payload updates unavailable"); }
     Set<Long> indexedDocumentIds();
 
-    record KnowledgeFilter(List<Long> visibleTeamIds, boolean platformOnly, String knowledgeCategory, List<Long> roleIds, boolean generalOnly) {
+    record KnowledgeFilter(List<Long> visibleTeamIds, boolean platformOnly, String knowledgeCategory, List<Long> roleIds, boolean generalOnly, String resourceType) {
+        public KnowledgeFilter(List<Long> visibleTeamIds, boolean platformOnly, String knowledgeCategory,
+                List<Long> roleIds, boolean generalOnly) {
+            this(visibleTeamIds,platformOnly,knowledgeCategory,roleIds,generalOnly,null);
+        }
         public KnowledgeFilter(List<Long> visibleTeamIds, boolean platformOnly, String knowledgeCategory) {
             this(visibleTeamIds,platformOnly,knowledgeCategory,List.of(),false);
         }

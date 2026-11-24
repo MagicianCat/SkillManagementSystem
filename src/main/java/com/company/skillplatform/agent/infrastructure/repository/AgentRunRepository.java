@@ -20,4 +20,7 @@ public interface AgentRunRepository extends JpaRepository<AgentRunEntity,Long>{
  @Modifying(clearAutomatically=true, flushAutomatically=true) @Transactional
  @Query("update AgentRunEntity r set r.status='CANCELLED',r.finishedAt=:finishedAt,r.versionNo=r.versionNo+1 where r.runKey=:runKey and r.status in ('PENDING','RUNNING')")
  int cancelActiveRun(String runKey, java.time.Instant finishedAt);
+ @Modifying(clearAutomatically=true, flushAutomatically=true)
+ @Query("update AgentRunEntity r set r.status='SUCCEEDED',r.finishedAt=:finishedAt,r.versionNo=r.versionNo+1 where r.runKey=:runKey and r.status='RUNNING'")
+ int completeActiveRun(String runKey, java.time.Instant finishedAt);
 }

@@ -21,6 +21,7 @@ public class ExternalRoleLookupService {
                 ON rev.id=ps.approved_revision_id AND rev.document_id=d.id WHERE ps.document_id=d.id))
               OR d.team_id IN (:teams))
             """;
+    @org.springframework.beans.factory.annotation.Autowired private ExternalRoleDirectoryService directory;
     private final NamedParameterJdbcTemplate db;
     private final WikiDocumentService wiki;
     private final boolean enabled;
@@ -46,21 +47,15 @@ public class ExternalRoleLookupService {
     }
 
     public Lookup lookup(long userId,String scope,String input,String source,int limit) {
-        requireReady();
         long started=System.nanoTime();
         String name=normalize(input);
         if(name.isEmpty()||name.length()>255) throw bad("KNOWLEDGE_ROLE_NAME_INVALID","请输入有效角色名称");
-        var teams="PLATFORM_PUBLIC_ONLY".equals(scope)?List.<Long>of():wiki.visibleTeams(userId).stream().map(WikiDocumentService.TeamView::id).toList();
-        Map<String,Object> args=new HashMap<>();
-        args.put("source",source);
-        args.put("name",name);
-        args.put("like","%"+name.replace("!","!!").replace("%","!%").replace("_","!_")+"%");
-        args.put("limit",Math.max(2,Math.min(10,limit)));
-        String where=" AND (:source IS NULL OR er.source_system=:source)";
-        String exact="(LOWER(TRIM(er.role_name))=:name OR LOWER(TRIM(er.external_role_id))=:name)";
-        var matches=query(where+" AND "+exact+" ORDER BY er.id LIMIT :limit", args,teams);
-        if(matches.size()==1) return report("EXACT",matches,started);
-        if(matches.isEmpty()) matches=query(where+" AND (LOWER(er.role_name) LIKE :like ESCAPE '!' OR LOWER(er.external_role_id) LIKE :like ESCAPE '!') ORDER BY er.id LIMIT :limit",args,teams);
+        var candidates=directory.lookup(userId,scope,name,source);
+        var exact=candidates.stream().filter(item->normalize(item.term()).equals(name)).toList();
+        var chosen=exact.isEmpty()?candidates:exact;
+        var matches=chosen.stream().map(item->new Role(item.id(),item.name(),item.source(),item.externalId()))
+                .distinct().limit(Math.max(2,Math.min(10,limit))).toList();
+        if(!exact.isEmpty()&&matches.size()==1)return report("EXACT",matches,started);
         return report(matches.isEmpty()?"NOT_FOUND_OR_NOT_VISIBLE":"AMBIGUOUS",matches,started);
     }
 

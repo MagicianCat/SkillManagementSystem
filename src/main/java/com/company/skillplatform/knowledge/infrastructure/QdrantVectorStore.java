@@ -113,6 +113,7 @@ public class QdrantVectorStore implements VectorStorePort {
         must.add(Map.of("should",visibility));
         if(filter.knowledgeCategory()!=null)must.add(Map.of("key","knowledgeCategory","match",Map.of("value",filter.knowledgeCategory())));
         if (!filter.roleIds().isEmpty()) must.add(Map.of("key","externalRoleIds","match",Map.of("any",filter.roleIds())));
+        if (filter.resourceType()!=null) must.add(Map.of("key","externalResourceType","match",Map.of("value",filter.resourceType())));
         if (filter.generalOnly()) must.add(Map.of("is_empty",Map.of("key","externalRoleIds")));
         Map<String,Object> acl=Map.of("must",must);
         JsonNode response=post("/collections/"+collection()+"/points/query",Map.of("query",queryVector,"filter",acl,"limit",limit,"with_payload",true,"with_vector",false));

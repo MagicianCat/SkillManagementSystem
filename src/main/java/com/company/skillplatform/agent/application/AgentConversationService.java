@@ -79,6 +79,45 @@ public class AgentConversationService {
     @Transactional(readOnly=true) public RunView run(String key,Long owner){AgentRunEntity run=requireRun(key,owner);return runView(run,recommendation(run));}
     @Transactional public void cancel(String key,Long owner){requireRun(key,owner);if(runs.cancelActiveRun(key,java.time.Instant.now())==0)return;FutureTask<Void> task=queuedTasks.remove(key);if(task!=null){task.cancel(false);if(executor instanceof ThreadPoolExecutor pool)pool.remove(task);}runtime.cancel(key);recordRun(key,"CANCELLED",null);events.publish(key,"run.cancelled",Map.of("runKey",key));}
 
+    @org.springframework.beans.factory.annotation.Autowired private RetrievalPlanner retrievalPlanner;
+    @org.springframework.beans.factory.annotation.Autowired private RetrievalPlanStore retrievalPlans;
+    @org.springframework.beans.factory.annotation.Autowired private com.company.skillplatform.knowledge.application.StructuredCatalogService catalogs;
+
+    public com.company.skillplatform.knowledge.application.StructuredCatalogService.Page catalog(String runKey,long owner,String taskId,int page) {
+        var run=requireRun(runKey,owner);
+        var plan=retrievalPlans.find(runKey).filter(p->Set.of("CATALOG","MIXED").contains(p.strategy()))
+                .orElseThrow(()->error("AGENT_CATALOG_NOT_FOUND","Run has no resource catalog",HttpStatus.NOT_FOUND));
+        var task=plan.tasks().stream().filter(item->item.taskId().equals(taskId)&&!"RECOMMEND".equals(item.resourceKind())).findFirst()
+                .orElseThrow(()->error("AGENT_CATALOG_NOT_FOUND","Unknown catalog",HttpStatus.NOT_FOUND));
+        var result=catalogs.list(owner,run.getSession().getKnowledgeScope(),task.roleId(),task.resourceKind(),task.category(),page,30);
+        retrievalPlans.record(runKey,task,result);
+        return result;
+    }
+
+    public List<String> catalogIds(String runKey,long owner) {
+        requireRun(runKey,owner);
+        return retrievalPlans.find(runKey).filter(plan->Set.of("CATALOG","MIXED").contains(plan.strategy()))
+                .stream().flatMap(plan->plan.tasks().stream()).filter(task->!"RECOMMEND".equals(task.resourceKind()))
+                .map(RetrievalPlanner.Task::taskId).toList();
+    }
+
+    private String renderCatalog(String runKey,RetrievalPlanner.Plan plan,RetrievalPlanner.Task task,com.company.skillplatform.knowledge.application.StructuredCatalogService.Page page) {
+        String name=plan.roleName(task).replaceAll("[\\r\\n\\[\\]]"," ");
+        String label=switch(task.resourceKind()){
+            case "SKILL" -> "已发布 Skill";
+            case "ASDM-TOOL" -> "ASDM 工具包";
+            default -> "项目上下文";
+        };
+        var text=new StringBuilder("## ").append(name).append(" · ").append(label).append("\n\n共 ").append(page.total()).append(" 项。\n\n");
+        for(var item:page.items()){
+            String title=String.valueOf(item.get("title")).replaceAll("[\\r\\n\\[\\]]"," ");
+            text.append("- [").append(title).append("](").append(item.get("sourceUrl")).append(")");
+            if(item.containsKey("downloadUrl"))text.append(" · [下载工具包](").append(item.get("downloadUrl")).append(")");
+            text.append("\n");
+        }
+        text.append("\n[打开资源目录](/agent?catalogRun=").append(runKey).append("&catalogId=").append(task.taskId()).append(")");
+        return text.toString();
+    }
     private void dispatch(String runKey,Long owner){
         if(runs.claimPendingRun(runKey,java.time.Instant.now())==0)return;
         AgentRunEntity run=requireRun(runKey,owner);AgentSessionEntity session=run.getSession();
@@ -89,7 +128,37 @@ public class AgentConversationService {
             events.publish(runKey,"run.phase",Map.of("runKey",runKey,"phase","RECOGNIZING_INTENT","message","正在理解本轮需求"));
             String current=history.get(history.size()-1).content();
             List<String> recent=history.stream().limit(Math.max(0,history.size()-1)).skip(Math.max(0,history.size()-5)).map(AgentRuntimeClient.Message::content).toList();
-            Map<String,Object> plan=intentPlans.classify(runKey,current,recent);
+            var structured=retrievalPlanner==null || !"skill-advisor".equals(session.getProfileKey())?Optional.<RetrievalPlanner.Plan>empty():
+                    retrievalPlanner.plan(runKey,owner,session.getKnowledgeScope(),current);
+            Map<String,Object> plan;
+            if(structured.isPresent()){
+                var retrieval=structured.get();
+                phase="retrieval_plan";
+                plan=retrievalPlans.save(runKey,retrieval);
+                if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
+                events.publish(runKey,"retrieval.plan.ready",Map.of("schemaVersion",2,"strategy",retrieval.strategy()));
+                if("CLARIFY".equals(retrieval.strategy())){
+                    completeRun(runKey,"请确认要查询的角色和资料类型。当前匹配："+retrieval.roles().stream()
+                            .map(role->role.name()+"（"+role.source()+"）").distinct().collect(java.util.stream.Collectors.joining("、"))
+                            +"。有多个目标时，请先指定要处理的一个。");
+                    return;
+                }
+                if("CATALOG".equals(retrieval.strategy())){
+                    var sections=new ArrayList<String>();
+                    for(var task:retrieval.tasks()){
+                        if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
+                        var result=catalog(runKey,owner,task.taskId(),0);
+                        events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",result.total()));
+                        sections.add(renderCatalog(runKey,retrieval,task,result));
+                    }
+                    completeRun(runKey,String.join("\n",sections));
+                    return;
+                }
+                if("MIXED".equals(retrieval.strategy())){
+                    var page=catalog(runKey,owner,"t1",0);
+                    events.publish(runKey,"catalog.completed",Map.of("catalogId","t1","total",page.total()));
+                }
+            } else plan=intentPlans.classifyOrDegrade(runKey,current,recent);
             if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
             if("CONFLICT".equals(plan.get("status"))){completeRun(runKey,"你同时要求推荐和排除 Skill，请明确本轮是否需要 Skill 推荐。");return;}
             if(Boolean.TRUE.equals(plan.get("recommendSkills"))&&Set.of("SKILL_RECOMMEND").equals(plan.get("intents"))&&fastPath!=null){phase="fast_path";var preset=fastPath.resolve(current,session.getPlatform(),session.getOsType());if(preset.isPresent()){completePreset(run,session,preset.get());return;}}
@@ -117,14 +186,37 @@ public class AgentConversationService {
             case "tool.completed"->{Map<String,Object> safe=safeToolData(data);mcpAudits.completed(runKey,string(data.get("callId")),!Boolean.FALSE.equals(data.get("success")),string(data.get("errorCode")));events.publish(runKey,event.type(),safe);}
             case "tool.failed"->{Map<String,Object> safe=safeToolData(data);mcpAudits.completed(runKey,string(data.get("callId")),false,string(data.get("errorCode")));events.publish(runKey,event.type(),safe);}
             case "run.phase"->events.publish(runKey,"run.phase",safePhaseData(data));
-            case "runtime.completed"->completeRun(runKey,String.valueOf(data.getOrDefault("finalResponse","")));
+            case "runtime.completed"->completeRun(runKey,withMixedCatalog(runKey,String.valueOf(data.getOrDefault("finalResponse",""))));
             case "runtime.retrying"->events.publish(runKey,"run.retrying",Map.of("runKey",runKey,"attempt",data.getOrDefault("attempt",2),"message","模型未生成最终回答，正在重新整理已检索结果…"));
             case "runtime.failed"->{String code=runtimeFailureCode(data.get("code"));failRun(runKey,code,runtimeFailureMessage(code));}
             case "runtime.cancelled"->cancelRuntime(runKey);
             default->{ }
         }
     }
-    private void completeRun(String runKey,String answer){AgentRunEntity run=runs.findByRunKey(runKey).orElseThrow();if(!"RUNNING".equals(run.getStatus()))return;long seq=messages.countBySession(run.getSession())+1;messages.save(new AgentMessageEntity(run.getSession(),run,seq,"ASSISTANT",answer,"COMPLETE"));run.succeeded();runs.save(run);recordRun(runKey,"SUCCESS",null);events.publish(runKey,"run.completed",Map.of("runKey",runKey,"message",answer));}
+    private String withMixedCatalog(String runKey,String answer) {
+        if(retrievalPlans==null)return answer;
+        var plan=retrievalPlans.find(runKey).filter(item->"MIXED".equals(item.strategy()));
+        if(plan.isEmpty())return answer;
+        var run=runs.findByRunKey(runKey).orElseThrow();
+        if(!"RUNNING".equals(run.getStatus()))return answer;
+        var task=plan.get().task();
+        var page=catalog(runKey,run.getSession().getOwnerUserId(),task.taskId(),0);
+        return renderCatalog(runKey,plan.get(),task,page)+"\n\n"+answer;
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.transaction.support.TransactionTemplate completionTransaction;
+
+    private void completeRun(String runKey,String answer){
+        if(!Boolean.TRUE.equals(completionTransaction.execute(tx->{
+            if(runs.completeActiveRun(runKey,java.time.Instant.now())!=1)return false;
+            AgentRunEntity run=runs.findByRunKey(runKey).orElseThrow();
+            long sequence=messages.countBySession(run.getSession())+1;
+            messages.save(new AgentMessageEntity(run.getSession(),run,sequence,"ASSISTANT",answer,"COMPLETE"));
+            return true;
+        })))return;
+        recordRun(runKey,"SUCCESS",null);
+        events.publish(runKey,"run.completed",Map.of("runKey",runKey,"message",answer));
+    }
     private void failRun(String runKey,String code,String message){AgentRunEntity run=runs.findByRunKey(runKey).orElseThrow();if(!List.of("PENDING","RUNNING").contains(run.getStatus()))return;run.failed(code,message);runs.save(run);recordRun(runKey,"FAILED",code);events.publish(runKey,"run.failed",Map.of("runKey",runKey,"code",code,"message",message));}
     private void recordRun(String runKey,String outcome,String code){if(ops==null)return;var fact=new OpsEventService.Event("agent-run:"+runKey+":"+outcome,"agent.run.terminal","AGENT","run",outcome,"GLOBAL",code,runKey,null,null,null,null,null);if("FAILED".equals(outcome))ops.recordFailure(fact);else ops.record(fact);}
     private void cancelRuntime(String runKey){AgentRunEntity run=runs.findByRunKey(runKey).orElseThrow();if(!List.of("PENDING","RUNNING").contains(run.getStatus()))return;run.cancelled();runs.save(run);recordRun(runKey,"CANCELLED",null);events.publish(runKey,"run.cancelled",Map.of("runKey",runKey));}

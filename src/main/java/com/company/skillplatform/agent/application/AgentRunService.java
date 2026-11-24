@@ -171,7 +171,7 @@ public class AgentRunService {
                 "code_graph.trace", "code_graph.route_map").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
-                "knowledge.search", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
+                "knowledge.search", "knowledge.catalog.list", "retrieval.plan.read", "retrieval.task.refine", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
             throw new BusinessException("AGENT_CAPABILITY_DENIED", "Agent capability is not allowed", HttpStatus.FORBIDDEN);
         }
         if (run.runRef()!=null && intentPlans!=null && !intentPlans.allows(run.runRef(),capability))

@@ -82,9 +82,32 @@ public class IntentPlanService {
         } catch(Exception e) {throw new IllegalStateException("INTENT_PLAN_PERSIST_FAILED",e);}
         return plan;
     }
+    @org.springframework.beans.factory.annotation.Value("${agent.retrieval.v2-enabled:false}")
+    private boolean allowDegradedAdvice;
+
+    public Map<String,Object> classifyOrDegrade(String runKey,String current,List<String> history) {
+        try{return classify(runKey,current,history);}
+        catch(IllegalStateException failure){
+            if(!allowDegradedAdvice||!Set.of("INTENT_MODEL_UNAVAILABLE","INTENT_MODEL_INVALID_RESPONSE",
+                    "Intent model is not configured").contains(String.valueOf(failure.getMessage())))throw failure;
+            dbExplore(runKey,failure.getMessage());
+            return load(runKey);
+        }
+    }
+
+    private void dbExplore(String runKey,String reason) {
+        jdbc.update("""
+                INSERT INTO agent_run_intent_plan(run_key,status,intents_json,constraints_json,allowed_artifacts_json,
+                    allowed_capabilities_json,registry_snapshot_json,model_key,decision_latency_ms,model_advice_json)
+                VALUES (?,'EXPLORE','[]','[]','["ANSWER"]',
+                    '["user.context.read","knowledge.search","wiki.search","wiki.read"]','{"definitions":[]}',?,0,
+                    JSON_OBJECT('status','DEGRADED','reason',?))
+                """,runKey,model,reason);
+    }
     public Map<String,Object> load(String runKey) {
-        var rows=jdbc.query("select status,intents_json,constraints_json,allowed_artifacts_json,allowed_capabilities_json,registry_snapshot_json from agent_run_intent_plan where run_key=?",(rs,n)->{
+        var rows=jdbc.query("select status,intents_json,constraints_json,allowed_artifacts_json,allowed_capabilities_json,registry_snapshot_json,schema_version,retrieval_plan_json from agent_run_intent_plan where run_key=?",(rs,n)->{
             try {
+                if(rs.getInt(7)==2)return json.readValue(rs.getString(8),new com.fasterxml.jackson.core.type.TypeReference<Map<String,Object>>(){});
                 Set<String> intents=new LinkedHashSet<>(json.readValue(rs.getString(2),new com.fasterxml.jackson.core.type.TypeReference<List<String>>(){}));
                 Set<String> constraints=new LinkedHashSet<>(json.readValue(rs.getString(3),new com.fasterxml.jackson.core.type.TypeReference<List<String>>(){}));
                 List<String> artifacts=json.readValue(rs.getString(4),new com.fasterxml.jackson.core.type.TypeReference<>(){});

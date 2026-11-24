@@ -8,7 +8,7 @@ import org.springframework.transaction.annotation.*;
 
 @Service
 public class ExternalWikiRoleResolver {
-    static final String SOURCE_MATCH = """
+    public static final String SOURCE_MATCH = """
             d.source_system=r.source_system AND d.source_resource_id=r.external_resource_id
             AND ((r.resource_type='DOCUMENT' AND d.source_entry_path IS NOT NULL AND d.source_entry_path<>'ASDM-TOOL')
               OR (r.resource_type='ASDM-TOOL' AND d.source_entry_path='ASDM-TOOL'))

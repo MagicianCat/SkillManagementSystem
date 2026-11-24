@@ -214,6 +214,12 @@ public class FeishuBotMessageService {
             }
             if (runKey != null && !runKey.isBlank()) elements.add(button("批量下载推荐 Skill", webBaseUrl + "/agent?runKey=" + runKey + "&batchDownload=1"));
         }
+        if(runKey!=null){
+            var ids=conversation.catalogIds(runKey,message.getOwnerUserId());
+            for(int index=0;index<ids.size();index++)
+                elements.add(button(ids.size()==1?"查看完整资源目录":"查看资源目录 "+(index+1),
+                        webBaseUrl+"/agent?catalogRun="+runKey+"&catalogId="+ids.get(index)));
+        }
         elements.add(button("在研途助手开启新会话", webBaseUrl + "/agent?newSession=1"));
         send(message, "interactive", Map.of("schema", "2.0", "body", Map.of("elements", elements)), group);
     }

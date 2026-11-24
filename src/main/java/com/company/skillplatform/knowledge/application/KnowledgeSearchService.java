@@ -48,6 +48,14 @@ public class KnowledgeSearchService {
     @Transactional(readOnly=true)
     public KnowledgeSearchResult search(long userId,String knowledgeScope,String query,String developmentStage,
             String knowledgeCategory,String categoryMode,int requestedLimit,List<Long> requestedRoles,String requestedMode){
+        return search(userId,knowledgeScope,query,developmentStage,knowledgeCategory,categoryMode,requestedLimit,
+                requestedRoles,requestedMode,null);
+    }
+
+    @Transactional(readOnly=true)
+    public KnowledgeSearchResult search(long userId,String knowledgeScope,String query,String developmentStage,
+            String knowledgeCategory,String categoryMode,int requestedLimit,List<Long> requestedRoles,String requestedMode,
+            String resourceType){
         String roleMode=validateRoleOptions(requestedRoles,requestedMode);
         List<Long> roleIds=requestedRoles==null?List.of():requestedRoles;
         boolean roleRouted=roleMode!=null;
@@ -69,14 +77,14 @@ public class KnowledgeSearchService {
             boolean routed=category!=null&&(roleRouted||properties.getSearch().isCategoryRoutingEnabled()||mode==CategoryMode.STRICT);
             Map<Long,ExternalRoleMetadata> metadata=new HashMap<>();
             String categoryFilter=routed?category.name():null;
-            List<VectorSearchHit> indexedHits=vectors.search(queryVector,new VectorStorePort.KnowledgeFilter(teamIds,platformOnly,categoryFilter,roleIds,false),topK);
-            List<VectorSearchHit> hits=roleHits(indexedHits,teamIds,platformOnly,roleIds,false,metadata);
+            List<VectorSearchHit> indexedHits=vectors.search(queryVector,new VectorStorePort.KnowledgeFilter(teamIds,platformOnly,categoryFilter,roleIds,false,resourceType),topK);
+            List<VectorSearchHit> hits=roleHits(indexedHits,teamIds,platformOnly,roleIds,false,metadata,resourceType);
             boolean fallbackUsed=false;
             int queryCount=1;
             if(routed&&mode==CategoryMode.PREFER&&insufficient(hits,limit)){
                 queryCount++;
-                var broad=vectors.search(queryVector,new VectorStorePort.KnowledgeFilter(teamIds,platformOnly,null,roleIds,false),topK);
-                hits=merge(hits,roleHits(broad,teamIds,platformOnly,roleIds,false,metadata));
+                var broad=vectors.search(queryVector,new VectorStorePort.KnowledgeFilter(teamIds,platformOnly,null,roleIds,false,resourceType),topK);
+                hits=merge(hits,roleHits(broad,teamIds,platformOnly,roleIds,false,metadata,resourceType));
                 fallbackUsed=true;
             }
             boolean roleIndexPending=roleRouted&&insufficient(hits,limit)&&roleLookup.pending(roleIds,teamIds);
@@ -84,7 +92,7 @@ public class KnowledgeSearchService {
                 queryCount++;
                 var general=vectors.search(queryVector,new VectorStorePort.KnowledgeFilter(teamIds,platformOnly,
                         mode==CategoryMode.STRICT?categoryFilter:null,List.of(),true),topK);
-                hits=merge(hits,roleHits(general,teamIds,platformOnly,List.of(),true,metadata));
+                hits=merge(hits,roleHits(general,teamIds,platformOnly,List.of(),true,metadata,null));
             }
             hits=preferTeamAudience(hits);
             if(roleRouted) hits=hits.stream().limit(36).toList();
@@ -208,7 +216,7 @@ public class KnowledgeSearchService {
         return new ArrayList<>(merged.values());
     }
     private List<VectorSearchHit> roleHits(List<VectorSearchHit> indexed,List<Long> teams,boolean platformOnly,
-            List<Long> ids,boolean general,Map<Long,ExternalRoleMetadata> metadata){
+            List<Long> ids,boolean general,Map<Long,ExternalRoleMetadata> metadata,String resourceType){
         var fresh=freshHits(indexed,teams,platformOnly);
         if(roleResolver==null)return fresh;
         metadata.putAll(roleResolver.resolveAll(fresh.stream().map(this::documentId).filter(id->!metadata.containsKey(id)).toList()));
@@ -220,7 +228,8 @@ public class KnowledgeSearchService {
                 });
         return fresh.stream().filter(hit->{
             var value=metadata.get(documentId(hit));
-            return general?value.sourceSystem()==null:ids.isEmpty()||matches(value,ids);
+            return (resourceType==null||resourceType.equals(value.resourceType()))
+                    && (general?value.sourceSystem()==null:ids.isEmpty()||matches(value,ids));
         }).toList();
     }
     private String roleLine(List<String> names){

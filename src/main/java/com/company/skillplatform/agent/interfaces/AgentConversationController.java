@@ -14,6 +14,11 @@ public class AgentConversationController{
  @DeleteMapping("/sessions/{key}")@ResponseStatus(HttpStatus.NO_CONTENT)void close(@PathVariable String key,Authentication a){service.close(key,(Long)a.getPrincipal());}
  @PatchMapping("/sessions/{key}/context")AgentConversationService.SessionView updateContext(@PathVariable String key,@Valid@RequestBody Context r,Authentication a){return service.updateContext(key,(Long)a.getPrincipal(),r.platform,r.osType);}
  @PostMapping("/sessions/{key}/messages")ResponseEntity<AgentConversationService.AcceptedRun>send(@PathVariable String key,@Valid@RequestBody SendMessage r,Authentication a){return ResponseEntity.accepted().body(service.send(key,(Long)a.getPrincipal(),r.content,r.context==null?null:r.context.platform,r.context==null?null:r.context.osType,r.context!=null));}
+ @GetMapping("/runs/{key}/catalogs/{catalogId}") Object catalog(@PathVariable String key,@PathVariable String catalogId,@RequestParam(defaultValue="0") int page,Authentication a){return service.catalog(key,(Long)a.getPrincipal(),catalogId,page);}
+ @PostMapping("/runs/{key}/catalog-bundles") BundleService.BundleView catalogBundle(@PathVariable String key,@Valid @RequestBody CatalogBundleRequest request,Authentication a){
+  return batchDownloads.createCatalogBundle(key,(Long)a.getPrincipal(),request.catalogId(),request.platform(),request.osType(),request.skillIds(),request.all(),request.expectedTotal());
+ }
+ public record CatalogBundleRequest(@NotBlank String catalogId,String platform,String osType,@Size(max=500) List<@Positive Long> skillIds,boolean all,Long expectedTotal){}
  @PostMapping("/runs/{key}/bundle")BundleService.BundleView bundle(@PathVariable String key,@Valid@RequestBody BatchRequest r,Authentication a){return batchDownloads.create(key,(Long)a.getPrincipal(),r.platform,r.osType,r.skillKeys);}
  @GetMapping(value="/runs/{key}/events",produces=MediaType.TEXT_EVENT_STREAM_VALUE)SseEmitter events(@PathVariable String key,@RequestHeader(value="Last-Event-ID",required=false)String last,Authentication a){return service.subscribe(key,(Long)a.getPrincipal(),lastEventId(last));}
  @GetMapping("/runs/{key}")AgentConversationService.RunView run(@PathVariable String key,Authentication a){return service.run(key,(Long)a.getPrincipal());}

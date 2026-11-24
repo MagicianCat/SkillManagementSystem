@@ -72,4 +72,49 @@ public class AgentBatchDownloadService {
         if (roots.isEmpty()) throw new BusinessException("AGENT_RECOMMENDATION_EMPTY", "Recommendation has no downloadable skills", HttpStatus.UNPROCESSABLE_ENTITY);
         return bundles.createAgentBundle(roots,targetPlatform,targetOs,owner);
     }
+    @org.springframework.beans.factory.annotation.Autowired private RetrievalPlanStore retrievalPlans;
+    @org.springframework.beans.factory.annotation.Autowired private com.company.skillplatform.knowledge.application.StructuredCatalogService catalogs;
+
+    @PreAuthorize("hasAuthority('skill:download')")
+    @Transactional
+    public BundleService.BundleView createCatalogBundle(String runKey,long owner,String taskId,
+            String platform,String osType,Collection<Long> selection,boolean all,Long expectedTotal) {
+        var run=runs.findByRunKeyAndSessionOwnerUserId(runKey,owner).orElseThrow(this::invalidCatalog);
+        if(!"SUCCEEDED".equals(run.getStatus()))throw invalidCatalog();
+        var task=retrievalPlans.find(runKey).stream().flatMap(plan->plan.tasks().stream())
+                .filter(item->item.taskId().equals(taskId)&&"SKILL".equals(item.resourceKind())).findFirst()
+                .orElseThrow(this::invalidCatalog);
+        var seen=retrievalPlans.skillVersions(runKey,taskId);
+        Set<Long> requested=selection==null?Set.of():new LinkedHashSet<>(selection);
+        if(all&&!requested.isEmpty()||!all&&(requested.isEmpty()||!seen.keySet().containsAll(requested)))throw invalidCatalog();
+        Map<Long,Long> current=new LinkedHashMap<>();
+        for(int page=0;;page++){
+            var data=catalogs.list(owner,run.getSession().getKnowledgeScope(),task.roleId(),"SKILL",null,page,50);
+            if(all&&(expectedTotal==null||expectedTotal!=data.total()))throw invalidCatalog();
+            for(var row:data.items()){
+                long id=((Number)row.get("id")).longValue();
+                if(all||requested.contains(id)) current.put(id,((Number)row.get("versionId")).longValue());
+            }
+            if((long)(page+1)*data.pageSize()>=data.total())break;
+        }
+        if(current.isEmpty()||(!all&&!current.keySet().equals(requested)))throw invalidCatalog();
+        var roots=current.entrySet().stream().map(entry->{
+            if(seen.containsKey(entry.getKey())&&!Objects.equals(seen.get(entry.getKey()),entry.getValue()))throw invalidCatalog();
+            return versions.findById(entry.getValue()).filter(version->version.getSkill().getId().equals(entry.getKey())
+                    &&Set.of(LifecycleStatus.PUBLISHED,LifecycleStatus.DEPRECATED).contains(version.getLifecycleStatus()))
+                    .orElseThrow(this::invalidCatalog);
+        }).toList();
+        String targetPlatform=AgentRequestTarget.optionalPlatform(platform);
+        String targetOs=AgentRequestTarget.optionalOsType(osType);
+        String sessionPlatform=AgentRequestTarget.optionalPlatform(run.getSession().getPlatform());
+        String sessionOs=AgentRequestTarget.optionalOsType(run.getSession().getOsType());
+        if(sessionPlatform!=null&&targetPlatform!=null&&!sessionPlatform.equals(targetPlatform)
+                ||sessionOs!=null&&targetOs!=null&&!sessionOs.equals(targetOs))throw invalidCatalog();
+        return bundles.createAgentBundle(roots,targetPlatform!=null?targetPlatform:sessionPlatform!=null?sessionPlatform:"CODEBUDDY",
+                targetOs!=null?targetOs:sessionOs!=null?sessionOs:"ANY",owner);
+    }
+
+    private BusinessException invalidCatalog() {
+        return new BusinessException("CATALOG_EXPIRED","目录或版本已变化，请刷新后重新选择",HttpStatus.CONFLICT);
+    }
 }
