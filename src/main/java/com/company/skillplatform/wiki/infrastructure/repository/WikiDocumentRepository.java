@@ -10,7 +10,6 @@ public interface WikiDocumentRepository extends JpaRepository<WikiDocumentEntity
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select d from WikiDocumentEntity d where d.id = :id")
     Optional<WikiDocumentEntity> findByIdForUpdate(Long id);
-    List<WikiDocumentEntity> findByTitleAndPlatformVisibleTrueAndStatus(String title, String status);
     List<WikiDocumentEntity> findByStatusOrderByIdAsc(String status);
     List<WikiDocumentEntity> findByParentIdAndStatusOrderByIdAsc(Long parentId, String status);
     Optional<WikiDocumentEntity> findFirstBySourceSystemAndSourceResourceIdAndTeamIdAndStatusOrderByIdDesc(String sourceSystem, String sourceResourceId, Long teamId, String status);
