@@ -123,27 +123,44 @@ public class AgentConversationService {
             if(structured.isPresent()){
                 var retrieval=structured.get();
                 phase="retrieval_plan";
-                plan=retrievalPlans.save(runKey,retrieval);
-                if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
-                events.publish(runKey,"retrieval.plan.ready",Map.of("schemaVersion",2,"strategy",retrieval.strategy()));
-                if("CLARIFY".equals(retrieval.strategy())){
-                    completeRun(runKey,"请确认要查询的角色和资料类型。当前匹配："+retrieval.roles().stream()
-                            .map(role->role.name()+"（"+role.source()+"）").distinct().collect(java.util.stream.Collectors.joining("、"))
-                            +"。有多个目标时，请先指定要处理的一个。");
-                    return;
-                }
-                if("CATALOG".equals(retrieval.strategy())){
-                    var sections=new ArrayList<String>();
-                    for(var task:retrieval.tasks()){
-                        if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
-                        var result=catalog(runKey,owner,task.taskId(),0);
-                        events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",result.total()));
-                        sections.add(renderCatalog(runKey,retrieval,task,result));
+                if(Set.of("CLARIFY","CATALOG").contains(retrieval.strategy())){
+                    var pages=new LinkedHashMap<RetrievalPlanner.Task,com.company.skillplatform.knowledge.application.StructuredCatalogService.Page>();
+                    String candidate;
+                    if("CLARIFY".equals(retrieval.strategy())){
+                        candidate=retrieval.roles().isEmpty()?"请补充要查询的角色名称。":
+                                "请确认要查询的角色和资料类型。当前匹配："+retrieval.roles().stream()
+                                .map(role->role.name()+"（"+role.source()+"）").distinct()
+                                .collect(java.util.stream.Collectors.joining("、"))+"。有多个目标时，请先指定要处理的一个。";
+                    }else{
+                        var sections=new ArrayList<String>();
+                        for(var task:retrieval.tasks()){
+                            if(!isRunning(runKey))return;
+                            var page=catalogs.list(owner,session.getKnowledgeScope(),task.roleId(),task.resourceKind(),task.category(),0,30);
+                            pages.put(task,page);
+                            sections.add(renderCatalog(runKey,retrieval,task,page));
+                        }
+                        candidate=String.join("\n",sections);
                     }
-                    completeRun(runKey,String.join("\n",sections));
-                    return;
+                    if(!isRunning(runKey))return;
+                    String retryKind=reviewCandidate(runKey,session,current,candidate);
+                    if(!isRunning(runKey))return;
+                    var revised=retryKind==null?null:retryPlan(retrieval,retryKind,current);
+                    if(retryKind==null || revised==null&&!retrieval.roles().isEmpty()){
+                        retrievalPlans.save(runKey,retrieval);
+                        for(var entry:pages.entrySet()){
+                            var task=entry.getKey();
+                            retrievalPlans.record(runKey,task,entry.getValue());
+                            events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",entry.getValue().total()));
+                        }
+                        completeRun(runKey,candidate);
+                        return;
+                    }
+                    retrieval=revised;
                 }
-                if("MIXED".equals(retrieval.strategy())){
+                plan=retrieval==null?intentPlans.classifyOrDegrade(runKey,current,recent):retrievalPlans.save(runKey,retrieval);
+                if(!isRunning(runKey))return;
+                if(retrieval!=null)events.publish(runKey,"retrieval.plan.ready",Map.of("schemaVersion",2,"strategy",retrieval.strategy()));
+                if(retrieval!=null&&"MIXED".equals(retrieval.strategy())){
                     var page=catalog(runKey,owner,"t1",0);
                     events.publish(runKey,"catalog.completed",Map.of("catalogId","t1","total",page.total()));
                 }
@@ -164,6 +181,52 @@ public class AgentConversationService {
             String upstream=cause.getMessage()!=null&&cause.getMessage().matches("Decision Model HTTP [0-9]{3}")?cause.getMessage():"";
             log.error("[Yanshu][AGENT] event=agent.run.dispatch_failed runKey={} phase={} code={} causeType={} upstream={}",runKey,phase,code,cause.getClass().getSimpleName(),upstream,e);
             AgentRunEntity failed=runs.findByRunKey(runKey).orElseThrow();if(List.of("PENDING","RUNNING").contains(failed.getStatus())){failed.failed(code,"intent".equals(phase)?"意图识别服务暂时不可用":"Agent runtime is temporarily unavailable");runs.save(failed);recordRun(runKey,"FAILED",code);events.publish(runKey,"run.failed",Map.of("runKey",runKey,"code",code,"message","intent".equals(phase)?"意图识别服务暂时不可用，请稍后重试":"Agent 服务暂时不可用，请稍后重试"));}}
+    }
+    private boolean isRunning(String runKey){
+        return runs.findByRunKey(runKey).map(run->"RUNNING".equals(run.getStatus())).orElse(false);
+    }
+
+    private String reviewCandidate(String runKey,AgentSessionEntity session,String question,String candidate){
+        var review=new LinkedHashMap<String,Object>();
+        review.put("schemaVersion",1);
+        review.put("status","READY");
+        review.put("intents",List.of("GENERAL_CHAT"));
+        review.put("policyKeys",List.of("CHAT"));
+        review.put("constraints",List.of());
+        review.put("allowedArtifacts",List.of("ANSWER"));
+        review.put("recommendSkills",false);
+        review.put("reviewCandidate",candidate.substring(0,Math.min(candidate.length(),20_000)));
+        var result=new java.util.concurrent.atomic.AtomicReference<String>();
+        events.publish(runKey,"run.phase",Map.of("runKey",runKey,"phase","COMPOSING","message","正在核对检索结果"));
+        try{
+            runtime.run(new AgentRuntimeClient.RunRequest(runKey+"-review",session.getSessionKey(),
+                    List.of(new AgentRuntimeClient.Message("USER",question)),"review-only",null,null,false,review),event->{
+                if("runtime.completed".equals(event.type()))result.set(String.valueOf(event.data().get("finalResponse")));
+            });
+            if(result.get()==null)return null;
+            String response=result.get().strip().replaceFirst("^```(?:json)?\\s*","").replaceFirst("\\s*```$","");
+            var decision=json.readTree(response);
+            String kind=decision.path("resourceKind").asText("");
+            String verdict=decision.path("decision").asText();
+            if("RETRY".equals(verdict)&&Set.of("DOCUMENT","SKILL","ASDM-TOOL").contains(kind)){
+                log.info("event=agent.candidate_review runKey={} verdict=RETRY resourceKind={}",runKey,kind);
+                return kind;
+            }
+            if("ACCEPT".equals(verdict))log.info("event=agent.candidate_review runKey={} verdict=ACCEPT",runKey);
+            return null;
+        }catch(Exception failure){
+            log.warn("event=agent.candidate_review_unavailable runKey={} errorType={}",runKey,failure.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private RetrievalPlanner.Plan retryPlan(RetrievalPlanner.Plan candidate,String kind,String question){
+        var roles=candidate.roles().stream().map(QueryEntityResolver.Mention::roleId).distinct().toList();
+        if(roles.size()!=1||candidate.tasks().size()>1)return null;
+        var prior=candidate.task();
+        String category=prior!=null&&prior.resourceKind().equals(kind)?prior.category():
+                "DOCUMENT".equals(kind)&&question.matches("(?s).*(?:上下文|项目背景|项目资料).*")?"PROJECT_CONTEXT":null;
+        return new RetrievalPlanner.Plan("SEMANTIC",new RetrievalPlanner.Task("t1",roles.get(0),kind,category),candidate.roles());
     }
     private void handleRuntime(String runKey,AgentRuntimeClient.RuntimeEvent event){
         Map<String,Object> data=new LinkedHashMap<>(event.data());data.put("runKey",runKey);

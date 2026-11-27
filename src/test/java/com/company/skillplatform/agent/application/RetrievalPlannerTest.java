@@ -41,4 +41,26 @@ class RetrievalPlannerTest {
                 new RetrievalPlanner.Task("t1",26,"DOCUMENT","PROJECT_CONTEXT"),
                 new RetrievalPlanner.Task("t2",21,"DOCUMENT","PROJECT_CONTEXT"));
     }
+    @Test void asdmInRoleNameDoesNotChangeRequestedResourceType() {
+        var resolver=mock(QueryEntityResolver.class);
+        String role="兼职asdm开发角色";
+        when(resolver.resolve(eq(5L),eq("USER_VISIBLE"),contains(role)))
+                .thenReturn(List.of(new QueryEntityResolver.Mention(26,role,"RDNexus",5,5+role.length())));
+        var planner=new RetrievalPlanner(resolver,mock(RetrievalPlanStore.class),true);
+        var wiki=planner.plan("run",5,"USER_VISIBLE","帮我查一下兼职asdm开发角色的上下文").orElseThrow();
+        assertThat(wiki.strategy()).isEqualTo("CATALOG");
+        assertThat(wiki.task()).isEqualTo(new RetrievalPlanner.Task("t1",26,"DOCUMENT","PROJECT_CONTEXT"));
+        var tool=planner.plan("run",5,"USER_VISIBLE","帮我查一下兼职asdm开发角色的ASDM工具包").orElseThrow();
+        assertThat(tool.task().resourceKind()).isEqualTo("ASDM-TOOL");
+    }
+    @Test void explicitSingleRoleContextAnalysisDoesNotRequireClarification() {
+        var resolver=mock(QueryEntityResolver.class);
+        String role="兼职asdm开发角色";
+        when(resolver.resolve(eq(5L),eq("USER_VISIBLE"),contains(role)))
+                .thenReturn(List.of(new QueryEntityResolver.Mention(26,role,"RDNexus",4,4+role.length())));
+        var planner=new RetrievalPlanner(resolver,mock(RetrievalPlanStore.class),true);
+        var result=planner.plan("run",5,"USER_VISIBLE","分析一下兼职asdm开发角色的项目上下文").orElseThrow();
+        assertThat(result.strategy()).isEqualTo("SEMANTIC");
+        assertThat(result.task()).isEqualTo(new RetrievalPlanner.Task("t1",26,"DOCUMENT","PROJECT_CONTEXT"));
+    }
 }

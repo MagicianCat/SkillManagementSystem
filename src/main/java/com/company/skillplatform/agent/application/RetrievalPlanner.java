@@ -64,10 +64,11 @@ public class RetrievalPlanner {
         if(mixed.isPresent())return mixed;
         var combined=combineCatalogs(user,scope,text);
         if(combined.isPresent())return combined;
-        boolean context=CONTEXT.matcher(text).find();
-        boolean skills=SKILLS.matcher(text).find();
-        boolean asdm=ASDM.matcher(text).find();
         var mentions=resolver.resolve(user,scope,scopedQuery);
+        String intentText=withoutRoleNames(text,mentions);
+        boolean context=CONTEXT.matcher(intentText).find();
+        boolean skills=SKILLS.matcher(intentText).find();
+        boolean asdm=ASDM.matcher(intentText).find();
         if(mentions.isEmpty()){
             if(!REFERENCE.matcher(text).find()||text.contains("不限定角色")||text.contains("不用限定角色")){
                 if((context||skills||asdm)&&text.matches(".*(?:项目组|外部角色|指定角色).*"))
@@ -82,7 +83,13 @@ public class RetrievalPlanner {
         }
         var roles=mentions.stream().distinct().collect(java.util.stream.Collectors.toMap(
                 QueryEntityResolver.Mention::roleId, item->item,(a,b)->a,LinkedHashMap::new));
-        if(roles.size()!=1 || COMPLEX.matcher(text).find() || (context?1:0)+(skills?1:0)+(asdm?1:0)>1)
+        var analysisRequest=Pattern.compile("^\\s*(?:请|帮我)?\\s*(?:分析一下|分析|总结一下|总结)\\s*").matcher(intentText);
+        if(roles.size()==1&&context&&!skills&&!asdm&&analysisRequest.find()
+                &&!COMPLEX.matcher(intentText.substring(analysisRequest.end())).find()){
+            return Optional.of(new Plan("SEMANTIC",new Task("t1",roles.keySet().iterator().next(),
+                    "DOCUMENT","PROJECT_CONTEXT"),List.copyOf(roles.values())));
+        }
+        if(roles.size()!=1 || COMPLEX.matcher(intentText).find() || (context?1:0)+(skills?1:0)+(asdm?1:0)>1)
             return Optional.of(new Plan("CLARIFY",null,List.copyOf(roles.values())));
         if(!context&&!skills&&!asdm)return Optional.of(new Plan("SEMANTIC",
                 new Task("t1",roles.keySet().iterator().next(),"DOCUMENT",null),List.copyOf(roles.values())));
@@ -143,7 +150,8 @@ public class RetrievalPlanner {
             boolean ambiguous=entries.stream().anyMatch(a->entries.stream().anyMatch(b->a.roleId()!=b.roleId()
                     &&a.start()==b.start()&&a.end()==b.end()));
             if(ambiguous||distinct.isEmpty()||(!comparison&&distinct.size()!=1))return Optional.empty();
-            boolean wiki=CONTEXT.matcher(clause).find(), skills=SKILLS.matcher(clause).find(), asdm=ASDM.matcher(clause).find();
+            String intent=withoutRoleNames(QueryEntityResolver.normalize(clause),entries);
+            boolean wiki=CONTEXT.matcher(intent).find(), skills=SKILLS.matcher(intent).find(), asdm=ASDM.matcher(intent).find();
             if((wiki?1:0)+(skills?1:0)+(asdm?1:0)!=1)return Optional.empty();
             for(var role:distinct.values().stream().sorted(Comparator.comparingInt(QueryEntityResolver.Mention::start)).toList()){
                 roles.add(role);
@@ -151,6 +159,15 @@ public class RetrievalPlanner {
             }
         }
         return tasks.size()>1&&tasks.size()<=4?Optional.of(new Plan("CATALOG",tasks.get(0),roles,tasks)):Optional.empty();
+    }
+
+    private String withoutRoleNames(String text,List<QueryEntityResolver.Mention> mentions) {
+        char[] characters=text.toCharArray();
+        for(var mention:mentions){
+            if(mention.start()>=0&&mention.end()>=mention.start()&&mention.end()<=characters.length)
+                Arrays.fill(characters,mention.start(),mention.end(),' ');
+        }
+        return new String(characters);
     }
 
     public record Plan(String strategy,Task task,List<QueryEntityResolver.Mention> roles,List<Task> tasks) {
