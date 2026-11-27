@@ -20,6 +20,28 @@ public class RetrievalPlanner {
         this.resolver=resolver;this.plans=plans;this.enabled=enabled;
     }
 
+    public boolean enabled(){return enabled;}
+
+    public boolean mentionsRole(long user,String scope,String question){
+        return !resolver.resolve(user,scope,question).isEmpty();
+    }
+
+    public Optional<Plan> fastCatalog(long user,String scope,String query){
+        String text=QueryEntityResolver.normalize(query);
+        var matches=resolver.resolve(user,scope,text);
+        if(matches.size()!=1)return Optional.empty();
+        var role=matches.get(0);
+        String matched=text.substring(role.start(),role.end());
+        if(matched.codePointCount(0,matched.length())<3)return Optional.empty();
+        String grammar=text.substring(0,role.start())+"@"+text.substring(role.end());
+        var action=Pattern.compile("^(?:请|帮我)?\\s*(?:查一下|查询|查找|找一下|找|列出|获取|查看)?\\s*@\\s*(?:的)?\\s*(项目上下文|上下文|项目背景|全部\\s*skill|所有\\s*skill|skill\\s*清单|asdm\\s*工具包)[。？?！!]*$").matcher(grammar);
+        if(!action.matches())return Optional.empty();
+        String object=action.group(1);
+        String kind=object.contains("asdm")?"ASDM-TOOL":object.contains("skill")?"SKILL":"DOCUMENT";
+        return Optional.of(new Plan("CATALOG",new Task("t1",role.roleId(),kind,
+                "DOCUMENT".equals(kind)?"PROJECT_CONTEXT":null),matches));
+    }
+
     public Optional<Plan> plan(String runKey,long user,String scope,String query) {
         if(!enabled)return Optional.empty();
         String text=QueryEntityResolver.normalize(query);
@@ -178,11 +200,21 @@ public class RetrievalPlanner {
             if(tasks==null)tasks=task==null?List.of():List.of(task);
             tasks=List.copyOf(tasks);
         }
+        public boolean isCatalog(Task target){
+            return target.strategy()!=null?"CATALOG".equals(target.strategy()):
+                    Set.of("CATALOG","MIXED").contains(strategy)&&!"RECOMMEND".equals(target.resourceKind());
+        }
         public String roleName(Task target){
             return roles.stream().filter(role->role.roleId()==target.roleId()).findFirst().orElseThrow().name();
         }
     }
-    public record Task(String taskId,long roleId,String resourceKind,String category,String stage,Long objectId,Long versionId,String skillKey) {
+    public record Task(String taskId,long roleId,String resourceKind,String category,String stage,Long objectId,Long versionId,String skillKey,String strategy,String audience) {
+        public Task(String id,long role,String kind,String category,String stage,Long objectId,Long versionId,String skillKey,String strategy){
+            this(id,role,kind,category,stage,objectId,versionId,skillKey,strategy,null);
+        }
+        public Task(String id,long role,String kind,String category,String stage,Long objectId,Long versionId,String skillKey){
+            this(id,role,kind,category,stage,objectId,versionId,skillKey,null);
+        }
         public Task(String id,long role,String kind,String category,String stage){this(id,role,kind,category,stage,null,null,null);}
         public Task(String taskId,long roleId,String resourceKind,String category){this(taskId,roleId,resourceKind,category,null);}
     }

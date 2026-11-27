@@ -7,6 +7,27 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class RetrievalPlannerTest {
+    @Test void fastCatalogMasksRoleNameAndDefersAnalysis() {
+        var resolver = mock(QueryEntityResolver.class);
+        var planner = new RetrievalPlanner(resolver, mock(RetrievalPlanStore.class), true);
+        String role = "兼职asdm开发角色";
+        String catalog = "查一下" + role + "的项目上下文";
+        String analysis = "分析一下" + role + "的项目上下文";
+        when(resolver.resolve(5, "USER_VISIBLE", catalog))
+                .thenReturn(List.of(new QueryEntityResolver.Mention(62, role, "source-a", 3, 3 + role.length())));
+        when(resolver.resolve(5, "USER_VISIBLE", analysis))
+                .thenReturn(List.of(new QueryEntityResolver.Mention(62, role, "source-a", 4, 4 + role.length())));
+
+        assertThat(planner.fastCatalog(5, "USER_VISIBLE", catalog).orElseThrow().task())
+                .isEqualTo(new RetrievalPlanner.Task("t1", 62, "DOCUMENT", "PROJECT_CONTEXT"));
+        assertThat(planner.fastCatalog(5, "USER_VISIBLE", analysis)).isEmpty();
+
+        when(resolver.resolve(5, "USER_VISIBLE", catalog)).thenReturn(List.of(
+                new QueryEntityResolver.Mention(62, role, "source-a", 3, 3 + role.length()),
+                new QueryEntityResolver.Mention(63, role, "source-b", 3, 3 + role.length())));
+        assertThat(planner.fastCatalog(5, "USER_VISIBLE", catalog)).isEmpty();
+    }
+
     @Test void mixedRequestKeepsWikiAndRecommendationScopesIndependent() {
         var resolver=mock(QueryEntityResolver.class);
         var store=mock(RetrievalPlanStore.class);

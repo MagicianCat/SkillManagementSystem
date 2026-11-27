@@ -23,11 +23,38 @@ public class ExternalRoleDirectoryService {
         return find(user,scope,normalizedName,source,false);
     }
 
+    private final Map<MatchKey, CachedMatch> matchCache=new LinkedHashMap<>(32,0.75f,true);
+
+    public RoleNameMatcher.Result match(long user,String scope,String source,String query,int limit,boolean exact) {
+        var visible=visibleNames(user,scope,source);
+        var key=new MatchKey(user,scope,source,query,limit,exact);
+        long now=System.nanoTime();
+        synchronized(matchCache){
+            var cached=matchCache.get(key);
+            if(cached!=null&&now-cached.created()<30_000_000_000L&&cached.terms().equals(visible))return cached.result();
+        }
+        var result=RoleNameMatcher.search(visible,query,limit,exact);
+        if(visible.size()<=500){
+            synchronized(matchCache){
+                matchCache.put(key,new CachedMatch(visible,result,now));
+                while(matchCache.size()>128)matchCache.remove(matchCache.keySet().iterator().next());
+            }
+        }
+        return result;
+    }
+
+    private record MatchKey(long user,String scope,String source,String query,int limit,boolean exact){}
+    private record CachedMatch(List<Name> terms,RoleNameMatcher.Result result,long created){}
+
+    public List<Name> visibleNames(long user,String scope,String source){
+        return find(user,scope,null,source,false);
+    }
+
     private List<Name> find(long user,String scope,String text,String source,boolean mention) {
         var args=new HashMap<String,Object>();
         args.put("text",text);args.put("source",source);args.put("teams",catalogs.teams(user,scope));
-        args.put("like","%"+text.replace("!","!!").replace("%","!%").replace("_","!_")+"%");
-        String match=mention?"LOCATE(c.term,:text)>0":"c.term LIKE :like ESCAPE '!'";
+        args.put("like",text==null?null:"%"+text.replace("!","!!").replace("%","!%").replace("_","!_")+"%");
+        String match=text==null?"1=1":mention?"LOCATE(c.term,:text)>0":"c.term LIKE :like ESCAPE '!'";
         return db.query("""
                 WITH candidates AS (
                   SELECT id,LOWER(TRIM(role_name)) term FROM external_role
@@ -54,7 +81,7 @@ public class ExternalRoleDirectoryService {
                   OR EXISTS (SELECT 1 FROM external_role_resource rr JOIN external_resource r ON r.id=rr.resource_id
                 """+WIKI+ASDM+PLATFORM+" WHERE rr.role_id=er.id AND "+ASDM_VISIBLE+"""
                   )
-                 ) ORDER BY er.id,c.term
+                 ) ORDER BY er.id,c.term LIMIT 5001
                 """,args,(rs,row)->new Name(rs.getLong(1),rs.getString(2),rs.getString(3),rs.getString(4),rs.getString(5)));
     }
 

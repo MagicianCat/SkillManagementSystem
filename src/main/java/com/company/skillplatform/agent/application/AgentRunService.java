@@ -163,6 +163,10 @@ public class AgentRunService {
         catch (Exception e) { throw new BusinessException("AGENT_TOKEN_INVALID", "Invalid agent run token", HttpStatus.UNAUTHORIZED); }
     }
     public void requireCapability(AgentRun run, String capability) {
+        if(java.util.Set.of("role.resolve","retrieval.task.propose").contains(capability)
+                &&(run.sessionKey()!=null||run.projectKey()!=null||run.runRef()==null||run.runRef().startsWith("workflow-")))
+            throw new BusinessException("AGENT_CAPABILITY_DENIED","Agent capability is not allowed",HttpStatus.FORBIDDEN);
+
         if (run.sessionKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate", "feishu.read", "wiki.search", "wiki.read").contains(capability)) return;
         if (run.projectKey() != null && java.util.Set.of("project.context.read", "project.artifact.list", "project.artifact.read", "project.artifact.write", "project.artifact.validate").contains(capability)) return;
         if (run.runRef() != null && run.runRef().startsWith("workflow-") && java.util.Set.of(
@@ -171,7 +175,7 @@ public class AgentRunService {
                 "code_graph.trace", "code_graph.route_map").contains(capability)) return;
         if (!"skill-advisor".equals(run.profileKey()) || !java.util.Set.of(
                 "user.context.read", "skill.search", "skill.detail", "skill.file.read", "wiki.search", "wiki.read",
-                "knowledge.search", "knowledge.catalog.list", "retrieval.plan.read", "retrieval.task.refine", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
+                "knowledge.search", "knowledge.catalog.list", "retrieval.plan.read", "retrieval.task.refine", "role.resolve", "retrieval.task.propose", "feishu.search", "feishu.read", "recommendation.submit").contains(capability)) {
             throw new BusinessException("AGENT_CAPABILITY_DENIED", "Agent capability is not allowed", HttpStatus.FORBIDDEN);
         }
         if (run.runRef()!=null && intentPlans!=null && !intentPlans.allows(run.runRef(),capability))

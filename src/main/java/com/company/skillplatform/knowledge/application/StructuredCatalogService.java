@@ -47,6 +47,17 @@ public class StructuredCatalogService {
     }
 
     public Page list(long user,String scope,long roleId,String kind,String category,int page,int size,String keyword,Long parentId) {
+        return list(user,scope,roleId,kind,category,page,size,keyword,parentId,null);
+    }
+
+    public boolean hasVersion(long user,String scope,long roleId,String kind,String category,long objectId,long versionId,String audience) {
+        String effectiveScope="PLATFORM".equals(audience)?"PLATFORM_PUBLIC_ONLY":scope;
+        return list(user,effectiveScope,roleId,kind,category,0,1,null,null,objectId).items().stream().anyMatch(row->
+                ((Number)row.get("versionId")).longValue()==versionId &&
+                Objects.equals(Objects.toString(row.get("audience"),""),audience));
+    }
+
+    private Page list(long user,String scope,long roleId,String kind,String category,int page,int size,String keyword,Long parentId,Long objectId) {
         int limit=Math.min(50,Math.max(1,size));
         if(page<0)throw new IllegalArgumentException("Invalid catalog page");
         List<Long> teamIds=teams(user,scope);
@@ -79,6 +90,10 @@ public class StructuredCatalogService {
                     """;
             default -> throw new IllegalArgumentException("Unsupported catalog kind");
         };
+        if(objectId!=null){
+            args.put("objectId",objectId);
+            query="SELECT * FROM ("+query+") selected WHERE id=:objectId";
+        }
         long total=Objects.requireNonNull(db.queryForObject("SELECT COUNT(*) FROM ("+query+") catalog",args,Long.class));
         var rows=db.queryForList(query+" ORDER BY id LIMIT :limit OFFSET :offset",args);
         for(var row:rows){

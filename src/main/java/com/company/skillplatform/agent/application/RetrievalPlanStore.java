@@ -13,9 +13,9 @@ public class RetrievalPlanStore {
     private final ObjectMapper json;
     public RetrievalPlanStore(JdbcTemplate db,ObjectMapper json){this.db=db;this.json=json;}
 
-    public Map<String,Object> save(String runKey,RetrievalPlanner.Plan plan) {
+    Map<String,Object> payload(RetrievalPlanner.Plan plan) {
         boolean general="GENERAL".equals(plan.strategy());
-        var capabilities=new ArrayList<>(List.of("user.context.read","knowledge.search","wiki.read","wiki.search","knowledge.catalog.list","retrieval.plan.read","retrieval.task.refine"));
+        var capabilities=new ArrayList<>(List.of("user.context.read","knowledge.search","wiki.read","wiki.search","knowledge.catalog.list","retrieval.plan.read","retrieval.task.refine","role.resolve","retrieval.task.propose"));
         boolean recommend=plan.tasks().stream().anyMatch(task->"RECOMMEND".equals(task.resourceKind()));
         if(plan.tasks().stream().anyMatch(task->"SKILL_READ".equals(task.resourceKind())))capabilities.addAll(List.of("skill.detail","skill.file.read"));
         if(recommend)capabilities.addAll(List.of("skill.search","skill.detail","skill.file.read","recommendation.submit"));
@@ -42,21 +42,31 @@ public class RetrievalPlanStore {
         result.put("policyKeys",general?List.of("CHAT"):recommend?List.of("WIKI","SKILL"):enterprise?List.of("KNOWLEDGE"):List.of("WIKI"));
         result.put("recommendSkills",recommend);
         result.put("retrieval",plan);
+        return result;
+    }
+
+    public Map<String,Object> save(String runKey,RetrievalPlanner.Plan plan) {
+        var result=payload(plan);
+        insert(runKey,result,2);
+        return result;
+    }
+
+    void insert(String runKey,Map<String,Object> result,int schema) {
         db.update("""
                 INSERT INTO agent_run_intent_plan(run_key,status,intents_json,constraints_json,allowed_artifacts_json,
                     allowed_capabilities_json,registry_snapshot_json,model_key,decision_latency_ms,schema_version,
                     retrieval_plan_json,model_advice_json,plan_revision)
-                VALUES (?,'READY',?,'[]',?,?,'{}','deterministic',0,2,?,
+                VALUES (?,?,?,?,?,?,'{}','deterministic',0,?,?,
                     '{"status":"SKIPPED"}',1)
-                """,runKey,encode(intents),encode(artifacts),encode(capabilities),encode(result));
-        return result;
+                """,runKey,result.get("status"),encode(result.get("intents")),encode(result.get("constraints")),
+                encode(result.get("allowedArtifacts")),encode(result.get("allowedCapabilities")),schema,encode(result));
     }
 
     public Optional<RetrievalPlanner.Plan> find(String runKey) {
         if(runKey==null)return Optional.empty();
         return db.query("""
-                SELECT retrieval_plan_json FROM agent_run_intent_plan WHERE run_key=? AND schema_version=2
-                """,(rs,row)->decode(rs.getString(1)),runKey).stream().findFirst();
+                SELECT retrieval_plan_json FROM agent_run_intent_plan WHERE run_key=? AND schema_version IN (2,3)
+                """,(rs,row)->decode(rs.getString(1)),runKey).stream().filter(Objects::nonNull).findFirst();
     }
 
     @Transactional
@@ -67,7 +77,7 @@ public class RetrievalPlanStore {
                 SELECT p.retrieval_plan_json,m.content FROM agent_run_intent_plan p
                 JOIN agent_run r ON r.run_key=p.run_key
                 JOIN agent_message m ON m.run_id=r.id AND m.role='USER'
-                WHERE p.run_key=? AND p.plan_revision=? AND p.schema_version=2 AND r.status='RUNNING'
+                WHERE p.run_key=? AND p.plan_revision=? AND p.schema_version IN (2,3) AND r.status='RUNNING'
                 """,(rs,index)->new String[]{rs.getString(1),rs.getString(2)},runKey,revision);
         if(rows.size()!=1||!rows.get(0)[1].contains(evidence))throw RetrievalScopeGuard.denied();
         String requiredText=switch(category==null?"":category){
@@ -82,12 +92,12 @@ public class RetrievalPlanStore {
         var task=plan.tasks().stream().filter(item->item.taskId().equals(taskId)&&"DOCUMENT".equals(item.resourceKind()))
                 .findFirst().orElseThrow(RetrievalScopeGuard::denied);
         if(task.category()!=null&&!task.category().equals(category))throw RetrievalScopeGuard.denied();
-        var narrowed=new RetrievalPlanner.Task(task.taskId(),task.roleId(),task.resourceKind(),category,task.stage());
+        var narrowed=new RetrievalPlanner.Task(task.taskId(),task.roleId(),task.resourceKind(),category,task.stage(),task.objectId(),task.versionId(),task.skillKey(),task.strategy(),task.audience());
         var tasks=plan.tasks().stream().map(item->item.taskId().equals(taskId)?narrowed:item).toList();
         var updated=new RetrievalPlanner.Plan(plan.strategy(),tasks.get(0),plan.roles(),tasks);
         int count=db.update("""
                 UPDATE agent_run_intent_plan SET retrieval_plan_json=JSON_SET(retrieval_plan_json,'$.retrieval',CAST(? AS JSON)),
-                    plan_revision=plan_revision+1 WHERE run_key=? AND plan_revision=? AND schema_version=2
+                    plan_revision=plan_revision+1 WHERE run_key=? AND plan_revision=? AND schema_version IN (2,3)
                 """,encode(updated),runKey,revision);
         if(count!=1)throw RetrievalScopeGuard.denied();
         return Map.of("revision",revision+1,"retrieval",updated);
@@ -102,19 +112,81 @@ public class RetrievalPlanStore {
         return db.query("""
                 SELECT p.retrieval_plan_json FROM agent_run current_run
                 JOIN agent_run prev ON prev.session_id=current_run.session_id AND prev.run_no=current_run.run_no-1
-                JOIN agent_run_intent_plan p ON p.run_key=prev.run_key AND p.schema_version=2
+                JOIN agent_run_intent_plan p ON p.run_key=prev.run_key AND p.schema_version IN (2,3)
                 WHERE current_run.run_key=? AND prev.status='SUCCEEDED'
                   AND EXISTS (SELECT 1 FROM agent_run_retrieval_evidence evidence WHERE evidence.run_key=prev.run_key)
-                """,(rs,row)->decode(rs.getString(1)),runKey).stream().findFirst();
+                """,(rs,row)->decode(rs.getString(1)),runKey).stream().filter(Objects::nonNull).findFirst();
     }
 
     @Transactional
     public void record(String runKey,RetrievalPlanner.Task task,StructuredCatalogService.Page page) {
         for(var item:page.items())db.update("""
                 INSERT INTO agent_run_retrieval_evidence(run_key,task_id,evidence_kind,object_key,version_key,audience,metadata_json)
-                VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE metadata_json=VALUES(metadata_json)
+                VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE metadata_json=JSON_MERGE_PATCH(metadata_json,VALUES(metadata_json))
                 """,runKey,task.taskId(),task.resourceKind(),String.valueOf(item.get("id")),String.valueOf(item.get("versionId")),
                 String.valueOf(item.getOrDefault("audience","")),encode(item));
+    }
+
+    public List<PriorReference> priorReferences(String runKey) {
+        return db.query("""
+                SELECT e.id,e.task_id,e.evidence_kind,e.object_key,e.version_key,e.audience,
+                    e.metadata_json,p.retrieval_plan_json
+                FROM agent_run current_run
+                JOIN agent_run prev ON prev.session_id=current_run.session_id AND prev.run_no=current_run.run_no-1
+                JOIN agent_run_intent_plan p ON p.run_key=prev.run_key AND p.schema_version IN (2,3)
+                JOIN agent_run_retrieval_evidence e ON e.run_key=prev.run_key
+                WHERE current_run.run_key=? AND prev.status='SUCCEEDED'
+                ORDER BY e.id LIMIT 120
+                """,(rs,row)->{
+            var plan=decode(rs.getString(8));
+            if(plan==null)return null;
+            String taskId=rs.getString(2);
+            var task=plan.tasks().stream().filter(t->t.taskId().equals(taskId)).findFirst().orElse(null);
+            if(task==null||task.roleId()==0)return null;
+            var meta=metadata(rs.getString(7));
+            return new PriorReference(rs.getLong(1),task.roleId(),plan.roleName(task),rs.getString(3),
+                    Long.parseLong(rs.getString(4)),Long.parseLong(rs.getString(5)),rs.getString(6),
+                    meta.path("title").asText(),meta.path("skillKey").asText(null),
+                    meta.path("presentedOrdinal").asInt(0),task.category(),meta.path("accessed").asBoolean());
+        },runKey).stream().filter(Objects::nonNull).toList();
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode metadata(String value) {
+        try{return json.readTree(value);}
+        catch(com.fasterxml.jackson.core.JsonProcessingException e){throw new IllegalStateException(e);}
+    }
+
+    @Transactional
+    public void markPresented(String runKey,RetrievalPlanner.Task task,StructuredCatalogService.Page page) {
+        if(page.page()!=0)return;
+        for(int index=0;index<page.items().size();index++){
+            var item=page.items().get(index);
+            db.update("""
+                    UPDATE agent_run_retrieval_evidence
+                    SET metadata_json=JSON_SET(metadata_json,'$.presentedOrdinal',?)
+                    WHERE run_key=? AND task_id=? AND object_key=? AND version_key=?
+                    """,index+1,runKey,task.taskId(),String.valueOf(item.get("id")),String.valueOf(item.get("versionId")));
+        }
+    }
+
+    public record PriorReference(long referenceId,long roleId,String roleName,String kind,long objectId,long versionId,
+                                 String audience,String title,String skillKey,int ordinal,String category,boolean accessed){}
+
+    public void recordWikiRead(String runKey,RetrievalPlanner.Task task,long id,long version,String audience,String title) {
+        recordRead(runKey,task,"DOCUMENT",id,version,audience,Map.of("title",title,"accessed",true));
+    }
+
+    public void recordSkillRead(String runKey,RetrievalPlanner.Task task,String title) {
+        recordRead(runKey,task,"SKILL",task.objectId(),task.versionId(),"",
+                Map.of("title",title,"skillKey",task.skillKey(),"accessed",true));
+    }
+
+    private void recordRead(String runKey,RetrievalPlanner.Task task,String kind,long id,long version,String audience,
+                            Map<String,Object> metadata) {
+        db.update("""
+                INSERT INTO agent_run_retrieval_evidence(run_key,task_id,evidence_kind,object_key,version_key,audience,metadata_json)
+                VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE metadata_json=JSON_MERGE_PATCH(metadata_json,VALUES(metadata_json))
+                """,runKey,task.taskId(),kind,String.valueOf(id),String.valueOf(version),audience,encode(metadata));
     }
 
     public Optional<SkillReference> priorSkill(String runKey,int ordinal) {
@@ -158,11 +230,11 @@ public class RetrievalPlanStore {
     }
 
     private RetrievalPlanner.Plan decode(String value) {
-        try{return json.treeToValue(json.readTree(value).path("retrieval"),RetrievalPlanner.Plan.class);}
+        try{var node=json.readTree(value).path("retrieval");return node.isObject()?json.treeToValue(node,RetrievalPlanner.Plan.class):null;}
         catch(Exception failure){throw new IllegalStateException("Invalid persisted retrieval plan",failure);}
     }
 
-    private String encode(Object value) {
+    String encode(Object value) {
         try{return json.writeValueAsString(value);}
         catch(Exception failure){throw new IllegalStateException("Cannot serialize retrieval plan",failure);}
     }

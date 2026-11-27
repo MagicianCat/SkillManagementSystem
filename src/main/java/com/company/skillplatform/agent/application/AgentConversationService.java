@@ -68,15 +68,19 @@ public class AgentConversationService {
     @Transactional(readOnly=true) public RunView run(String key,Long owner){AgentRunEntity run=requireRun(key,owner);return runView(run,recommendation(run));}
     @Transactional public void cancel(String key,Long owner){requireRun(key,owner);if(runs.cancelActiveRun(key,java.time.Instant.now())==0)return;FutureTask<Void> task=queuedTasks.remove(key);if(task!=null){task.cancel(false);if(executor instanceof ThreadPoolExecutor pool)pool.remove(task);}runtime.cancel(key);recordRun(key,"CANCELLED",null);events.publish(key,"run.cancelled",Map.of("runKey",key));}
 
+    @org.springframework.beans.factory.annotation.Value("${agent.retrieval.v3-enabled:false}")
+    private boolean flexibleRetrievalEnabled;
+
     @org.springframework.beans.factory.annotation.Autowired private RetrievalPlanner retrievalPlanner;
+    @org.springframework.beans.factory.annotation.Autowired private io.micrometer.core.instrument.MeterRegistry retrievalMetrics;
     @org.springframework.beans.factory.annotation.Autowired private RetrievalPlanStore retrievalPlans;
     @org.springframework.beans.factory.annotation.Autowired private com.company.skillplatform.knowledge.application.StructuredCatalogService catalogs;
 
     public com.company.skillplatform.knowledge.application.StructuredCatalogService.Page catalog(String runKey,long owner,String taskId,int page) {
         var run=requireRun(runKey,owner);
-        var plan=retrievalPlans.find(runKey).filter(p->Set.of("CATALOG","MIXED").contains(p.strategy()))
+        var plan=retrievalPlans.find(runKey)
                 .orElseThrow(()->error("AGENT_CATALOG_NOT_FOUND","Run has no resource catalog",HttpStatus.NOT_FOUND));
-        var task=plan.tasks().stream().filter(item->item.taskId().equals(taskId)&&!"RECOMMEND".equals(item.resourceKind())).findFirst()
+        var task=plan.tasks().stream().filter(item->item.taskId().equals(taskId)&&plan.isCatalog(item)).findFirst()
                 .orElseThrow(()->error("AGENT_CATALOG_NOT_FOUND","Unknown catalog",HttpStatus.NOT_FOUND));
         var result=catalogs.list(owner,run.getSession().getKnowledgeScope(),task.roleId(),task.resourceKind(),task.category(),page,30);
         retrievalPlans.record(runKey,task,result);
@@ -85,12 +89,20 @@ public class AgentConversationService {
 
     public List<String> catalogIds(String runKey,long owner) {
         requireRun(runKey,owner);
-        return retrievalPlans.find(runKey).filter(plan->Set.of("CATALOG","MIXED").contains(plan.strategy()))
-                .stream().flatMap(plan->plan.tasks().stream()).filter(task->!"RECOMMEND".equals(task.resourceKind()))
+        return retrievalPlans.find(runKey)
+                .stream().flatMap(plan->plan.tasks().stream().filter(plan::isCatalog))
                 .map(RetrievalPlanner.Task::taskId).toList();
     }
 
-    private String renderCatalog(String runKey,RetrievalPlanner.Plan plan,RetrievalPlanner.Task task,com.company.skillplatform.knowledge.application.StructuredCatalogService.Page page) {
+    private String renderCatalog(String runKey,RetrievalPlanner.Plan plan,RetrievalPlanner.Task task,
+                                 com.company.skillplatform.knowledge.application.StructuredCatalogService.Page page) {
+        return renderCatalog(runKey,plan,task,page,Map.of());
+    }
+
+    private String renderCatalog(String runKey,RetrievalPlanner.Plan plan,RetrievalPlanner.Task task,
+                                 com.company.skillplatform.knowledge.application.StructuredCatalogService.Page page,
+                                 Map<String,Set<String>> sharedRoles) {
+        retrievalPlans.markPresented(runKey,task,page);
         String name=plan.roleName(task).replaceAll("[\\r\\n\\[\\]]"," ");
         String label=switch(task.resourceKind()){
             case "SKILL" -> "已发布 Skill";
@@ -102,6 +114,8 @@ public class AgentConversationService {
             String title=String.valueOf(item.get("title")).replaceAll("[\\r\\n\\[\\]]"," ");
             text.append("- [").append(title).append("](").append(item.get("sourceUrl")).append(")");
             if(item.containsKey("downloadUrl"))text.append(" · [下载工具包](").append(item.get("downloadUrl")).append(")");
+            var members=sharedRoles.get(resourceKey(task,item));
+            if(members!=null&&members.size()>1)text.append(" · ").append(String.join("、",members));
             text.append("\n");
         }
         text.append("\n[打开资源目录](/agent?catalogRun=").append(runKey).append("&catalogId=").append(task.taskId()).append(")");
@@ -115,56 +129,39 @@ public class AgentConversationService {
         String phase="intent";
         try{
             events.publish(runKey,"run.phase",Map.of("runKey",runKey,"phase","RECOGNIZING_INTENT","message","正在理解本轮需求"));
-            String current=history.get(history.size()-1).content();
+            String current=messages.findByRunAndRole(run,"USER").map(AgentMessageEntity::getContent).orElseThrow();
             List<String> recent=history.stream().limit(Math.max(0,history.size()-1)).skip(Math.max(0,history.size()-5)).map(AgentRuntimeClient.Message::content).toList();
-            var structured=retrievalPlanner==null || !"skill-advisor".equals(session.getProfileKey())?Optional.<RetrievalPlanner.Plan>empty():
-                    retrievalPlanner.plan(runKey,owner,session.getKnowledgeScope(),current);
             Map<String,Object> plan;
-            if(structured.isPresent()){
-                var retrieval=structured.get();
+            if(retrievalPlanner!=null&&flexibleRetrievalEnabled&&"skill-advisor".equals(session.getProfileKey())){
                 phase="retrieval_plan";
-                if(Set.of("CLARIFY","CATALOG").contains(retrieval.strategy())){
-                    var pages=new LinkedHashMap<RetrievalPlanner.Task,com.company.skillplatform.knowledge.application.StructuredCatalogService.Page>();
-                    String candidate;
-                    if("CLARIFY".equals(retrieval.strategy())){
-                        candidate=retrieval.roles().isEmpty()?"请补充要查询的角色名称。":
-                                "请确认要查询的角色和资料类型。当前匹配："+retrieval.roles().stream()
-                                .map(role->role.name()+"（"+role.source()+"）").distinct()
-                                .collect(java.util.stream.Collectors.joining("、"))+"。有多个目标时，请先指定要处理的一个。";
-                    }else{
-                        var sections=new ArrayList<String>();
-                        for(var task:retrieval.tasks()){
-                            if(!isRunning(runKey))return;
-                            var page=catalogs.list(owner,session.getKnowledgeScope(),task.roleId(),task.resourceKind(),task.category(),0,30);
-                            pages.put(task,page);
-                            sections.add(renderCatalog(runKey,retrieval,task,page));
-                        }
-                        candidate=String.join("\n",sections);
-                    }
-                    if(!isRunning(runKey))return;
-                    String retryKind=reviewCandidate(runKey,session,current,candidate);
-                    if(!isRunning(runKey))return;
-                    var revised=retryKind==null?null:retryPlan(retrieval,retryKind,current);
-                    if(retryKind==null || revised==null&&!retrieval.roles().isEmpty()){
-                        retrievalPlans.save(runKey,retrieval);
-                        for(var entry:pages.entrySet()){
-                            var task=entry.getKey();
-                            retrievalPlans.record(runKey,task,entry.getValue());
-                            events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",entry.getValue().total()));
-                        }
-                        completeRun(runKey,candidate);
+                long routeStarted=System.nanoTime();
+                var fast=retrievalPlanner.fastCatalog(owner,session.getKnowledgeScope(),current);
+                if(!isRunning(runKey))return;
+                if(fast.isPresent()){
+                    var retrieval=fast.get();
+                    var task=retrieval.task();
+                    retrievalPlans.save(runKey,retrieval);
+                    var page=catalog(runKey,owner,task.taskId(),0);
+                    observeRoute(runKey,"FAST_CATALOG",routeStarted,page.total());
+                    events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",page.total()));
+                    completeRun(runKey,renderCatalog(runKey,retrieval,task,page));
+                    return;
+                }
+                plan=discovery.begin(runKey,current,retrievalPlanner.mentionsRole(owner,session.getKnowledgeScope(),current));
+                observeRoute(runKey,"DSH_DISCOVERY",routeStarted,null);
+                events.publish(runKey,"retrieval.plan.ready",Map.of("schemaVersion",3,"strategy","DISCOVERY"));
+            }else{
+                var legacy=retrievalPlanner!=null&&"skill-advisor".equals(session.getProfileKey())?
+                        retrievalPlanner.plan(runKey,owner,session.getKnowledgeScope(),current)
+                                .filter(item->!"CLARIFY".equals(item.strategy())):Optional.<RetrievalPlanner.Plan>empty();
+                if(legacy.isPresent()){
+                    plan=retrievalPlans.save(runKey,legacy.get());
+                    if("CATALOG".equals(legacy.get().strategy())){
+                        completeRun(runKey,withMixedCatalog(runKey,""));
                         return;
                     }
-                    retrieval=revised;
-                }
-                plan=retrieval==null?intentPlans.classifyOrDegrade(runKey,current,recent):retrievalPlans.save(runKey,retrieval);
-                if(!isRunning(runKey))return;
-                if(retrieval!=null)events.publish(runKey,"retrieval.plan.ready",Map.of("schemaVersion",2,"strategy",retrieval.strategy()));
-                if(retrieval!=null&&"MIXED".equals(retrieval.strategy())){
-                    var page=catalog(runKey,owner,"t1",0);
-                    events.publish(runKey,"catalog.completed",Map.of("catalogId","t1","total",page.total()));
-                }
-            } else plan=intentPlans.classifyOrDegrade(runKey,current,recent);
+                }else plan=intentPlans.classifyOrDegrade(runKey,current,recent);
+            }
             if(!"RUNNING".equals(runs.findByRunKey(runKey).orElseThrow().getStatus()))return;
             if("CONFLICT".equals(plan.get("status"))){completeRun(runKey,"你同时要求推荐和排除 Skill，请明确本轮是否需要 Skill 推荐。");return;}
             phase="issue_token";
@@ -182,52 +179,19 @@ public class AgentConversationService {
             log.error("[Yanshu][AGENT] event=agent.run.dispatch_failed runKey={} phase={} code={} causeType={} upstream={}",runKey,phase,code,cause.getClass().getSimpleName(),upstream,e);
             AgentRunEntity failed=runs.findByRunKey(runKey).orElseThrow();if(List.of("PENDING","RUNNING").contains(failed.getStatus())){failed.failed(code,"intent".equals(phase)?"意图识别服务暂时不可用":"Agent runtime is temporarily unavailable");runs.save(failed);recordRun(runKey,"FAILED",code);events.publish(runKey,"run.failed",Map.of("runKey",runKey,"code",code,"message","intent".equals(phase)?"意图识别服务暂时不可用，请稍后重试":"Agent 服务暂时不可用，请稍后重试"));}}
     }
+    private void observeRoute(String runKey,String route,long started,Long catalogTotal){
+        long elapsed=System.nanoTime()-started;
+        retrievalMetrics.timer("agent.retrieval.route","route",route).record(elapsed,java.util.concurrent.TimeUnit.NANOSECONDS);
+        if(catalogTotal!=null)retrievalMetrics.summary("agent.retrieval.catalog.size","route",route).record(catalogTotal);
+        log.info("[Yanshu][AGENT] runKey={} route={} elapsedMs={} catalogTotal={}",runKey,route,elapsed/1_000_000,catalogTotal);
+    }
+
     private boolean isRunning(String runKey){
         return runs.findByRunKey(runKey).map(run->"RUNNING".equals(run.getStatus())).orElse(false);
     }
 
-    private String reviewCandidate(String runKey,AgentSessionEntity session,String question,String candidate){
-        var review=new LinkedHashMap<String,Object>();
-        review.put("schemaVersion",1);
-        review.put("status","READY");
-        review.put("intents",List.of("GENERAL_CHAT"));
-        review.put("policyKeys",List.of("CHAT"));
-        review.put("constraints",List.of());
-        review.put("allowedArtifacts",List.of("ANSWER"));
-        review.put("recommendSkills",false);
-        review.put("reviewCandidate",candidate.substring(0,Math.min(candidate.length(),20_000)));
-        var result=new java.util.concurrent.atomic.AtomicReference<String>();
-        events.publish(runKey,"run.phase",Map.of("runKey",runKey,"phase","COMPOSING","message","正在核对检索结果"));
-        try{
-            runtime.run(new AgentRuntimeClient.RunRequest(runKey+"-review",session.getSessionKey(),
-                    List.of(new AgentRuntimeClient.Message("USER",question)),"review-only",null,null,false,review),event->{
-                if("runtime.completed".equals(event.type()))result.set(String.valueOf(event.data().get("finalResponse")));
-            });
-            if(result.get()==null)return null;
-            String response=result.get().strip().replaceFirst("^```(?:json)?\\s*","").replaceFirst("\\s*```$","");
-            var decision=json.readTree(response);
-            String kind=decision.path("resourceKind").asText("");
-            String verdict=decision.path("decision").asText();
-            if("RETRY".equals(verdict)&&Set.of("DOCUMENT","SKILL","ASDM-TOOL").contains(kind)){
-                log.info("event=agent.candidate_review runKey={} verdict=RETRY resourceKind={}",runKey,kind);
-                return kind;
-            }
-            if("ACCEPT".equals(verdict))log.info("event=agent.candidate_review runKey={} verdict=ACCEPT",runKey);
-            return null;
-        }catch(Exception failure){
-            log.warn("event=agent.candidate_review_unavailable runKey={} errorType={}",runKey,failure.getClass().getSimpleName());
-            return null;
-        }
-    }
+    @org.springframework.beans.factory.annotation.Autowired private AgentRetrievalDiscovery discovery;
 
-    private RetrievalPlanner.Plan retryPlan(RetrievalPlanner.Plan candidate,String kind,String question){
-        var roles=candidate.roles().stream().map(QueryEntityResolver.Mention::roleId).distinct().toList();
-        if(roles.size()!=1||candidate.tasks().size()>1)return null;
-        var prior=candidate.task();
-        String category=prior!=null&&prior.resourceKind().equals(kind)?prior.category():
-                "DOCUMENT".equals(kind)&&question.matches("(?s).*(?:上下文|项目背景|项目资料).*")?"PROJECT_CONTEXT":null;
-        return new RetrievalPlanner.Plan("SEMANTIC",new RetrievalPlanner.Task("t1",roles.get(0),kind,category),candidate.roles());
-    }
     private void handleRuntime(String runKey,AgentRuntimeClient.RuntimeEvent event){
         Map<String,Object> data=new LinkedHashMap<>(event.data());data.put("runKey",runKey);
         switch(event.type()){
@@ -243,15 +207,40 @@ public class AgentConversationService {
             default->{ }
         }
     }
+    private String resourceKey(RetrievalPlanner.Task task,Map<String,Object> item){
+        return task.resourceKind()+":"+item.get("id");
+    }
+
     private String withMixedCatalog(String runKey,String answer) {
         if(retrievalPlans==null)return answer;
-        var plan=retrievalPlans.find(runKey).filter(item->"MIXED".equals(item.strategy()));
+        var plan=retrievalPlans.find(runKey);
         if(plan.isEmpty())return answer;
         var run=runs.findByRunKey(runKey).orElseThrow();
         if(!"RUNNING".equals(run.getStatus()))return answer;
-        var task=plan.get().task();
-        var page=catalog(runKey,run.getSession().getOwnerUserId(),task.taskId(),0);
-        return renderCatalog(runKey,plan.get(),task,page)+"\n\n"+answer;
+        var sections=new ArrayList<String>();
+        var pages=new LinkedHashMap<RetrievalPlanner.Task,com.company.skillplatform.knowledge.application.StructuredCatalogService.Page>();
+        var sharedRoles=new LinkedHashMap<String,Set<String>>();
+        for(var task:plan.get().tasks()){
+            if(!plan.get().isCatalog(task))continue;
+            var page=catalog(runKey,run.getSession().getOwnerUserId(),task.taskId(),0);
+            retrievalMetrics.summary("agent.retrieval.catalog.size","route","DSH_DISCOVERY").record(page.total());
+            log.info("[Yanshu][AGENT] runKey={} taskKind={} catalogTotal={}",runKey,task.resourceKind(),page.total());
+            pages.put(task,page);
+            String role=plan.get().roleName(task).replaceAll("[\\r\\n\\[\\]]"," ");
+            for(var item:page.items())sharedRoles.computeIfAbsent(resourceKey(task,item),key->new LinkedHashSet<>()).add(role);
+        }
+        Set<String> shown=new HashSet<>();
+        pages.forEach((task,page)->{
+            var entries=page.items().stream().filter(item->shown.add(resourceKey(task,item))).toList();
+            var displayed=new com.company.skillplatform.knowledge.application.StructuredCatalogService.Page(
+                    page.total(),page.page(),page.pageSize(),entries);
+            String section=renderCatalog(runKey,plan.get(),task,displayed,sharedRoles);
+            if(entries.size()<page.items().size())section+="\n\n与前述角色共享的资料可在完整目录中查看。";
+            sections.add(section);
+        });
+        if(sections.isEmpty())return answer;
+        String catalog=String.join("\n\n",sections);
+        return "CATALOG".equals(plan.get().strategy())&&(sections.size()==1||answer.isBlank())?catalog:catalog+"\n\n"+answer;
     }
     @org.springframework.beans.factory.annotation.Autowired
     private org.springframework.transaction.support.TransactionTemplate completionTransaction;
@@ -265,6 +254,10 @@ public class AgentConversationService {
             messages.save(new AgentMessageEntity(run.getSession(),run,sequence,"ASSISTANT",answer,"COMPLETE"));
             return true;
         })))return;
+        if(discovery!=null&&discovery.discovering(runKey)&&discovery.roleRequired(runKey)){
+            retrievalMetrics.counter("agent.retrieval.unresolved","reason","ROLE_SCOPE_UNCONFIRMED").increment();
+            log.info("[Yanshu][AGENT] runKey={} clarificationReason=ROLE_SCOPE_UNCONFIRMED",runKey);
+        }
         recordRun(runKey,"SUCCESS",null);
         events.publish(runKey,"run.completed",Map.of("runKey",runKey,"message",answer));
     }

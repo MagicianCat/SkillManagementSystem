@@ -15,8 +15,11 @@ public class QueryEntityResolver {
     public List<Mention> resolve(long user,String scope,String query) {
         String text=normalize(query);
         List<Mention> candidates=new ArrayList<>();
-        for(var role:directory.mentions(user,scope,text)) {
+        var visible=directory.visibleNames(user,scope,null);
+        if(visible.size()>5000)return List.of();
+        for(var role:visible) {
             String term=normalize(role.term());
+            if(term.isBlank() || term.equals(normalize(role.externalId())) && !term.equals(normalize(role.name())))continue;
             String boundary=term.matches("[a-z0-9_.-]+")?"(?<![a-z0-9_.-])":"";
             String end=boundary.isEmpty()?"":"(?![a-z0-9_.-])";
             var matcher=Pattern.compile(boundary+Pattern.quote(term)+end).matcher(text);

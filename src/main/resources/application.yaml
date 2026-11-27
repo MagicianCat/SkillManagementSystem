@@ -87,6 +87,11 @@ logging:
     file: "%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z',UTC} %-5level [Yanshu][%X{module:-COMMON}] [%thread] %logger{36} - %msg%n"
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        agent.retrieval.route: true
+        agent.retrieval.role.lookup: true
   endpoints:
     web:
       exposure:
@@ -246,6 +251,8 @@ skill-platform:
   telemetry:
     encryption-key: ${SKILL_USAGE_ENCRYPTION_KEY:}
 agent:
+  retrieval:
+    v3-enabled: ${AGENT_RETRIEVAL_V3_ENABLED:false}
   intent:
     endpoint: ${DECISION_MODEL_BASE_URL:https://tai.taikang.com}
     api-key: ${DECISION_MODEL_API_KEY:}

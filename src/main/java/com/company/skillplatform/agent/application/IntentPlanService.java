@@ -107,7 +107,7 @@ public class IntentPlanService {
     public Map<String,Object> load(String runKey) {
         var rows=jdbc.query("select status,intents_json,constraints_json,allowed_artifacts_json,allowed_capabilities_json,registry_snapshot_json,schema_version,retrieval_plan_json from agent_run_intent_plan where run_key=?",(rs,n)->{
             try {
-                if(rs.getInt(7)==2)return json.readValue(rs.getString(8),new com.fasterxml.jackson.core.type.TypeReference<Map<String,Object>>(){});
+                if(rs.getInt(7)>=2)return json.readValue(rs.getString(8),new com.fasterxml.jackson.core.type.TypeReference<Map<String,Object>>(){});
                 Set<String> intents=new LinkedHashSet<>(json.readValue(rs.getString(2),new com.fasterxml.jackson.core.type.TypeReference<List<String>>(){}));
                 Set<String> constraints=new LinkedHashSet<>(json.readValue(rs.getString(3),new com.fasterxml.jackson.core.type.TypeReference<List<String>>(){}));
                 List<String> artifacts=json.readValue(rs.getString(4),new com.fasterxml.jackson.core.type.TypeReference<>(){});

@@ -63,6 +63,10 @@ public class AgentMcpConfiguration {
     private final com.company.skillplatform.agentworkflow.application.WorkflowSseService workflowSse;
     private final RestClient workflowGateway;
     private final String workflowServiceToken;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.company.skillplatform.agent.application.AgentRetrievalDiscovery discovery;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.company.skillplatform.agent.application.IntentPlanService intentPlans;
     private final KnowledgeSearchService knowledge;
     @org.springframework.beans.factory.annotation.Autowired
     private com.company.skillplatform.agent.application.RetrievalScopeGuard retrievalGuard;
@@ -98,7 +102,7 @@ public class AgentMcpConfiguration {
                 .contextExtractor(req -> io.modelcontextprotocol.common.McpTransportContext.create(Map.of("request", req)))
                 .maxRequestSize(256 * 1024).build();
         McpSyncServer server = McpServer.sync(transport).serverInfo("skill-platform", "1.0")
-                .instructions("Search authorized platform knowledge first for Skill and non-Skill questions. Matched Wiki results contain a bounded directory of visible descendants; inspect childDocuments before answering from a parent Wiki, and read relevant children with get_wiki_document. If the user asks to download an ASDM tool package, search the platform Wiki for that tool, read its Markdown with get_wiki_document, and include the exact /asdm-tools/download/{assetId} Markdown link from the document in the answer. Do not invent an asset ID or link. For external role context, resolve_external_roles first and use the confirmed internal IDs in search_knowledge. Prefer PROJECT_CONTEXT. Use STRICT when explicitly limited to a role. Ask for clarification on ambiguity. Cite only role-matched Wiki as role evidence and label GENERAL_FALLBACK as general knowledge. For STRICT with no evidence, report the empty result or pending synchronization. Use Feishu or unfiltered Wiki as general fallback only for unrestricted requests or after user approval. Wiki results include sourceUrl and downloadUrl for citations; Feishu sources need only their document URL. Submit structured recommendations when recommending Skills.")
+                .instructions("Use the current run's retrieval policy. On schema 3, read get_retrieval_plan; resolve external roles, use the resolutionId to confirm tasks with propose_retrieval_tasks, then retrieve using the returned taskId. On legacy plans preserve the confirmed scope. Cite readable titles and actual links. Never invent links or widen an authorized scope.")
                 .tools(tool("get_current_user_context", "Get the current user's visible teams before recommending skills.",
                         schema("object", List.of()), this::currentUserContext),
                         tool("search_skills", "Search published skills by development stage, platform and OS.",
@@ -122,9 +126,13 @@ public class AgentMcpConfiguration {
                                 new McpSchema.JsonSchema("object",Map.of("taskId",Map.of("type","string"),"page",Map.of("type","integer","minimum",0),
                                         "pageSize",Map.of("type","integer","minimum",1,"maximum",50),"keyword",Map.of("type","string","maxLength",200)),
                                         List.of(),false,Map.of(),Map.of()),this::listKnowledgeCatalog),
-                        tool("resolve_external_roles", "Resolve an external role among Wiki visible to this run. Use only confirmed IDs for role search. Ask the user to disambiguate non-exact matches.",
+                        tool("propose_retrieval_tasks","Confirm discovery tasks before retrieval. Supply revision and tasks with taskId, roleId, resolutionId, resourceKind, category, strategy and verbatim roleEvidence, actionEvidence, categoryEvidence; stage for RECOMMEND.",
+                                retrievalProposalSchema(), this::proposeRetrievalTasks),
+                        tool("resolve_external_roles", "Find visible external roles by exact or fuzzy name. In discovery, use the returned resolutionId and only auto-confirm an entry marked canAutoConfirm.",
                                 new McpSchema.JsonSchema("object",Map.of("name",Map.of("type","string"),
-                                        "sourceSystem",Map.of("type","string"),"limit",Map.of("type","integer","maximum",10)),
+                                        "sourceSystem",Map.of("type","string"),"limit",Map.of("type","integer","maximum",10),
+                                        "queryContext",Map.of("type","string"),"matchMode",Map.of("type","string","enum",List.of("EXACT_ONLY","EXACT_OR_FUZZY")),
+                                        "resourceHint",Map.of("type","string")),
                                         List.of("name"),false,Map.of(),Map.of()), this::resolveExternalRoles),
                         tool("search_knowledge", "Semantically search authorized Wiki snippets and linked Skills. Pass confirmed externalRoleIds with roleMode STRICT for explicit role limits or PREFER for role results with clearly labeled general fallback. Optional knowledgeCategory: SKILL_TOOL (Skill, ASDM tools, commands), PROJECT_CONTEXT (project background), INTERNAL_KNOWLEDGE (company knowledge), FDE_WIKI (FDE area), OTHER. Use PREFER for a confident single-topic hint; it falls back across categories. Use STRICT only when the user explicitly asks to limit the category. Omit the category for mixed or uncertain questions. Category never grants access. Cite the actual Wiki title and sourceUrl. Results include sourceUrl, downloadUrl, childDocuments and childrenTruncated, plus asdmToolDownloadUrl when present.",
                                 knowledgeSearchSchema(), this::searchKnowledge),
@@ -156,6 +164,26 @@ public class AgentMcpConfiguration {
             McpSchema.JsonSchema schema, java.util.function.BiFunction<io.modelcontextprotocol.server.McpSyncServerExchange, Map<String,Object>, McpSchema.CallToolResult> fn) {
         return new io.modelcontextprotocol.server.McpServerFeatures.SyncToolSpecification(
                 McpSchema.Tool.builder().name(name).description(description).inputSchema(schema).build(), fn);
+    }
+    private McpSchema.JsonSchema retrievalProposalSchema() {
+        Map<String,Object> task = new LinkedHashMap<>(Map.of(
+                "taskId", Map.of("type", "string", "pattern", "^t[1-4]$"),
+                "roleId", Map.of("type", "integer", "minimum", 0),
+                "resolutionId", Map.of("type", "string"),
+                "resourceKind", Map.of("type", "string", "enum", List.of("DOCUMENT","SKILL","ASDM-TOOL","RECOMMEND","CATEGORY","CATEGORY_PREFER","SKILL_READ")),
+                "category", Map.of("type", "string", "enum", List.of("PROJECT_CONTEXT","SKILL_TOOL","INTERNAL_KNOWLEDGE","FDE_WIKI","OTHER")),
+                "strategy", Map.of("type", "string", "enum", List.of("CATALOG","SEMANTIC")),
+                "roleEvidence", Map.of("type", "string", "description", "Verbatim quoted role name from the current user message"),
+                "actionEvidence", Map.of("type", "string", "description", "Verbatim action phrase outside the role name"),
+                "categoryEvidence", Map.of("type", "string", "description", "Verbatim topic phrase outside the role name"),
+                "stage", Map.of("type", "string", "enum", Arrays.stream(DevelopmentStage.values()).map(Enum::name).toList())));
+        task.put("referenceId", Map.of("type","integer","minimum",1,"description","Server evidence ID from the previous turn trustedReferences"));
+        return new McpSchema.JsonSchema("object", Map.of(
+                "revision", Map.of("type", "integer", "minimum", 1),
+                "tasks", Map.of("type", "array", "minItems", 1, "maxItems", 4,
+                        "items", Map.of("type", "object", "properties", task, "additionalProperties", false,
+                                "required", List.of("taskId","resourceKind","strategy","actionEvidence")))),
+                List.of("revision","tasks"), false, Map.of(), Map.of());
     }
     private McpSchema.JsonSchema schema(String type, List<String> required) {
         Map<String,Object> props = new LinkedHashMap<>();
@@ -274,6 +302,14 @@ public class AgentMcpConfiguration {
     }
     private McpSchema.CallToolResult getRetrievalPlan(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args) {
         var agent=run(ex,"retrieval.plan.read");
+        var trusted=intentPlans.load(agent.runRef());
+        if(trusted!=null&&Integer.valueOf(3).equals(trusted.get("schemaVersion"))){
+            var view=new LinkedHashMap<>(trusted);
+            view.remove("proposalIdentity");
+            view.put("revision",retrievalPlans.revision(agent.runRef()));
+            if(discovery.discovering(agent.runRef()))view.put("trustedReferences",discovery.history(agent));
+            return ok(view);
+        }
         var plan=retrievalPlans.find(agent.runRef()).orElseThrow();
         return ok(Map.of("strategy",plan.strategy(),"tasks",plan.tasks(),"roles",plan.roles(),
                 "revision",retrievalPlans.revision(agent.runRef())));
@@ -288,17 +324,29 @@ public class AgentMcpConfiguration {
     private McpSchema.CallToolResult listKnowledgeCatalog(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args) {
         var agent=run(ex,"knowledge.catalog.list");
         var task=retrievalGuard.task(agent,"knowledge.catalog.list",str(args,"taskId"));
+        if(task==null||task.objectId()!=null||task.strategy()!=null&&!"CATALOG".equals(task.strategy()))throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
         var page=structuredCatalog.list(agent.userId(),agent.knowledgeScope(),task.roleId(),task.resourceKind(),
                 task.category(),integer(args,"page",0),integer(args,"pageSize",30),str(args,"keyword"),null);
         retrievalPlans.record(agent.runRef(),task,page);
         return ok(page);
     }
 
-    private McpSchema.CallToolResult resolveExternalRoles(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args) {
-        var agent=run(ex,"knowledge.search");
+    private McpSchema.CallToolResult proposeRetrievalTasks(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args){
+        var agent=run(ex,"retrieval.task.propose");
         requireRoleSearchScope(agent);
-        return ok(externalRoles.lookup(agent.userId(),agent.knowledgeScope(),required(args,"name"),
-                str(args,"sourceSystem"),integer(args,"limit",10)));
+        List<com.company.skillplatform.agent.application.AgentRetrievalDiscovery.Proposal> proposals=
+                objectMapper.convertValue(args.get("tasks"),new TypeReference<>() {});
+        var confirmed = new LinkedHashMap<>(discovery.confirm(agent,integer(args,"revision",0),proposals));
+        confirmed.remove("proposalIdentity");
+        return ok(confirmed);
+    }
+
+    private McpSchema.CallToolResult resolveExternalRoles(io.modelcontextprotocol.server.McpSyncServerExchange ex,Map<String,Object> args) {
+        var agent=run(ex,"role.resolve","knowledge.search");
+        requireRoleSearchScope(agent);
+        if(!discovery.discovering(agent.runRef()))return ok(externalRoles.lookup(agent.userId(),agent.knowledgeScope(),required(args,"name"),str(args,"sourceSystem"),integer(args,"limit",10)));
+        return ok(discovery.search(agent,required(args,"name"),str(args,"sourceSystem"),str(args,"matchMode"),integer(args,"limit",10)));
+
     }
 
     private void requireRoleSearchScope(AgentRun run) {
@@ -321,9 +369,13 @@ public class AgentMcpConfiguration {
         var agent=run(ex,"knowledge.search");String query=required(args,"query");String stage=str(args,"developmentStage");if(stage!=null)DevelopmentStage.valueOf(stage);
         List<Long> ids=roleIds(args);
         String roleMode=str(args,"roleMode");
-        if(ids!=null||roleMode!=null)requireRoleSearchScope(agent);
+        if(ids!=null||roleMode!=null){
+            requireRoleSearchScope(agent);
+            if(discovery!=null&&discovery.discovering(agent.runRef()))throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
+        }
         var task=retrievalGuard==null?null:retrievalGuard.task(agent,"knowledge.search",str(args,"taskId"));
         if(task!=null){
+            if(task.objectId()!=null)throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
             if(task.roleId()>0){
                 if(!"DOCUMENT".equals(task.resourceKind())||(ids!=null&&!ids.equals(List.of(task.roleId())))
                         ||(roleMode!=null&&!"STRICT".equals(roleMode)))throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
@@ -370,6 +422,8 @@ public class AgentMcpConfiguration {
         var agent = run(ex, "skill.detail"); String key = required(args,"skillKey"); var view = skills.get(key); var task=retrievalGuard==null?null:retrievalGuard.task(agent,"skill.detail",str(args,"taskId"));
         requireScopedSkill(task,view.id(),view.developmentStage());
         String content = readText(key, "skill.md", integer(args,"offset",0), bounded(args),scopedVersion(task,optionalLong(args,"versionId")));
+        if(task!=null&&task.roleId()>0&&task.objectId()!=null&&task.versionId()!=null)
+            retrievalPlans.recordSkillRead(agent.runRef(),task,view.displayName());
         var docs = "PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ? List.of() : task!=null?List.of():wiki.search(agent.userId(), null, key, null, PageRequest.of(0, 20)).items().stream().map(this::linkedWiki).toList();
         String platform = normalizePlatform(str(args,"platform")), osType = normalizeOs(str(args,"osType"));
         return ok(Map.of("skill", view, "target", target(platform, osType), "detailPath", detailPath(key, platform, osType), "file", "skill.md", "content", content, "offset", integer(args,"offset",0), "hasMore", content.length() >= bounded(args), "wikiDocuments", docs));
@@ -381,7 +435,7 @@ public class AgentMcpConfiguration {
         if (agent.sessionKey() != null) return ok(Map.of("items", documentAgents.searchSelectedWiki(agent.sessionKey(), agent.runRef(), str(args,"keyword")), "page", 0, "size", 10));
         var task=retrievalGuard==null?null:retrievalGuard.task(agent,"wiki.search",str(args,"taskId"));
         if(task!=null){
-            if(!"DOCUMENT".equals(task.resourceKind())||args.get("teamId")!=null||args.get("skillKey")!=null)
+            if(task.objectId()!=null||!"DOCUMENT".equals(task.resourceKind())||args.get("teamId")!=null||args.get("skillKey")!=null)
                 throw new org.springframework.security.access.AccessDeniedException("RETRIEVAL_SCOPE_CONFLICT");
             return scopedCatalog(agent,task,args,null);
         }
@@ -396,6 +450,7 @@ public class AgentMcpConfiguration {
         String mode=str(args,"roleMode");
         if(ids!=null||mode!=null){
             requireRoleSearchScope(agent);
+            if(discovery!=null&&discovery.discovering(agent.runRef()))throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
             KnowledgeSearchService.validateRoleOptions(ids,mode);
             if(mode!=null&&!"STRICT".equals(mode))throw new IllegalArgumentException("Wiki reads require STRICT role mode");
 
@@ -409,11 +464,14 @@ public class AgentMcpConfiguration {
             ids=List.of(task.roleId());
         }
         if(task==null)requireUserKnowledge(agent);
+        if(task!=null&&task.objectId()!=null&&
+                (task.objectId()!=id||str(args,"audience")!=null&&!Objects.equals(task.audience(),str(args,"audience"))))
+            throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
         if("PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope())&&"TEAM".equals(str(args,"audience")))
             throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
-        boolean platformAudience=task!=null&&"ASDM-TOOL".equals(task.resourceKind())||"PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ||"PLATFORM".equals(str(args,"audience"));var document = wiki.get(id, agent.userId(),platformAudience); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
+        boolean platformAudience=task!=null&&("ASDM-TOOL".equals(task.resourceKind())||"PLATFORM".equals(task.audience()))||"PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope()) ||"PLATFORM".equals(str(args,"audience"));var document = wiki.get(id, agent.userId(),platformAudience); String text = document.markdownContent(); String content = offset >= text.length() ? "" : text.substring(offset, Math.min(text.length(), offset + max));
         Map<String,Object> response=new LinkedHashMap<>(Map.of("documentId", id, "title", document.title(), "skills", document.skills(), "content", content, "offset", offset, "hasMore", offset + content.length() < text.length()));
-        Long requestedVersion=optionalLong(args,"versionId");
+        Long requestedVersion=scopedVersion(task,optionalLong(args,"versionId"));
         if(requestedVersion!=null){
             String sql=platformAudience?
                     "SELECT approved_revision_id FROM wiki_platform_snapshot WHERE document_id=?":
@@ -437,6 +495,11 @@ public class AgentMcpConfiguration {
                 throw new org.springframework.security.access.AccessDeniedException("Wiki does not match the selected external roles");
             response.putAll(metadata.toPayload());
         }
+        if(task!=null&&task.roleId()>0&&"DOCUMENT".equals(task.resourceKind())){
+            var version=jdbc.queryForObject("SELECT id FROM wiki_document_revision WHERE document_id=? AND revision_no=?",
+                    Long.class,id,document.revisionNo());
+            retrievalPlans.recordWikiRead(agent.runRef(),task,id,version,platformAudience?"PLATFORM":"TEAM",document.title());
+        }
         response.putAll(wikiLinks(id,platformAudience));if(task==null)addWikiDirectory(response,id,agent.userId(),platformAudience,3,20,ids);return ok(response);
     }
     private McpSchema.CallToolResult wikiChildren(io.modelcontextprotocol.server.McpSyncServerExchange ex, Map<String,Object> args) {
@@ -444,7 +507,7 @@ public class AgentMcpConfiguration {
         long id = longRequired(args, "documentId");
         var task=retrievalGuard==null?null:retrievalGuard.task(agent,"wiki.read",str(args,"taskId"));
         if(task!=null){
-            if(task.roleId()==0)throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
+            if(task.roleId()==0||task.objectId()!=null)throw com.company.skillplatform.agent.application.RetrievalScopeGuard.denied();
             boolean platform="PLATFORM_PUBLIC_ONLY".equals(agent.knowledgeScope())||"PLATFORM".equals(str(args,"audience"));
             var parent=wiki.get(id,agent.userId(),platform);
             retrievalGuard.requireWiki(task,wikiRoles.resolve(id),parent.knowledgeCategory());
@@ -665,7 +728,14 @@ public class AgentMcpConfiguration {
         if(existing.isEmpty()){var persistent=persistentRuns.findByRunKey(run.runRef()).orElse(null);recommendations.save(new AgentRecommendationEntity(run.runRef(),persistent,summary,status,payload));events.publish(run.runRef(),"recommendation.completed",new LinkedHashMap<>(result));}
         return ok(result);
     }
-    private com.company.skillplatform.agent.domain.AgentRun run(io.modelcontextprotocol.server.McpSyncServerExchange ex, String capability) { HttpServletRequest req=(HttpServletRequest)ex.transportContext().get("request"); String h=req==null?null:req.getHeader("Authorization"); if(h==null||!h.startsWith("Bearer ")) throw new IllegalArgumentException("agent token required"); var run=runs.require(h.substring(7)); runs.requireCapability(run, capability); if(retrievalGuard!=null)retrievalGuard.authorize(run,capability); var authorities=new java.util.ArrayList<org.springframework.security.core.authority.SimpleGrantedAuthority>(); authorities.add(new org.springframework.security.core.authority.SimpleGrantedAuthority("skill:browse")); authorities.add(new org.springframework.security.core.authority.SimpleGrantedAuthority("agent:mcp")); if("PLATFORM_PUBLIC_ONLY".equals(run.knowledgeScope())) authorities.add(new org.springframework.security.core.authority.SimpleGrantedAuthority("agent:platform-public")); var auth=new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(run.userId(), null, authorities); org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(auth); return run; }
+    private com.company.skillplatform.agent.domain.AgentRun run(io.modelcontextprotocol.server.McpSyncServerExchange ex, String capability, String... fallback) { HttpServletRequest req=(HttpServletRequest)ex.transportContext().get("request"); String h=req==null?null:req.getHeader("Authorization"); if(h==null||!h.startsWith("Bearer ")) throw new IllegalArgumentException("agent token required"); var run=runs.require(h.substring(7)); if(fallback.length>0){
+            requireRoleSearchScope(run);
+            var stored=intentPlans.load(run.runRef());
+            if(stored==null||!Integer.valueOf(3).equals(stored.get("schemaVersion"))){
+                runs.requireCapability(run,fallback[0]);
+            }else runs.requireCapability(run,capability);
+        }else runs.requireCapability(run, capability);
+        if(retrievalGuard!=null)retrievalGuard.authorize(run,capability); var authorities=new java.util.ArrayList<org.springframework.security.core.authority.SimpleGrantedAuthority>(); authorities.add(new org.springframework.security.core.authority.SimpleGrantedAuthority("skill:browse")); authorities.add(new org.springframework.security.core.authority.SimpleGrantedAuthority("agent:mcp")); if("PLATFORM_PUBLIC_ONLY".equals(run.knowledgeScope())) authorities.add(new org.springframework.security.core.authority.SimpleGrantedAuthority("agent:platform-public")); var auth=new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(run.userId(), null, authorities); org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(auth); return run; }
     private void requireUserKnowledge(com.company.skillplatform.agent.domain.AgentRun run) { if("PLATFORM_PUBLIC_ONLY".equals(run.knowledgeScope())) throw new org.springframework.security.access.AccessDeniedException("This Agent session is restricted to public platform knowledge"); }
     private String readText(String key,String path,int offset,int max,Long versionId) {
         var view=skills.get(key);
