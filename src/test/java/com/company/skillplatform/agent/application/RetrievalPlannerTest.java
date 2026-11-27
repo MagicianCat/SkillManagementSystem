@@ -7,6 +7,17 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class RetrievalPlannerTest {
+    @Test void roleOverviewIncludesAllResourceKinds() {
+        assertThat(RetrievalPlanner.roleCatalogTasks(26, "@")).isEmpty();
+        var explicit = RetrievalPlanner.roleCatalogTasks(26, "@的工具和上下文、技能");
+        assertThat(explicit).extracting(RetrievalPlanner.Task::resourceKind)
+                .containsExactly("DOCUMENT", "ASDM-TOOL", "SKILL");
+        assertThat(explicit).extracting(RetrievalPlanner.Task::strategy).containsOnly("CATALOG");
+        assertThat(explicit.get(0).category()).isEqualTo("PROJECT_CONTEXT");
+        assertThat(RetrievalPlanner.roleCatalogTasks(26, "@的工具和上下文")).isEmpty();
+        assertThat(RetrievalPlanner.roleCatalogTasks(26, "@的工具和上下文、技能，不要列技能")).isEmpty();
+    }
+
     @Test void fastCatalogMasksRoleNameAndDefersAnalysis() {
         var resolver = mock(QueryEntityResolver.class);
         var planner = new RetrievalPlanner(resolver, mock(RetrievalPlanStore.class), true);

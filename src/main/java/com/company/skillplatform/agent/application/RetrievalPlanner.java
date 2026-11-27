@@ -34,12 +34,37 @@ public class RetrievalPlanner {
         String matched=text.substring(role.start(),role.end());
         if(matched.codePointCount(0,matched.length())<3)return Optional.empty();
         String grammar=text.substring(0,role.start())+"@"+text.substring(role.end());
+        var all=roleCatalogTasks(role.roleId(),grammar);
+        if(!all.isEmpty())return Optional.of(new Plan("CATALOG",all.get(0),matches,all));
         var action=Pattern.compile("^(?:请|帮我)?\\s*(?:查一下|查询|查找|找一下|找|列出|获取|查看)?\\s*@\\s*(?:的)?\\s*(项目上下文|上下文|项目背景|全部\\s*skill|所有\\s*skill|skill\\s*清单|asdm\\s*工具包)[。？?！!]*$").matcher(grammar);
         if(!action.matches())return Optional.empty();
         String object=action.group(1);
         String kind=object.contains("asdm")?"ASDM-TOOL":object.contains("skill")?"SKILL":"DOCUMENT";
         return Optional.of(new Plan("CATALOG",new Task("t1",role.roleId(),kind,
                 "DOCUMENT".equals(kind)?"PROJECT_CONTEXT":null),matches));
+    }
+
+    static List<Task> roleCatalogTasks(long roleId,String maskedQuestion){
+        String text=QueryEntityResolver.normalize(maskedQuestion).replaceFirst("[。.!?]+$","").strip();
+        var request=Pattern.compile("^(?:(?:请|帮我)\\s*)?(?:(?:查一下|查询|查找|找一下|找|列出|获取|查看)\\s*)?@\\s*(?:的)?\\s*(.*)$").matcher(text);
+        if(!request.matches())return List.of();
+        String resources=request.group(1).strip();
+        if(resources.isEmpty())return List.of();
+        String category=null;
+        if(!resources.matches("(?:全部|所有)(?:的)?(?:资源|资料|东西)")){
+            var types=new HashSet<String>();
+            for(String term:resources.split("\\s*(?:、|,|和|及|以及|与|/|\\+)\\s*",-1)){
+                if(term.matches("(?:asdm\\s*)?工具(?:包)?"))types.add("tool");
+                else if(term.matches("项目上下文|上下文|项目背景")){types.add("wiki");category="PROJECT_CONTEXT";}
+                else if(term.matches("wiki(?:\\s*文档)?|文档"))types.add("wiki");
+                else if(term.matches("skills?|技能"))types.add("skill");
+                else return List.of();
+            }
+            if(types.size()!=3)return List.of();
+        }
+        return List.of(new Task("t1",roleId,"DOCUMENT",category,null,null,null,null,"CATALOG"),
+                new Task("t2",roleId,"ASDM-TOOL",null,null,null,null,null,"CATALOG"),
+                new Task("t3",roleId,"SKILL",null,null,null,null,null,"CATALOG"));
     }
 
     public Optional<Plan> plan(String runKey,long user,String scope,String query) {

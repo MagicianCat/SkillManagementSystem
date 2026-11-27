@@ -66,6 +66,98 @@ public class AgentRetrievalDiscovery {
                 ref.objectId(),ref.versionId(),ref.audience());
     }
 
+    public Optional<String> bareRoleOptions(String runKey,long user,String scope,String question) {
+        String name=bareName(question);
+        if(name.length()<2||name.length()>255)return Optional.empty();
+        var snapshots=db.query("""
+                SELECT normalized_query,requested_source,result_json FROM agent_run_role_resolution
+                WHERE run_key=? AND actor_id=? AND knowledge_scope=? AND expires_at>NOW(3) ORDER BY id DESC
+                """,(rs,row)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3)},runKey,user,scope);
+        for(var snapshot:snapshots){
+            if(snapshot[1]!=null||!bareName(snapshot[0]).equals(name))continue;
+            var match=read(snapshot[2],RoleNameMatcher.Result.class);
+            var selected=match.candidates().stream().filter(RoleNameMatcher.Candidate::canAutoConfirm).findFirst();
+            if(selected.isEmpty())continue;
+            var current=roles.match(user,scope,null,snapshot[0],5,false).candidates().stream()
+                    .filter(c->c.canAutoConfirm()&&c.id()==selected.get().id()).findFirst();
+            if(current.isEmpty())continue;
+            var role=current.get();
+            var options=new ArrayList<String>();
+            for(String kind:List.of("DOCUMENT","ASDM-TOOL","SKILL")){
+                if(catalogs.list(user,scope,role.id(),kind,null,0,1).total()>0)options.add(kind);
+            }
+            String display=role.name().replaceAll("[\\r\\n\\[\\]]"," ");
+            if(options.isEmpty())return Optional.of("已找到「"+display+"」，当前没有可查看的资料。");
+            var offer=new RoleCatalogOffer(snapshot[0],role.id(),options);
+            db.update("""
+                    UPDATE agent_run_intent_plan SET retrieval_plan_json=JSON_SET(retrieval_plan_json,'$.roleCatalogOffer',CAST(? AS JSON))
+                    WHERE run_key=? AND schema_version=3 AND status='EXPLORE'
+                    """,store.encode(offer),runKey);
+            var text=new StringBuilder("已找到「").append(display).append("」。你想查看哪类资料？\n\n");
+            for(int index=0;index<options.size();index++)
+                text.append(index+1).append(". ").append(optionLabel(options.get(index))).append('\n');
+            return Optional.of(text.append("\n你也可以回复「全给我」查看全部可见资料。").toString());
+        }
+        return Optional.empty();
+    }
+
+    public Optional<RetrievalPlanner.Plan> selectRoleOption(String runKey,long user,String scope,String question) {
+        String choice=bareName(question);
+        String kind=switch(choice){
+            case "文档","wiki","wiki 文档","wiki文档","上下文","项目上下文" -> "DOCUMENT";
+            case "工具","工具包","asdm","asdm 工具","asdm工具","asdm 工具包","asdm工具包" -> "ASDM-TOOL";
+            case "skill","skills","技能","已发布 skill" -> "SKILL";
+            default -> null;
+        };
+        boolean all=Set.of("全给我","全部","都给我","全都给我","全部给我","以上全部").contains(choice);
+        if(!all&&kind==null&&!choice.matches("[1-3]"))return Optional.empty();
+        var offers=db.query("""
+                SELECT JSON_EXTRACT(p.retrieval_plan_json,'$.roleCatalogOffer')
+                FROM agent_run current_run
+                JOIN agent_run prev ON prev.session_id=current_run.session_id AND prev.run_no=current_run.run_no-1
+                JOIN agent_run_intent_plan p ON p.run_key=prev.run_key
+                WHERE current_run.run_key=? AND prev.status='SUCCEEDED'
+                  AND JSON_EXTRACT(p.retrieval_plan_json,'$.roleCatalogOffer') IS NOT NULL
+                """,(rs,row)->rs.getString(1),runKey);
+        if(offers.isEmpty())return Optional.empty();
+        var offer=read(offers.get(0),RoleCatalogOffer.class);
+        if(!all&&kind==null){
+            int index=Integer.parseInt(choice)-1;
+            if(index>=offer.options().size())return Optional.empty();
+            kind=offer.options().get(index);
+        }
+        if(!all&&!offer.options().contains(kind))return Optional.empty();
+        var current=roles.match(user,scope,null,offer.query(),5,false).candidates().stream()
+                .filter(c->c.canAutoConfirm()&&c.id()==offer.roleId()).findFirst();
+        if(current.isEmpty())return Optional.empty();
+        var role=current.get();
+        String category=choice.contains("上下文")?"PROJECT_CONTEXT":null;
+        var tasks=new ArrayList<RetrievalPlanner.Task>();
+        if(all){
+            for(String available:List.of("DOCUMENT","ASDM-TOOL","SKILL")){
+                if(catalogs.list(user,scope,role.id(),available,null,0,1).total()>0)
+                    tasks.add(new RetrievalPlanner.Task("t"+(tasks.size()+1),role.id(),available,null));
+            }
+        }else tasks.add(new RetrievalPlanner.Task("t1",role.id(),kind,category));
+        if(tasks.isEmpty())return Optional.empty();
+        return Optional.of(new RetrievalPlanner.Plan("CATALOG",tasks.get(0),
+                List.of(new QueryEntityResolver.Mention(role.id(),role.name(),role.sourceSystem(),0,0)),tasks));
+    }
+
+    private String bareName(String question){
+        return RoleNameMatcher.normalize(question).replaceFirst("[。.!?]+$","").strip();
+    }
+
+    private String optionLabel(String kind){
+        return switch(kind){
+            case "DOCUMENT" -> "Wiki 文档";
+            case "ASDM-TOOL" -> "ASDM 工具包";
+            default -> "已发布 Skill";
+        };
+    }
+
+    private record RoleCatalogOffer(String query,long roleId,List<String> options){}
+
     public boolean discovering(String runKey){
         return runKey!=null&&Boolean.TRUE.equals(db.queryForObject("""
                 SELECT EXISTS(SELECT 1 FROM agent_run_intent_plan WHERE run_key=? AND schema_version=3 AND status='EXPLORE')
@@ -120,9 +212,20 @@ public class AgentRetrievalDiscovery {
         boolean catalog=true;
         for(var p:proposals){
             if(p==null||p.resourceKind()==null||p.strategy()==null||p.taskId()==null||!p.taskId().matches("t[1-4]")||!ids.add(p.taskId())||
-                    !Set.of("DOCUMENT","SKILL","ASDM-TOOL","RECOMMEND","CATEGORY","CATEGORY_PREFER","SKILL_READ").contains(p.resourceKind())||
+                    !Set.of("DOCUMENT","SKILL","ASDM-TOOL","RECOMMEND","CATEGORY","CATEGORY_PREFER","SKILL_READ","ROLE_CATALOG").contains(p.resourceKind())||
                     !Set.of("CATALOG","SEMANTIC").contains(p.strategy())||!literal(question,p.actionEvidence()))
                 throw RetrievalScopeGuard.denied();
+            if("ROLE_CATALOG".equals(p.resourceKind())){
+                if(proposals.size()!=1||p.roleId()<=0||p.stage()!=null||p.category()!=null||p.referenceId()!=null
+                        ||!"CATALOG".equals(p.strategy()))throw RetrievalScopeGuard.denied();
+                var role=candidate(run,p,question);
+                int start=question.indexOf(p.roleEvidence());
+                String masked=question.substring(0,start)+"@"+question.substring(start+p.roleEvidence().length());
+                tasks.addAll(RetrievalPlanner.roleCatalogTasks(role.id(),masked));
+                if(tasks.isEmpty())throw RetrievalScopeGuard.denied();
+                mentions.add(new QueryEntityResolver.Mention(role.id(),role.name(),role.sourceSystem(),0,0));
+                break;
+            }
             catalog &= "CATALOG".equals(p.strategy());
             String category=p.category();
             if(category!=null&&(!Set.of("PROJECT_CONTEXT","FDE_WIKI","INTERNAL_KNOWLEDGE","SKILL_TOOL","OTHER").contains(category)

@@ -107,7 +107,7 @@ public class AgentConversationService {
         String label=switch(task.resourceKind()){
             case "SKILL" -> "已发布 Skill";
             case "ASDM-TOOL" -> "ASDM 工具包";
-            default -> "项目上下文";
+            default -> "PROJECT_CONTEXT".equals(task.category())?"项目上下文":"Wiki 文档";
         };
         var text=new StringBuilder("## ").append(name).append(" · ").append(label).append("\n\n共 ").append(page.total()).append(" 项。\n\n");
         for(var item:page.items()){
@@ -135,16 +135,22 @@ public class AgentConversationService {
             if(retrievalPlanner!=null&&flexibleRetrievalEnabled&&"skill-advisor".equals(session.getProfileKey())){
                 phase="retrieval_plan";
                 long routeStarted=System.nanoTime();
-                var fast=retrievalPlanner.fastCatalog(owner,session.getKnowledgeScope(),current);
+                var fast=discovery.selectRoleOption(runKey,owner,session.getKnowledgeScope(),current)
+                        .or(()->retrievalPlanner.fastCatalog(owner,session.getKnowledgeScope(),current));
                 if(!isRunning(runKey))return;
                 if(fast.isPresent()){
                     var retrieval=fast.get();
-                    var task=retrieval.task();
                     retrievalPlans.save(runKey,retrieval);
-                    var page=catalog(runKey,owner,task.taskId(),0);
-                    observeRoute(runKey,"FAST_CATALOG",routeStarted,page.total());
-                    events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",page.total()));
-                    completeRun(runKey,renderCatalog(runKey,retrieval,task,page));
+                    if(retrieval.tasks().size()>1){
+                        observeRoute(runKey,"FAST_CATALOG",routeStarted,null);
+                        completeRun(runKey,withMixedCatalog(runKey,"","FAST_CATALOG"));
+                    }else{
+                        var task=retrieval.task();
+                        var page=catalog(runKey,owner,task.taskId(),0);
+                        observeRoute(runKey,"FAST_CATALOG",routeStarted,page.total());
+                        events.publish(runKey,"catalog.completed",Map.of("catalogId",task.taskId(),"total",page.total()));
+                        completeRun(runKey,renderCatalog(runKey,retrieval,task,page));
+                    }
                     return;
                 }
                 plan=discovery.begin(runKey,current,retrievalPlanner.mentionsRole(owner,session.getKnowledgeScope(),current));
@@ -200,18 +206,34 @@ public class AgentConversationService {
             case "tool.completed"->{Map<String,Object> safe=safeToolData(data);mcpAudits.completed(runKey,string(data.get("callId")),!Boolean.FALSE.equals(data.get("success")),string(data.get("errorCode")));events.publish(runKey,event.type(),safe);}
             case "tool.failed"->{Map<String,Object> safe=safeToolData(data);mcpAudits.completed(runKey,string(data.get("callId")),false,string(data.get("errorCode")));events.publish(runKey,event.type(),safe);}
             case "run.phase"->events.publish(runKey,"run.phase",safePhaseData(data));
-            case "runtime.completed"->completeRun(runKey,withMixedCatalog(runKey,String.valueOf(data.getOrDefault("finalResponse",""))));
+            case "runtime.completed"->completeRun(runKey,runtimeAnswer(runKey,String.valueOf(data.getOrDefault("finalResponse",""))));
             case "runtime.retrying"->events.publish(runKey,"run.retrying",Map.of("runKey",runKey,"attempt",data.getOrDefault("attempt",2),"message","模型未生成最终回答，正在重新整理已检索结果…"));
             case "runtime.failed"->{String code=runtimeFailureCode(data.get("code"));failRun(runKey,code,runtimeFailureMessage(code));}
             case "runtime.cancelled"->cancelRuntime(runKey);
             default->{ }
         }
     }
+    private String runtimeAnswer(String runKey,String answer){
+        if(discovery!=null&&discovery.discovering(runKey)){
+            var run=runs.findByRunKey(runKey).orElseThrow();
+            var session=run.getSession();
+            var question=messages.findByRunAndRole(run,"USER").map(AgentMessageEntity::getContent);
+            var options=question.flatMap(content->discovery.bareRoleOptions(runKey,session.getOwnerUserId(),
+                    session.getKnowledgeScope(),content));
+            if(options.isPresent())return options.get();
+        }
+        return withMixedCatalog(runKey,answer);
+    }
+
     private String resourceKey(RetrievalPlanner.Task task,Map<String,Object> item){
         return task.resourceKind()+":"+item.get("id");
     }
 
     private String withMixedCatalog(String runKey,String answer) {
+        return withMixedCatalog(runKey,answer,"DSH_DISCOVERY");
+    }
+
+    private String withMixedCatalog(String runKey,String answer,String route) {
         if(retrievalPlans==null)return answer;
         var plan=retrievalPlans.find(runKey);
         if(plan.isEmpty())return answer;
@@ -223,7 +245,7 @@ public class AgentConversationService {
         for(var task:plan.get().tasks()){
             if(!plan.get().isCatalog(task))continue;
             var page=catalog(runKey,run.getSession().getOwnerUserId(),task.taskId(),0);
-            retrievalMetrics.summary("agent.retrieval.catalog.size","route","DSH_DISCOVERY").record(page.total());
+            retrievalMetrics.summary("agent.retrieval.catalog.size","route",route).record(page.total());
             log.info("[Yanshu][AGENT] runKey={} taskKind={} catalogTotal={}",runKey,task.resourceKind(),page.total());
             pages.put(task,page);
             String role=plan.get().roleName(task).replaceAll("[\\r\\n\\[\\]]"," ");

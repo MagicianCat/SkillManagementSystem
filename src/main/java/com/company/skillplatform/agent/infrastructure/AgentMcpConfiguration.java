@@ -170,7 +170,7 @@ public class AgentMcpConfiguration {
                 "taskId", Map.of("type", "string", "pattern", "^t[1-4]$"),
                 "roleId", Map.of("type", "integer", "minimum", 0),
                 "resolutionId", Map.of("type", "string"),
-                "resourceKind", Map.of("type", "string", "enum", List.of("DOCUMENT","SKILL","ASDM-TOOL","RECOMMEND","CATEGORY","CATEGORY_PREFER","SKILL_READ")),
+                "resourceKind", Map.of("type", "string", "enum", List.of("DOCUMENT","SKILL","ASDM-TOOL","RECOMMEND","CATEGORY","CATEGORY_PREFER","SKILL_READ","ROLE_CATALOG")),
                 "category", Map.of("type", "string", "enum", List.of("PROJECT_CONTEXT","SKILL_TOOL","INTERNAL_KNOWLEDGE","FDE_WIKI","OTHER")),
                 "strategy", Map.of("type", "string", "enum", List.of("CATALOG","SEMANTIC")),
                 "roleEvidence", Map.of("type", "string", "description", "Verbatim quoted role name from the current user message"),
